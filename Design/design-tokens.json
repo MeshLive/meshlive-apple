@@ -1,0 +1,182 @@
+{
+  "source": "Monochrome dark theme (Android v8 direction): true black ground, white primary text, grey secondary, hairline dividers, white accent (primary button white with black text), red only for live/recording/destructive, a muted green only for connected. Android's v8 tokens will follow; align these values when they land, then run python3 Scripts/tokens.py. Dark only: light values equal dark.",
+  "colors": {
+    "ground": {
+      "android": "app_background",
+      "dark": "#000000",
+      "light": "#000000"
+    },
+    "panel": {
+      "android": "surface",
+      "dark": "#0D0D0D",
+      "light": "#0D0D0D"
+    },
+    "panelVariant": {
+      "android": "surface_variant",
+      "dark": "#1C1C1E",
+      "light": "#1C1C1E"
+    },
+    "outline": {
+      "android": "outline",
+      "dark": "#2C2C2E",
+      "light": "#2C2C2E"
+    },
+    "ink": {
+      "android": "text_primary",
+      "dark": "#FFFFFF",
+      "light": "#FFFFFF"
+    },
+    "dimInk": {
+      "android": "text_secondary",
+      "dark": "#8E8E93",
+      "light": "#8E8E93"
+    },
+    "accent": {
+      "android": "accent",
+      "dark": "#FFFFFF",
+      "light": "#FFFFFF"
+    },
+    "onAccent": {
+      "android": "on_accent",
+      "dark": "#000000",
+      "light": "#000000"
+    },
+    "connected": {
+      "android": "success",
+      "dark": "#5FA37E",
+      "light": "#5FA37E"
+    },
+    "red": {
+      "android": "danger",
+      "dark": "#E5484D",
+      "light": "#E5484D"
+    },
+    "recordRed": {
+      "android": "record_red",
+      "dark": "#E5484D",
+      "light": "#E5484D"
+    },
+    "callAccept": {
+      "android": "call_accept",
+      "dark": "#FFFFFF",
+      "light": "#FFFFFF"
+    },
+    "callEnd": {
+      "android": "call_end",
+      "dark": "#E5484D",
+      "light": "#E5484D"
+    },
+    "liveRed": {
+      "android": "live_red",
+      "dark": "#E5484D",
+      "light": "#E5484D"
+    },
+    "mismatchRed": {
+      "android": "mismatch_red",
+      "dark": "#D50000",
+      "light": "#D50000"
+    },
+    "overlayScrim": {
+      "android": "overlay_scrim",
+      "dark": "#B3000000",
+      "light": "#B3000000"
+    },
+    "overlayButton": {
+      "android": "overlay_button",
+      "dark": "#33FFFFFF",
+      "light": "#33FFFFFF"
+    },
+    "overlayButtonOn": {
+      "android": "overlay_button_on",
+      "dark": "#F2FFFFFF",
+      "light": "#F2FFFFFF"
+    },
+    "overlayText": {
+      "android": "overlay_text",
+      "dark": "#FFFFFFFF",
+      "light": "#FFFFFFFF"
+    },
+    "callGroundTop": {
+      "android": "call_ground_top",
+      "dark": "#FF000000",
+      "light": "#FF000000"
+    },
+    "callGroundBottom": {
+      "android": "call_ground_bottom",
+      "dark": "#FF000000",
+      "light": "#FF000000"
+    }
+  },
+  "type": {
+    "display": {
+      "android": "TextAppearance.App.Display",
+      "size": 30,
+      "weight": "bold",
+      "condensed": true
+    },
+    "headline": {
+      "android": "TextAppearance.App.Headline",
+      "size": 24,
+      "weight": "bold",
+      "condensed": true
+    },
+    "readout": {
+      "android": "TextAppearance.App.Readout",
+      "size": 20,
+      "weight": "bold",
+      "condensed": true,
+      "tabular": true
+    },
+    "title": {
+      "android": "TextAppearance.App.Title",
+      "size": 16,
+      "weight": "medium",
+      "condensed": false
+    },
+    "bodyLarge": {
+      "android": "TextAppearance.App.BodyLarge",
+      "size": 16,
+      "weight": "regular",
+      "condensed": false
+    },
+    "body": {
+      "android": "TextAppearance.App.Body",
+      "size": 14,
+      "weight": "regular",
+      "condensed": false
+    },
+    "section": {
+      "android": "TextAppearance.App.Section",
+      "size": 15,
+      "weight": "bold",
+      "condensed": true
+    },
+    "caption": {
+      "android": "12sp labels",
+      "size": 12,
+      "weight": "regular",
+      "condensed": false
+    }
+  },
+  "dimens": {
+    "screenGutter": 20,
+    "keyRadius": 6,
+    "touchMin": 48,
+    "actionRowMinHeight": 72,
+    "actionRowPaddingV": 8,
+    "actionRowTextInset": 16,
+    "actionIconBox": 48,
+    "rowDividerInset": 64,
+    "statusRowMinHeight": 32,
+    "statusIcon": 18,
+    "callButtonMinHeight": 64,
+    "callButtonIcon": 26,
+    "callButtonIconPadding": 12,
+    "roundControl": 60,
+    "acceptDecline": 76,
+    "watchIcon": 26,
+    "liveDot": 20,
+    "pttIcon": 22,
+    "pttRingStroke": 2
+  }
+}

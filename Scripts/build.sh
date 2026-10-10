@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+sdk="${1:-iphoneos}"
+if [[ "$sdk" != iphoneos && "$sdk" != iphonesimulator ]]; then echo "Use iphoneos or iphonesimulator" >&2; exit 2; fi
+if [[ ! -d Vendor/Opus.xcframework ]] && grep -q 'Opus.xcframework' NearbyIntercom.xcodeproj/project.pbxproj; then
+    echo 'Run bash Scripts/prepare-opus.sh first. For the explicitly labeled PCM diagnostic only, regenerate with python3 Scripts/project.py.' >&2
+    exit 1
+fi
+xcodebuild -project NearbyIntercom.xcodeproj -scheme NearbyIntercom -configuration Debug -sdk "$sdk" -destination "generic/platform=$([[ "$sdk" == iphoneos ]] && echo iOS || echo 'iOS Simulator')" -derivedDataPath .build/xcode $([[ "$sdk" == iphonesimulator ]] && echo "CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES" || echo "CODE_SIGNING_ALLOWED=NO") build

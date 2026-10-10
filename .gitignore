@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+Vendor/Opus.xcframework/
+Vendor/opus-source/
+.DS_Store
+Vendor/VPX.xcframework/
