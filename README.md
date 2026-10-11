@@ -32,7 +32,7 @@ independent security review. See [Status](#status) before you rely on it.
 
 - [Status](#status) | [Help wanted](#help-wanted-iphone-owners) | [Install](#install) | [Build from source](#build-from-source) |
   [What nearby phones can see](#what-nearby-phones-can-see) | [Interface](#interface) | [Layout](#layout) |
-  [Contributing and security](#contributing-and-security) | [License](#license)
+  [How this was built](#how-this-was-built) | [Contributing and security](#contributing-and-security) | [License](#license)
 
 ## Status
 
@@ -164,6 +164,25 @@ Every screen reads names through `PeerLabel`, following the naming review (R5). 
 | Call audio error correction (libopus in-band FEC) | Off | Settings › Advanced › "Call audio error correction (experimental)", Android `test_call_native_opus`: 10 % loss hint, constrained VBR, the frame before an arrived packet rebuilt with decode_fec |
 | Rotating discovery IDs, phase 1 | Off | Settings › Advanced › "Rotating discovery IDs (experimental)": call-ready presence advertises compact UUID v2 with a 15-minute role-0 RDI (P in the Keychain, RV4 clock, 1-8 s boundary silence), BDO1 openings with link hello bit 3, the RV15 caller check, pins, the RV8 tarpit and "Visible by your ID for 10 to 25 minutes". iOS cannot change the device name (RV1): the setting tells the user to rename the phone |
 | Video rate adaptation | On | `VideoRateController`: the encoder follows the delivered video rate, bounded by the requested bitrate. It was added after a measured GATT backlog |
+
+## How this was built
+
+Like the Android app, this iPhone app is built with heavy AI assistance: most of the code was written by Anthropic's
+Claude (through Claude Code), directed by the maintainer, who decides what the product should do, runs the tests and
+reviews the changes. [meshlive-android's AI-assisted development page](https://github.com/MeshLive/meshlive-android/blob/main/docs/AI_ASSISTED_DEVELOPMENT.md)
+describes the process and the rules the agents follow.
+
+- **Hardware testing is thin.** See [Status](#status): a handful of automated test calls on one iPhone and one Android
+  phone, plus byte-level test vectors checked against the Android app's own classes. That is why this repository
+  asks for iPhone testers rather than claiming compatibility.
+- **Not independently security-audited.** Neither the protocol nor this implementation has had a third-party review.
+  Do not rely on it where your safety depends on it.
+- **Measurements are real.** The device numbers MeshLive publishes ([benchmarks](https://github.com/MeshLive/meshlive-benchmarks))
+  come from real Android phone runs; none exist for iPhones yet.
+
+Found a problem? Use the [bug form](https://github.com/MeshLive/meshlive-ios/issues/new?template=bug_report.yml) or the
+[iPhone device test report](https://github.com/MeshLive/meshlive-ios/issues/new?template=device-report.yml). Security
+problems go through the private route in [SECURITY.md](SECURITY.md), never a public issue.
 
 ## Contributing and security
 
