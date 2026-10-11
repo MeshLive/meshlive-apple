@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an improvement. Describe the situation you are in, not only the feature.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: situation
+    attributes:
+      label: Your situation
+      description: Who is using it, where, with how many phones and with what connectivity (no internet, no cell service, ...).
+    validations:
+      required: true
+  - type: textarea
+    id: wish
+    attributes:
+      label: What you would like to be able to do
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today instead
+  - type: dropdown
+    id: importance
+    attributes:
+      label: How much would it change your use
+      options: ["Nice to have", "I would use it often", "I cannot use the app without it"]

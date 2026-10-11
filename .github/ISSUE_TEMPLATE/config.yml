@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Android app issues
+    url: https://github.com/MeshLive/meshlive-android/issues/new/choose
+    about: Problems that happen only on the Android phone, or in the Android app's own screens, belong in the Android repository.

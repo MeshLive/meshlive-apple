@@ -1,0 +1,68 @@
+name: Bug report
+description: Something failed on the iPhone (connection, video, audio, crash, build).
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        MeshLive for iPhone is early and has had very little hardware testing, so reports are valuable.
+
+        Do not attach photos, videos, recordings or screenshots of other people, and do not paste Bluetooth
+        addresses, identity keys or full node IDs. Describe the phones by model instead.
+
+        Security problems (authentication, encryption, key handling): do not post details here. Report them
+        privately as described in SECURITY.md. If you cannot, open an issue that says only "security report".
+  - type: input
+    id: iphone
+    attributes:
+      label: iPhone model and iOS version
+      placeholder: "iPhone 14 Plus, iOS 18.5"
+    validations:
+      required: true
+  - type: input
+    id: peer
+    attributes:
+      label: Other phone(s) involved
+      description: Model and Android version (or iPhone model and iOS version) of the phone you were talking to.
+      placeholder: "Samsung SM-M315F, Android 12"
+  - type: input
+    id: app
+    attributes:
+      label: App version and commit
+      description: The git commit you built from (git rev-parse --short HEAD), and whether you used a simulator or a real iPhone.
+      placeholder: "0.3.0 (3), commit abc1234, real iPhone"
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options: ["LE GATT (default)", "LE L2CAP CoC", "Not sure", "Several / switched"]
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: What were you doing
+      options: ["iPhone calls Android", "Android calls iPhone", "Watching an Android stream", "Going live (Android watching)", "Verification / QR code", "Building the app", "Other"]
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened, and what did you expect
+      description: Include how far apart the phones were, whether either screen was locked or the app was in the background, and whether the Android phone had "Experimental - find iPhones" switched on.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / how often
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines (optional)
+      description: >-
+        Lines starting with BENCHMARK from the app's Documents/logs (debug builds only) or the Xcode console. They
+        contain no keys, text or media. Remove anything you do not want public.
+      render: text

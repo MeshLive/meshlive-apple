@@ -1,12 +1,47 @@
 # MeshLive for iPhone
 
-MeshLive is a Bluetooth app for private voice and video calls, going live and watching live video with phones nearby, with no internet and no servers. This is the native SwiftUI iPhone app. It speaks the same protocol as [MeshLive for Android](https://github.com/MeshLive/meshlive-android): BMH2 authentication, BMS1/BME1 AES-GCM records, BMC2 calls, BTV3 media and BMV1/BFG1 forwarded streams, over Bluetooth LE GATT and LE L2CAP CoC.
+**Live video and voice calls between nearby phones, over Bluetooth, with no internet. The iPhone side of MeshLive: early, and not yet tested on enough hardware.**
+
+> **Status: early.** This app has had only a handful of automated test calls on one iPhone. It is **not on the App Store or TestFlight**, no binary is published, and you cannot install it without building it yourself on a Mac. Please do not rely on it where your safety depends on it.
+>
+> **Privacy warning:** like the Android app, MeshLive's Bluetooth announcements currently carry a stable node-ID prefix that lets anyone listening link a phone's changing Bluetooth addresses over time. Rotating IDs are only an untested experiment so far; see [What nearby phones can see](#what-nearby-phones-can-see).
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue?style=for-the-badge"></a>
+  <img alt="Platform: iOS 16 or newer" src="https://img.shields.io/badge/platform-iOS%2016%2B-black?style=for-the-badge&logo=apple&logoColor=white">
+  <img alt="Status: early, not yet device-tested" src="https://img.shields.io/badge/status-early%20%C2%B7%20not%20yet%20device--tested-orange?style=for-the-badge">
+</p>
+
+<p align="center">
+  <a href="https://github.com/MeshLive/meshlive-android">MeshLive for Android</a> ·
+  <a href="https://github.com/MeshLive/meshlive-benchmarks">Benchmarks</a> ·
+  <a href="https://github.com/MeshLive">MeshLive organisation</a> ·
+  <a href="https://github.com/MeshLive/meshlive-ios/issues/new?template=device-report.yml">Report your iPhone</a>
+</p>
+
+MeshLive sends encrypted live camera video and microphone audio directly between nearby phones over Bluetooth, with
+no account, no server and no internet. This is the native SwiftUI iPhone app. It speaks the same protocol as
+[MeshLive for Android](https://github.com/MeshLive/meshlive-android): BMH2 authentication, BMS1/BME1 AES-GCM records,
+BMC2 calls, BTV3 media and BMV1/BFG1 forwarded streams, over Bluetooth LE GATT and LE L2CAP CoC. An iPhone and an
+Android phone running MeshLive are meant to call each other and watch each other's streams.
+
+MeshLive is free software under the GNU GPL, version 3 or later. It is built by volunteers and has not had an
+independent security review. See [Status](#status) before you rely on it.
 
 **The protocol specification is canonical in [meshlive-android/docs/PROTOCOL.md](https://github.com/MeshLive/meshlive-android/blob/main/docs/PROTOCOL.md).** [PROTOCOL.md](PROTOCOL.md) here lists the iPhone-specific parts (the compact discovery UUID and what iOS can and cannot do). Minimum iOS 16; built with Xcode 26 or later.
 
+- [Status](#status) | [Help wanted](#help-wanted-iphone-owners) | [Install](#install) | [Build from source](#build-from-source) |
+  [What nearby phones can see](#what-nearby-phones-can-see) | [Interface](#interface) | [Layout](#layout) |
+  [Contributing and security](#contributing-and-security) | [License](#license)
+
 ## Status
 
-**Early and mostly untested on hardware.** The wire protocol is checked offline against vectors produced by the Android app's own classes, in both directions, and every engine has loopback tests. On hardware, only automated iPhone-to-Android voice and video calls over Bluetooth LE GATT have been tried, on one iPhone and one Android phone. Android calling the iPhone, live streams, LE L2CAP, the QR scanner, the emergency wipe and every experimental feature are untested on phones.
+MeshLive for iPhone is **early and mostly untested on hardware.**
+
+- **What is implemented** (per this repository's own tests and [TESTING.md](TESTING.md)): the Android wire protocol, checked offline against vectors produced by the Android app's own classes in both directions; private voice and video calls; watching and going live; identity verification (QR and safety code); emergency wipe; a VP9 software encoder (libvpx) and VP9/AV1 decoding; Opus audio. Every engine has loopback tests.
+- **What has been tried on hardware:** automated iPhone-to-Android voice and video calls over Bluetooth LE GATT, on one iPhone and one Android phone. Voice carried packets both ways; video decoded both ways, but the iPhone's video was limited to roughly 125-135 kbps before rate control was added (see [TESTING.md](TESTING.md)).
+- **What is untested on phones:** Android calling the iPhone, live streams in either direction, LE L2CAP, the QR scanner, the emergency wipe, other Android models, and every experimental feature. **Interoperability with Android is verified by byte-level test vectors, not yet on a range of real phones.**
+- **No iPhone device table exists yet.** No pass or fail results are published per iPhone model, because there is not enough test data.
 
 **Interoperability**
 
@@ -25,6 +60,60 @@ MeshLive is a Bluetooth app for private voice and video calls, going live and wa
 - VP9/AV1 hardware encoding: the iPhone encodes VP9 in software with libvpx.
 
 **Not implemented yet:** relaying streams and calls (in development), store-and-forward messages, group (BGK1) relays, CallKit.
+
+## Help wanted (iPhone owners)
+
+The most useful thing you can do is **test it on your iPhone with an Android phone running MeshLive** and tell us what happened, including when everything worked. You need a Mac with Xcode and an Apple developer team to sign the app for your own phone, because there is no prebuilt app yet.
+
+1. Build and install it ([Build from source](#build-from-source)).
+2. On the Android phone, install [MeshLive for Android](https://github.com/MeshLive/meshlive-android) and, for the directions that need it, switch on Advanced > "Experimental: find iPhones".
+3. Follow the physical checks in [TESTING.md](TESTING.md) ("Physical checks"), keeping both apps in the foreground, 30-60 seconds per run.
+4. Fill in the [iPhone device test report](https://github.com/MeshLive/meshlive-ios/issues/new?template=device-report.yml) (about two minutes). Failures go in the [bug form](https://github.com/MeshLive/meshlive-ios/issues/new?template=bug_report.yml).
+
+Please do not post photos, recordings or the names of other people.
+
+## Install
+
+There is **no App Store, TestFlight or other binary release.** MeshLive for iPhone is not published as an app. To run it you build it yourself and sign it with your own Apple developer team; see [Build from source](#build-from-source). We will publish a build only after it has been tested on real iPhones and the results are public.
+
+## Build from source
+
+You need a Mac with Xcode 26 or later (the scripts call `xcodebuild`, `xcrun`, `swift` and `shasum`), Python 3, and network access for the first build, because the scripts download the pinned libopus and libvpx sources and build them into ignored `Vendor/*.xcframework` folders. No third-party binaries are included in this repository.
+
+```sh
+bash Scripts/prepare-opus.sh      # pinned libopus 1.6.1 -> Vendor/Opus.xcframework (ignored)
+bash Scripts/prepare-libvpx.sh    # pinned libvpx 1.15.2, SHA256 26fcd3db... -> Vendor/VPX.xcframework (ignored)
+python3 Scripts/project.py        # regenerate NearbyIntercom.xcodeproj (no signing data)
+bash Scripts/test.sh              # swift test: core, media and v1-experiment suites
+bash Scripts/build.sh iphoneos    # unsigned device build; iphonesimulator = ad-hoc signed simulator build
+bash Scripts/smoke-simulator.sh   # launch in a simulator (UI only; simulators have no Bluetooth)
+```
+
+To run on a phone, open `NearbyIntercom.xcodeproj`, choose your team and a unique bundle identifier, and run the **NearbyIntercom** scheme, or use `TEAM=<team> BUNDLE=<id> bash Scripts/run-device.sh`. The bundle identifier in the repository (`org.nearbyintercom.ios`) is a placeholder, so use your own. The phone must run iOS 16 or newer and have Bluetooth, Camera and Microphone allowed; for test launches it must be unlocked with the screen on. Physical test steps are in [TESTING.md](TESTING.md).
+
+There are no screenshots in this repository yet.
+
+## What nearby phones can see
+
+Anyone with a Bluetooth scanner in range can read what MeshLive broadcasts. They do not need to connect or pair. The **content** of calls and streams is encrypted, but the fact that a MeshLive phone is nearby is not hidden. The iPhone has the same exposure as the Android app, with differences that come from iOS.
+
+**What an iPhone broadcasts.** While the app is in the foreground and offering a call, a stream or a viewer request, the iPhone advertises one 128-bit compact-announcement service UUID (magic `0xC8D6`, [addendum A](Interop/ANDROID_DISCOVERY_ADDENDUM.md)). iOS apps cannot put manufacturer data in an advertisement, so the whole announcement is packed into that UUID. It contains:
+
+- a **stable node-ID prefix** (48 bits, the first 6 bytes of the node ID derived from the phone's identity key). It does not change until the identity is wiped or reset;
+- the kind of announcement (call offer, viewer request or stream offer), the Bluetooth transport it offers (LE GATT or LE CoC), whether it can relay, which video codecs it supports, and the route cost;
+- for a stream offer or viewer request: a route token and a coarse resolution, frame rate and bitrate.
+
+[PROTOCOL.md](PROTOCOL.md) also allows an optional local name of up to 8 bytes; the current code advertises only the UUID.
+
+**Why this lets people be tracked.** The prefix is in the advertised payload and stays the same, so a scanner that records prefixes can link the iPhone's changing Bluetooth addresses to the same phone, across places and days, while the app is open and advertising. Rotating discovery IDs exist, but they are **experimental, off by default and untested on phones** (Settings > Advanced > "Rotating discovery IDs (experimental)"), and they cover only the "ready for calls" announcement. Assume the stable prefix can be used to track a phone.
+
+**Anyone who connects learns who you are.** The signed handshake message that starts every Bluetooth connection contains the phone's public key and is not encrypted, so a connection attempt, or a sniffer watching one, reveals the identity. LE connections need no pairing, so any nearby scanner can try.
+
+**Names.** iOS does not let an app change the phone's Bluetooth device name, so a name such as "Your Name's iPhone" may be visible to a phone that connects. Give your iPhone a neutral name (Settings > General > About > Name), especially before switching on the rotating-IDs experiment. Names and titles (signed labels) are off by default and public while enabled.
+
+**Background.** When the app is in the background iOS removes the local name and moves service UUIDs to an Apple-only area, so Android phones cannot see the iPhone then. That is an iOS restriction, not a privacy feature. The size and timing of the encrypted data still shows that a call or stream is happening.
+
+To reduce your exposure now: close the app or switch Bluetooth off when you do not need it, leave names and titles off, and give the phone a neutral name. The Android README's section [What nearby phones can see](https://github.com/MeshLive/meshlive-android#what-nearby-phones-can-see) covers the shared protocol-level exposure in more detail.
 
 ## Interface
 
@@ -48,19 +137,6 @@ Every screen reads names through `PeerLabel`, following the naming review (R5). 
 - `AppLog` writes Android-style `BENCHMARK <event>: k=v | ...` lines to the app's Documents/logs: permissions, audio session and route, discovery, connect stages, call phases, authentication and codec, call_stats every 5 s (captured/encoded/sent and received/decoded/played counts), rate changes, and the end reason. They contain no keys, text or media.
 - Launch arguments (`App/Diagnostics/Automation.swift`) run a call without touching the phone: `-NearbyAutoCall <handle>`, `-NearbyCallType voice|video`, `-NearbyCallSeconds N`, `-NearbyAutoAccept voice|video` and others.
 - `Scripts/gui-run.sh install` builds, signs, installs and launches through the logged-in GUI session (`Scripts/device-gui.command`), because SSH sessions cannot use the login keychain. `Scripts/run-scenario.sh call|answer` runs a scenario over SSH, and `Scripts/pull-logs.sh` copies the logs. `Scripts/screenshots.sh` takes simulator screenshots. `Scripts/gui-run.sh uitest call|people` runs the XCUITest scenarios (`UITests/`), with a screenshot at each step.
-
-## Build
-
-```sh
-bash Scripts/prepare-opus.sh      # pinned libopus 1.6.1 -> Vendor/Opus.xcframework (ignored)
-bash Scripts/prepare-libvpx.sh    # pinned libvpx 1.15.2, SHA256 26fcd3db... -> Vendor/VPX.xcframework (ignored)
-python3 Scripts/project.py        # regenerate NearbyIntercom.xcodeproj (no signing data)
-bash Scripts/test.sh              # swift test: core, media and v1-experiment suites
-bash Scripts/build.sh iphoneos    # unsigned device build; iphonesimulator = ad-hoc signed simulator build
-bash Scripts/smoke-simulator.sh   # launch in a simulator (UI only; simulators have no Bluetooth)
-```
-
-To run on a phone, open `NearbyIntercom.xcodeproj`, choose your team and a unique bundle identifier, and run the **NearbyIntercom** scheme, or use `TEAM=<team> BUNDLE=<id> bash Scripts/run-device.sh`. Physical test steps are in [TESTING.md](TESTING.md).
 
 ## Layout
 
@@ -91,7 +167,9 @@ To run on a phone, open `NearbyIntercom.xcodeproj`, choose your team and a uniqu
 
 ## Contributing and security
 
-See the MeshLive organisation's [contributing guide](https://github.com/MeshLive/.github/blob/main/CONTRIBUTING.md) and [security policy](https://github.com/MeshLive/.github/blob/main/SECURITY.md). Please report security problems privately as described there, not in public issues.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Protocol changes start in [meshlive-android](https://github.com/MeshLive/meshlive-android), which owns the wire format. **Please report security problems privately** as described in [SECURITY.md](SECURITY.md), not in public issues.
+
+Using AI coding tools is welcome; you remain responsible for every line you submit. Say in the pull request when they did a substantial part of the work.
 
 ## License
 

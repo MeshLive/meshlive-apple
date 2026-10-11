@@ -1,0 +1,117 @@
+name: iPhone device test report
+description: Tell us how MeshLive for iPhone worked on your iPhone with an Android phone (reports where everything worked are just as useful).
+title: "[iPhone] <iPhone model>, iOS <version>"
+labels: ["device-compat", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. There is **no iPhone device table yet** because the app has had almost no hardware testing; your
+        report is how we start one.
+
+        Please answer for **your own iPhone**, tested with at least one Android phone running MeshLive. For each
+        item, choose **Pass** only if it worked for a few minutes without restarting the app or Bluetooth. Choose
+        **Partial** if it worked but badly (very slow, frequent freezes, only in some conditions), **Fail** if it did
+        not work, and **Not tested** if you did not try it. Some directions need the Android app's Advanced setting
+        "Experimental: find iPhones"; say in the notes whether it was on.
+
+        Do not post photos, recordings or names of other people, and do not paste Bluetooth addresses or identity
+        keys. Security problems: do not post details here; open an issue that says only "security report" and the
+        maintainer will arrange a private channel (see SECURITY.md).
+  - type: input
+    id: iphone
+    attributes:
+      label: iPhone model
+      description: Settings > General > About > Model Name.
+      placeholder: "iPhone 14 Plus"
+    validations:
+      required: true
+  - type: input
+    id: ios
+    attributes:
+      label: iOS version
+      placeholder: "18.5"
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: App version and commit
+      description: The git commit you built from (git rev-parse --short HEAD) and the Xcode version you built with.
+      placeholder: "0.3.0 (3), commit abc1234, Xcode 26.1"
+    validations:
+      required: true
+  - type: input
+    id: peer
+    attributes:
+      label: Android peer phone (model and Android version)
+      description: Also the Android app version, and whether the Advanced setting for finding iPhones was on.
+      placeholder: "Samsung SM-A556E (Galaxy A55), Android 16, MeshLive 0.1.0-beta, find iPhones on"
+    validations:
+      required: true
+  - type: checkboxes
+    id: transport
+    attributes:
+      label: Bluetooth transport used (tick all that you used, if you know)
+      description: GATT is the default and needs no pairing; LE CoC is faster in some cases. The iPhone has no Classic.
+      options:
+        - label: LE GATT (default)
+        - label: LE L2CAP CoC
+        - label: Not sure
+  - type: dropdown
+    id: voice
+    attributes:
+      label: Private voice call (audio both ways)
+      description: Please say in the notes which phone called which.
+      options: ["Pass", "Partial", "Fail", "Not tested"]
+      default: 3
+    validations:
+      required: true
+  - type: dropdown
+    id: video
+    attributes:
+      label: Private video call (video both ways)
+      options: ["Pass", "Partial", "Fail", "Not tested"]
+      default: 3
+    validations:
+      required: true
+  - type: dropdown
+    id: livestream
+    attributes:
+      label: Livestream (this iPhone going live, and/or watching an Android phone's broadcast)
+      options: ["Pass", "Partial", "Fail", "Not tested"]
+      default: 3
+    validations:
+      required: true
+  - type: dropdown
+    id: relay
+    attributes:
+      label: Relay through one extra phone (a stream reaching a viewer through a middle phone)
+      description: Relaying is not implemented on the iPhone yet, so "Not tested" is expected unless the Android phones relay between themselves.
+      options: ["Pass", "Partial", "Fail", "Not tested"]
+      default: 3
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: >-
+        What you saw and roughly when (for example "video froze every 20 s", "the Android phone never appeared",
+        "worked with the screen locked"). Mention distance, whether the app was in the foreground, and anything
+        unusual such as busy 2.4 GHz Wi-Fi.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines (optional)
+      description: BENCHMARK lines from a debug build's Documents/logs or the Xcode console, if you have them. They contain no keys, text or media.
+      render: text
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Before you submit
+      options:
+        - label: I did not include recordings, photos, other people's names, Bluetooth addresses or anything I do not want public.
+          required: true
