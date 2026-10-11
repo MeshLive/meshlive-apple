@@ -1,0 +1,20 @@
+# Weekly update checks. This repository has no GitHub Actions workflows yet and no external Swift Package
+# dependencies (third-party code is vendored under Vendor/ with its licences), so both entries are
+# currently idle; they start working as soon as a workflow or a `.package(...)` dependency is added.
+version: 2
+updates:
+  - package-ecosystem: "swift"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]
