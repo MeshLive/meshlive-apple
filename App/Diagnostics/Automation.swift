@@ -3,7 +3,7 @@ import NearbyCore
 
 /// DEBUG-only remote control through launch arguments (like Android's `test_*` extras), for runs over SSH:
 ///
-///     xcrun devicectl device process launch --device <udid> --terminate-existing org.nearbyintercom.ios \
+///     xcrun devicectl device process launch --device <udid> --terminate-existing io.github.meshlive.app \
 ///         -NearbyAutoCall first -NearbyCallType voice -NearbyCallSeconds 30
 ///
 /// Arguments:
@@ -13,7 +13,13 @@ import NearbyCore
 ///   `-NearbyAnswerSeconds N` hangs an answered call up after N s (default: the caller hangs up).
 /// - `-NearbyAvailable 1|0`: be reachable for calls (default unchanged).
 /// - `-NearbyRequestPermissions 1`: ask for microphone and camera at launch (one human tap each, first time only).
+/// - `-NearbyRelay 1`: experimental "Help pass streams and calls to others nearby" on for this run.
+/// - `-NearbyRelayCallee <handle|first>`: EXPERIMENTAL call relay hop for that callee (like Android's test_private_call_relay).
 /// - `-NearbyAutoWatch first|<handle>` and `-NearbyWatchSeconds N`: watch a stream.
+/// - `-NearbyAutoRadio <title>`: go live audio only (title signed only with `-NearbyLabels 1`), `-NearbyRadioPreset
+///   voice|low|music`, `-NearbyRadioSeconds N` (default 120) then end; logs `auto_radio`.
+/// - `-NearbyAutoListen first|<handle>|<12-hex prefix>` and `-NearbyListenSeconds N` (default 60): join an
+///   audio-only (radio) stream only; logs `auto_listen` with the verified record count at the end.
 /// - `-NearbyTransport gatt|l2cap`: transport to advertise; `-NearbyLabels 1`: experimental names and titles.
 /// Every step is logged as `BENCHMARK auto_*`.
 final class Automation {
@@ -25,7 +31,9 @@ final class Automation {
     private var callActiveAt: Date?
     private var done = false
     private var watchStartedAt: Date?
+    private var listenStartedAt: Date?
     private var acceptedCall: ObjectIdentifier?
+    private var relayStarted = false
     private var answeredActiveAt: Date?
 
     static func parse(_ arguments: [String]) -> [String: String] {
@@ -56,6 +64,22 @@ final class Automation {
         if let fec = args["CallAudioFec"] { AppSettings.callAudioFec = fec == "1" }
         if let ladder = args["ResolutionLadder"] { AppSettings.resolutionLadder = ladder == "1" }
         if args["RequestPermissions"] == "1" { MediaPermissions.request(video: true, context: "launch") { _, _ in } }
+        if args["Relay"] == "1" { model?.relayForOthers = true }
+        if let title = args["AutoRadio"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, let model = self.model else { return }
+                if let labels = self.args["Labels"] { model.peerLabelsEnabled = labels == "1" }
+                model.liveTitle = title == "-" ? "" : title
+                let preset: UInt8 = self.args["RadioPreset"] == "low" ? AudioLive.presetLowData : self.args["RadioPreset"] == "music" ? AudioLive.presetMusic : AudioLive.presetVoice
+                AppLog.event("auto_radio", ["title": title, "preset": "\(preset)"])
+                model.goLive(audioOnly: true, preset: preset)
+                let seconds = Double(self.args["RadioSeconds"] ?? "120") ?? 120
+                DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+                    AppLog.event("auto_radio", ["result": "stop", "stats": model.live?.stats ?? "-"])
+                    model.live?.stop(); AppLog.flush()
+                }
+            }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
     }
 
@@ -109,6 +133,28 @@ final class Automation {
                 // Permission request or connect still starting.
             } else {
                 AppLog.event("auto_call", ["result": callActiveAt == nil ? "failed" : "call_gone", "notice": model.callNotice ?? "none"]); finish()
+            }
+        }
+        if let target = args["RelayCallee"], !relayStarted {
+            if let person = model.people.first(where: { matches(target, prefixHex: $0.prefixHex) }) {
+                relayStarted = true
+                model.relayForOthers = true
+                AppLog.event("auto_relay", ["callee": person.prefixHex, "handle": person.label.handle])
+                model.startCallRelay(to: person)
+            }
+        }
+        if let target = args["AutoListen"] {
+            if listenStartedAt == nil {
+                if let row = model.streams.first(where: { $0.audioOnly && matches(target, prefixHex: $0.announcement.prefixHex) }) {
+                    AppLog.event("auto_listen", ["target": target, "prefix": row.announcement.prefixHex, "token": String(format: "%08x", row.announcement.streamToken)])
+                    model.startWatching(row); listenStartedAt = Date()
+                } else if Date().timeIntervalSince(started) > 60 {
+                    AppLog.event("auto_listen", ["target": target, "result": "not_found", "streams": "\(model.streams.count)",
+                                                 "radio": "\(model.streams.filter(\.audioOnly).count)"]); finish()
+                }
+            } else if let s = listenStartedAt, Date().timeIntervalSince(s) >= (Double(args["ListenSeconds"] ?? "60") ?? 60) || model.watch == nil {
+                AppLog.event("auto_listen", ["result": model.watch == nil ? "ended" : "stop", "stats": model.watch?.stats ?? "-"])
+                model.watch?.stop(); finish()
             }
         }
         if let target = args["AutoWatch"] {

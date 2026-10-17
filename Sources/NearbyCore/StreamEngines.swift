@@ -10,6 +10,10 @@ public final class StreamViewerEngine: MeshConnection {
         case linkAuthenticated(NodeId)
         case sourceAuthenticated(adjacent: NodeId, source: NodeId, fingerprint: IdentityFingerprint)
         case header(StreamHeader)
+        /// Experimental audio-only live: the verified `BTL1` header (no video follows).
+        case audioLiveHeader(AudioLiveHeader)
+        /// The verified OpusHead of an audio-only stream.
+        case audioConfig(Data)
         case audio(MediaPacket)
         case video(MediaPacket)
         case rotation(Int)
@@ -39,6 +43,12 @@ public final class StreamViewerEngine: MeshConnection {
     private var duplicates = DuplicateWindow()
     private var lastHeartbeatAt: TimeInterval = 0
     public private(set) var receivedMediaBytes: UInt64 = 0
+    /// The key that opens the media (the source's endpoint key, or the granted key on a forwarded route):
+    /// what a relaying viewer wraps in BFG1 for its child.
+    public var mediaOpenKey: Data? { mediaOpener?.keyBytes }
+    /// A relaying viewer waits (at most 2 s) for its child's end acknowledgement before acknowledging upstream.
+    public var holdEndAck = false
+    private var endAckHeldSince: TimeInterval?
     public private(set) var audioPackets = 0
     public private(set) var videoPackets = 0
 
@@ -46,26 +56,66 @@ public final class StreamViewerEngine: MeshConnection {
     ///   - expectedAdjacentPrefix: the advertiser's prefix from its offer (checked against the link and endpoint).
     ///   - decodeMask: codecs this phone can actually decode.
     ///   - maxChildren: 1 when this iPhone offers to forward the stream (viewer-forwarder), else 0.
+    /// EXPERIMENTAL rotating IDs phase 1b: the selected offer carries a role-1 rotating ID (Android version 5), so the
+    /// connector must open it in its link BDO1 (RV15, with the RD4 epoch window) instead of matching a fixed prefix.
+    public let rotatingOffer: DiscoveryAnnouncement?
+    private let wallEpoch: () -> Int64
+    /// Experimental audio-only live: the selected offer carried the `0x40` marker. The header must agree
+    /// (BTL1 for a marked offer, BTV3 otherwise), else the link fails closed.
+    public let expectAudioOnly: Bool
+    /// The verified `BTL1` header and the per-stream guard of an audio-only stream.
+    public private(set) var audioLiveHeader: AudioLiveHeader?
+    public private(set) var audioLiveGuard: AudioLiveStreamGuard?
+
     public init(transport: MeshTransport, identity: SigningIdentity, decodeMask: UInt8, expectedAdjacentPrefix: Data?,
-                expectedMediaSource: NodeId? = nil, maxChildren: UInt8 = 0, labels: Bool = false) {
-        let caps = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: 0, decodeCodecMask: decodeMask & NodeCapabilities.codecMask,
+                expectedMediaSource: NodeId? = nil, maxChildren: UInt8 = 0, labels: Bool = false,
+                rotatingOffer: DiscoveryAnnouncement? = nil, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch,
+                expectAudioOnly: Bool = false) {
+        self.expectAudioOnly = expectAudioOnly
+        var caps = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: 0, decodeCodecMask: decodeMask & NodeCapabilities.codecMask,
                                     maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: maxChildren)
         self.expectedMediaSource = expectedMediaSource
+        self.rotatingOffer = rotatingOffer?.rotating == true ? rotatingOffer : nil
+        self.wallEpoch = wallEpoch
         labelsEnabled = labels
-        super.init(role: .responder, transport: transport, identity: identity, linkCapabilities: caps,
-                   endpointCapabilities: PeerLabelFeature.advertise(caps, enabled: labels))
-        expectedPeerPrefix = expectedAdjacentPrefix
+        let endpointCaps = PeerLabelFeature.advertise(caps, enabled: labels)
+        // Link hello bit 3 on an LE stream hop (never the end-to-end hello): BDO1 is the first hop record each way.
+        if self.rotatingOffer != nil { caps.transportMask |= NodeCapabilities.transportDiscoveryOpening }
+        super.init(role: .responder, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: endpointCaps)
+        expectedPeerPrefix = self.rotatingOffer == nil ? expectedAdjacentPrefix : nil
+        if self.rotatingOffer != nil {
+            // This viewer advertised a fixed-prefix (compact v1) request, so it opens nothing: count 0.
+            discoveryOpeningEntries = { [] }
+            onDiscoveryOpening = { [weak self] entries in try self?.checkRotatingOpening(entries) }
+        }
+    }
+
+    private func checkRotatingOpening(_ entries: [OpeningEntry]) throws {
+        guard let selected = rotatingOffer, let peer = link.peerNodeId else { return }
+        guard DiscoverySelectionCheck.check(selected: selected, expectedRole: RotatingDiscoveryIds.roleStreamOffer, peerNodeId: peer.bytes,
+                                            openingEntries: entries, verifierWallEpoch: wallEpoch()) == .pass else {
+            throw ProtocolError.authentication
+        }
     }
 
     public override func validateLinkPeer() throws {
         guard let caps = link.peerCapabilities else { return }
         if caps.maxChildren > 1 { throw ProtocolError.incompatible("Group-relay (BGK1) sources are not supported on iPhone") }
+        if rotatingOffer != nil {
+            // The connector of a selected rotating offer must sign bit 3 and open the ID; else it fails like a prefix mismatch.
+            guard caps.transportMask & NodeCapabilities.transportDiscoveryOpening != 0 else { throw ProtocolError.authentication }
+            return
+        }
         if let expectedPeerPrefix, link.peerNodeId?.prefix != expectedPeerPrefix { throw ProtocolError.authentication }
     }
 
     public override func linkDidAuthenticate() { if let id = link.peerNodeId { onEvent?(.linkAuthenticated(id)) } }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
+        // After a passing rotating check the endpoint must be the link peer that opened the ID (hop-local rule).
+        if rotatingOffer != nil {
+            guard peerOpening != nil, session.peerNodeId == link.peerNodeId else { throw ProtocolError.authentication }
+        }
         lastHeartbeatAt = now
         enqueue(.record(.linkHeartbeat, LinkHeartbeat.version1), .control)
         session.opener.acceptLabels = labelsEnabled
@@ -146,8 +196,17 @@ public final class StreamViewerEngine: MeshConnection {
     }
 
     private func handleContent(_ content: EndToEndContentRecord) throws {
+        if let audioGuard = audioLiveGuard {
+            try handleAudioLive(content, guard: audioGuard)
+            return
+        }
         guard let header else {
             guard content.type == .streamHeader else { throw ProtocolError.state("Expected an end-to-end stream header") }
+            if AudioLive.isAudioLiveHeader(content.payload) {
+                try acceptAudioLiveHeader(content.payload)
+                return
+            }
+            guard !expectAudioOnly else { throw ProtocolError.incompatible("The offer was marked audio only but the stream is video") }
             let decoded = try StreamHeader(decoding: content.payload)
             let mask = StreamProtocol.capabilityMask(codecId: decoded.codecId)
             if grant == nil {
@@ -186,8 +245,7 @@ public final class StreamViewerEngine: MeshConnection {
             let state = try StreamLifecycleState(decoding: content.payload)
             onEvent?(.state(state))
             if state == .ended {
-                enqueue(.content(.streamEndAck, 0, Data()), .control, closeAfter: true)
-                finish("Stream ended by the broadcaster", error: false)
+                if holdEndAck { endAckHeldSince = now } else { releaseEndAck() }
             }
         case .privateCallSignal:
             throw ProtocolError.malformed("Private-call signals are not broadcast stream content")
@@ -196,19 +254,99 @@ public final class StreamViewerEngine: MeshConnection {
         }
     }
 
+    /// `BTL1`: the marker must agree, the certifying identity key must hash to the authenticated source, and the
+    /// certificate must verify over the mesh stream ID (zeros for a direct stream). Exactly one header per stream.
+    private func acceptAudioLiveHeader(_ payload: Data) throws {
+        guard expectAudioOnly else { throw ProtocolError.incompatible("The offer was not marked audio only but the stream is audio only") }
+        guard let source = mediaSourceNodeId else { throw ProtocolError.state("No media source") }
+        let decoded = try AudioLiveHeader(decoding: payload)
+        let streamId = grant?.streamId ?? meshStreamId ?? AudioLive.zeroStreamId
+        let verifier = try AudioLiveVerifier(header: decoded, streamId: streamId, expectedSource: source)
+        audioLiveHeader = decoded
+        audioLiveGuard = AudioLiveStreamGuard(verifier: verifier)
+        onEvent?(.audioLiveHeader(decoded))
+        if let labels = pendingLabels {
+            pendingLabels = nil
+            let binding = LabelBinding.stream(grant?.streamId ?? meshStreamId)
+            if !labelInbox.accept(labels, expectedSigner: source, expectedBinding: binding).isEmpty, let title = labelInbox.text(.streamTitle) {
+                onEvent?(.title(title))
+            }
+        }
+    }
+
+    /// After a `BTL1` header: only signed audio records and lifecycle records; a second header fails closed.
+    private func handleAudioLive(_ content: EndToEndContentRecord, guard audioGuard: AudioLiveStreamGuard) throws {
+        switch content.type {
+        case .mediaPacket:
+            try audioGuard.checkSealedSize(content.payload.count)
+            let packet = try MediaPacket(decoding: content.payload, authenticatedFlags: content.flags)
+            receivedMediaBytes += UInt64(packet.payload.count)
+            let opened = try audioGuard.open(packet)
+            if opened.isCodecConfig {
+                if let head = audioGuard.opusHead { onEvent?(.audioConfig(head)) }
+                return
+            }
+            for unit in try opened.splitAudio() { audioPackets += 1; onEvent?(.audio(unit)) }
+        case .streamState:
+            try audioGuard.onLifecycleRecord()
+            let state = try StreamLifecycleState(decoding: content.payload)
+            onEvent?(.state(state))
+            if state == .ended {
+                if holdEndAck { endAckHeldSince = now } else { releaseEndAck() }
+            }
+        case .streamHeader:
+            throw ProtocolError.malformed("A second stream header")
+        default:
+            throw ProtocolError.malformed("Unexpected content on an audio-only stream \(content.type)")
+        }
+    }
+
+    /// Acknowledges ENDED upstream and closes (immediately, or once the relay's child acknowledged).
+    public func releaseEndAck() {
+        guard phase == .open else { return }
+        endAckHeldSince = nil
+        enqueue(.content(.streamEndAck, 0, Data()), .control, closeAfter: true)
+        finish("Stream ended by the broadcaster", error: false)
+    }
+
     /// Asks the immediate parent for a recovery keyframe (decoder error or join).
     public func requestKeyFrame() { if endpoint != nil { enqueue(.content(.keyFrameRequest, 0, Data()), .control) } }
 
     /// Hop-local link report (version 2): measured arrival kbps and whether playout is pinned late.
     public func sendLinkReport(arrivalKbps: Int, linkLate: Bool, addedDelayMs: Int) {
         guard phase == .open else { return }
+        if arrivalKbps > 0 { linkMeasured = true }
+        reportedLate = linkLate
+        lastReportAt = now; onTimeReportedBytes = receivedMediaBytes
         enqueue(.record(.linkHeartbeat, LinkHeartbeat.encode(LinkCapacityReport(arrivalKbps: arrivalKbps, linkLate: linkLate, addedDelayMs: addedDelayMs))), .control)
+    }
+
+    /// On-time reports (Android 2026-10-16, `test_on_time_reports`, on by default): while this viewer has not measured
+    /// its parent link, it says every 2 s that media still arrives on time (a version 2 report: 0 kbps, not late), so the
+    /// parent keeps its starting pace instead of halving it after 4 s of silence. The existing report format, which
+    /// every parent accepts from a viewer; off restores the silent viewer.
+    public var onTimeReports = true
+    public static let onTimeReportInterval: TimeInterval = 2
+    private var linkMeasured = false, reportedLate = false
+    private var lastReportAt: TimeInterval = -.infinity
+    private var onTimeReportedBytes: UInt64 = 0
+    public private(set) var onTimeReportsSent = 0
+
+    /// Android `onTimeReportDue`: enabled, no measured trains, not late, media arrived since the last report, 2 s passed.
+    static func onTimeReportDue(enabled: Bool, measured: Bool, late: Bool, mediaArrived: Bool, sinceLastReport: TimeInterval) -> Bool {
+        enabled && !measured && !late && mediaArrived && sinceLastReport >= onTimeReportInterval
     }
 
     public var silentTimeout: TimeInterval { transport == .gatt ? 6 : 8 }
 
     public override func tickOpen(now: TimeInterval) {
-        if now - lastReceiveAt > silentTimeout { finish("The stream link went silent", error: true); return }
+        if let held = endAckHeldSince, now - held > 2 { releaseEndAck(); return }
+        if now - lastReceiveAt > silentTimeout, endAckHeldSince == nil { finish("The stream link went silent", error: true); return }
+        if Self.onTimeReportDue(enabled: onTimeReports, measured: linkMeasured, late: reportedLate,
+                                mediaArrived: receivedMediaBytes > onTimeReportedBytes, sinceLastReport: now - lastReportAt) {
+            lastReportAt = now; onTimeReportedBytes = receivedMediaBytes; onTimeReportsSent += 1
+            enqueue(.record(.linkHeartbeat, LinkHeartbeat.encode(LinkCapacityReport(arrivalKbps: 0, linkLate: false, addedDelayMs: 0))), .control)
+        }
         if now - lastHeartbeatAt >= StreamViewerEngine.heartbeatInterval {
             lastHeartbeatAt = now
             enqueue(.record(.linkHeartbeat, LinkHeartbeat.version1), .control)
@@ -243,18 +381,35 @@ public final class StreamSourceEngine: MeshConnection {
     public let labelsEnabled: Bool
     public let labelsTitle: String?
     public private(set) var labelsSent = false
+    /// Experimental audio-only live: the stream's signer. The header is `BTL1`, every record is pre-signed
+    /// (`sendSignedAudio`), and the stream always uses mesh envelopes under the signer's stream ID (as Android).
+    public let audioLive: AudioLiveSigner?
+    /// Audio-only age shedding (Android test_audio_live_age_bound, on): oldest whole records beyond 3 s, keep 1.5 s.
+    public var audioAgeBound = true
+    public private(set) var shedAudioRecords = 0
+    private var audioHealth: [(at: TimeInterval, queued: Int, shed: Int)] = []
 
     public init(transport: MeshTransport, identity: SigningIdentity, header: StreamHeader, expectedViewerPrefix: Data?, streamId: UUID = UUID(),
-                labels: Bool = false, title: String? = nil) {
-        let mask = StreamProtocol.capabilityMask(codecId: header.codecId)
-        let caps = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: mask, decodeCodecMask: 0,
+                labels: Bool = false, title: String? = nil, rotatingEntries: (() -> [OpeningEntry])? = nil,
+                linkPacing: Bool = false, seedProbeKbps: Int? = nil, audioLive: AudioLiveSigner? = nil) {
+        self.seedProbeKbps = seedProbeKbps
+        self.audioLive = audioLive
+        let streamId = audioLive?.streamId ?? streamId
+        let mask = audioLive == nil ? StreamProtocol.capabilityMask(codecId: header.codecId) : 0
+        var caps = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: mask, decodeCodecMask: 0,
                                     maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 0)
         self.header = header; sourceNodeId = identity.nodeId; self.streamId = streamId
         labelsEnabled = labels; labelsTitle = title
-        super.init(role: .initiator, transport: transport, identity: identity, linkCapabilities: caps,
-                   endpointCapabilities: PeerLabelFeature.advertise(caps, enabled: labels))
+        let endpointCaps = PeerLabelFeature.advertise(caps, enabled: labels)
+        // EXPERIMENTAL rotating stream offers (phase 1b): the connector sends its pinned role-1 entries in BDO1.
+        if rotatingEntries != nil { caps.transportMask |= NodeCapabilities.transportDiscoveryOpening }
+        super.init(role: .initiator, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: endpointCaps)
         expectedPeerPrefix = expectedViewerPrefix
+        if let rotatingEntries { discoveryOpeningEntries = rotatingEntries }
+        if linkPacing { pacer = makePacer() }
     }
+    /// This phone's own fresh measurement of the transport (nil: the conservative prior).
+    public let seedProbeKbps: Int?
 
     public override func validateLinkPeer() throws {
         guard let caps = link.peerCapabilities else { return }
@@ -263,10 +418,12 @@ public final class StreamSourceEngine: MeshConnection {
     }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
-        guard session.peerCapabilities.decodeCodecMask & StreamProtocol.capabilityMask(codecId: header.codecId) != 0 else {
+        guard audioLive != nil || session.peerCapabilities.decodeCodecMask & StreamProtocol.capabilityMask(codecId: header.codecId) != 0 else {
             throw ProtocolError.incompatible("Final receiver cannot decode the stream codec")
         }
-        useMeshEnvelope = link.peerCapabilities!.maxChildren > 0
+        // Paced from the first write at the learned capacity or the conservative prior (Android LinkPacerSeed).
+        pacer?.seed(kbps: LinkPacer.seedKbps(transport, probeKbps: seedProbeKbps))
+        useMeshEnvelope = audioLive != nil || link.peerCapabilities!.maxChildren > 0
         lastHeartbeatAt = now
         if labelsEnabled, let linkPeer = link.peerNodeId,
            PeerLabelFeature.streamHopNegotiated(localEnabled: true, linkPeer: linkPeer, endpointPeer: session.peerNodeId, peer: session.peerCapabilities) {
@@ -278,7 +435,7 @@ public final class StreamSourceEngine: MeshConnection {
             enqueue(.content(.labels, 0, try SignedLabelCodec.encodeContainer(labels)), .control)
             labelsSent = true
         }
-        enqueueStream(.streamHeader, flags: 0, payload: try header.encoded(), priority: .control)
+        enqueueStream(.streamHeader, flags: 0, payload: try audioLive?.header.encoded ?? header.encoded(), priority: .control)
         ready = true
         onEvent?(.viewerAuthenticated(session.peerNodeId, session.peerFingerprint))
     }
@@ -308,6 +465,15 @@ public final class StreamSourceEngine: MeshConnection {
         guard ready else { return }
         let p = MediaPacket(flags: StreamProtocol.flagAudio | StreamProtocol.flagCodecConfig, presentationTimeUs: 0, payload: OpusHead.make())
         enqueueStream(.mediaPacket, flags: p.flags, payload: p.encoded, priority: .control)
+    }
+    /// Audio-only live: one record already signed by `audioLive` (the same bytes for every listener). The Opus
+    /// configuration travels as control so it precedes the media; media records are dropped while paused.
+    public func sendSignedAudio(_ record: MediaPacket) {
+        guard ready, audioLive != nil else { return }
+        let config = record.flags & StreamProtocol.flagCodecConfig != 0
+        guard config || !paused else { return }
+        enqueueStream(.mediaPacket, flags: record.flags, payload: record.encoded, priority: config ? .control : .audio)
+        if !config { audioHealth.append((now, 1, 0)) }
     }
     public func sendVideo(flags: UInt8, presentationTimeUs: Int64, payload: Data) {
         guard ready, !paused else { return }
@@ -350,7 +516,7 @@ public final class StreamSourceEngine: MeshConnection {
             }
         case .linkHeartbeat:
             lastHeartbeatAt = now
-            if let report = try LinkHeartbeat.decode(record.payload) { onEvent?(.peerReport(report)) }
+            if let report = try LinkHeartbeat.decode(record.payload) { applyPacingReport(report); onEvent?(.peerReport(report)) }
         case .routeControlAck:
             _ = try RouteWithdrawal(decoding: record.payload)
             onEvent?(.routeWithdrawalAcknowledged)
@@ -358,6 +524,22 @@ public final class StreamSourceEngine: MeshConnection {
         default:
             throw ProtocolError.malformed("Unexpected source control record \(record.type)")
         }
+    }
+
+    /// Hop-local listener withdrawal (PROTOCOL "Health and withdrawal"): more than 20% of the records queued for this
+    /// listener shed over 10 s, or its oldest queued record older than 30 s, withdraws the route so it reroutes.
+    private func checkAudioHealth(now: TimeInterval) -> Bool {
+        if audioAgeBound {
+            let dropped = queues.shedAudio(now: now, trigger: 3, keep: 1.5)
+            if dropped > 0 { shedAudioRecords += dropped; audioHealth.append((now, 0, dropped)) }
+        }
+        audioHealth.removeAll { now - $0.at > 10 }
+        let queued = audioHealth.reduce(0) { $0 + $1.queued }, shed = audioHealth.reduce(0) { $0 + $1.shed }
+        if (queued >= 10 && Double(shed) > 0.2 * Double(queued)) || queues.audioAge(now: now) > 30 {
+            withdrawRoute()
+            return true
+        }
+        return false
     }
 
     /// Hop-local overload: ask the viewer to look elsewhere; close after its ack (or 4 s).
@@ -369,6 +551,7 @@ public final class StreamSourceEngine: MeshConnection {
         if expectHeartbeat, now - lastHeartbeatAt > timeout, now - lastReceiveAt > timeout { finish("Immediate child heartbeat timed out", error: true); return }
         if let endingSince, now - endingSince > 2 { finish("Stream ended; viewer acknowledgement timed out", error: false); return }
         if let withdrawingSince, now - withdrawingSince > 4 { finish("Viewer route withdrawn (no acknowledgement)", error: false); return }
+        if audioLive != nil, withdrawingSince == nil, endingSince == nil, checkAudioHealth(now: now) { return }
         if paused, now - lastPausedAt >= 2 {
             lastPausedAt = now
             enqueueStream(.streamState, flags: 0, payload: StreamLifecycleState.paused.encoded, priority: .control)

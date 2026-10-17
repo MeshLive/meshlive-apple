@@ -11,8 +11,10 @@ struct NearbyIntercomApp: App {
                 .environmentObject(model)
                 .onAppear {
                     model.start()
+                    model.configureCallAlerts()
                     #if DEBUG
-                    if RootView.debugScreenName == "call" { model.showDebugCall() }
+                    if let fixture = RootView.debugArgument("-NearbyFixture") { model.applyDebugFixture(fixture) }
+                    if let screen = RootView.debugScreenName, screen.hasPrefix("call") { model.showDebugCall(screen) }
                     #endif
                 }
                 .onChange(of: scenePhase) { phase in
@@ -21,6 +23,7 @@ struct NearbyIntercomApp: App {
                     case .background: model.enterBackground()
                     default: break
                     }
+                    model.appActivityChanged()
                 }
         }
     }
@@ -28,22 +31,23 @@ struct NearbyIntercomApp: App {
 
 struct RootView: View {
     @EnvironmentObject var model: AppModel
-    @State private var debugScreenShown = false
-    /// DEBUG screenshot aid: `simctl launch <device> <bundle> -NearbyScreen verify|settings|watch|live|people`.
-    static var debugScreenName: String? {
+    /// DEBUG screenshot aid: `simctl launch <device> <bundle> -NearbyScreen live|people|contacts|verify|settings|privacy|advanced-privacy|experiments|connection|about`.
+    static var debugScreenName: String? { debugArgument("-NearbyScreen") }
+    /// DEBUG-only launch argument value (`-NearbyScreen`, `-NearbyFixture`); always nil in release builds.
+    static func debugArgument(_ name: String) -> String? {
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
-        if let i = args.firstIndex(of: "-NearbyScreen"), i + 1 < args.count { return args[i + 1] }
+        if let i = args.firstIndex(of: name), i + 1 < args.count { return args[i + 1] }
         #endif
         return nil
     }
-    @ViewBuilder private var debugScreen: some View {
+    /// The tab a DEBUG `-NearbyScreen` value opens (pages inside a tab are pushed by that tab's `debugPush`).
+    private var initialTab: MainTab {
         switch RootView.debugScreenName {
-        case "verify": VerifyView()
-        case "settings": SettingsView()
-        case "watch": WatchListView()
-        case "live": LiveView()
-        default: PeopleView()
+        case "settings", "privacy", "advanced-privacy", "experiments", "connection", "about": return .settings
+        case "people", "calls": return .calls
+        case "contacts", "verify": return .contacts
+        default: return .live
         }
     }
     var body: some View {
@@ -53,11 +57,7 @@ struct RootView: View {
             } else if let error = model.identityError {
                 EmptyState(icon: "key.slash", title: "Identity unavailable", message: error)
             } else {
-                NavigationStack {
-                    HomeView()
-                        .navigationDestination(isPresented: $debugScreenShown) { debugScreen }
-                }
-                .onAppear { debugScreenShown = RootView.debugScreenName != nil && RootView.debugScreenName != "call" }
+                MainTabs(initial: initialTab)
                     .fullScreenCover(item: Binding(get: { model.call }, set: { _ in })) { call in CallView(call: call) }
             }
         }

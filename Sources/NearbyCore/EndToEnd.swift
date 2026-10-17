@@ -11,11 +11,21 @@ public enum EndToEndContentType: UInt8 {
     case videoFragment = 9
     /// Experimental peer labels (BLB1 container): accepted only by an endpoint that advertised hello bit 5.
     case labels = 10
+    /// Experimental rotating IDs / BMH3 pseudonyms (BDX1 container): calls only, after both endpoint hellos carried bit 3.
+    case discoveryExchange = 11
 }
 
 public enum StreamLifecycleState: UInt8 {
     case live = 1, paused = 2, ended = 3
+    /// Android's experimental live media state (`live_media_state`, off by default): live with the microphone muted,
+    /// the camera off, or both. Readers treat them as LIVE for liveness; older readers close on them, so the iPhone
+    /// accepts them (and never sends them).
+    case liveMuted = 4, liveCameraOff = 5, liveMutedCameraOff = 6
     public var encoded: Data { Data([rawValue]) }
+    /// True for LIVE and its media variants 4-6.
+    public var isLive: Bool { self == .live || rawValue >= 4 }
+    public var microphoneMuted: Bool { self == .liveMuted || self == .liveMutedCameraOff }
+    public var cameraOff: Bool { self == .liveCameraOff || self == .liveMutedCameraOff }
     public init(decoding payload: Data) throws {
         guard payload.count == 1, let state = StreamLifecycleState(rawValue: payload.first!) else {
             throw ProtocolError.malformed("Invalid stream-state message")
@@ -56,12 +66,14 @@ public enum EndToEndContentProtocol {
     public struct Metadata { public let type: EndToEndContentType; public let sequence: UInt64; public let flags: UInt8; public let ciphertextBytes: Int }
 
     /// Validates the clear header exactly as Android's `inspect` (relays can call this without keys).
-    public static func inspect(_ encoded: Data, acceptVideoFragments: Bool = false, acceptLabels: Bool = false) throws -> Metadata {
+    public static func inspect(_ encoded: Data, acceptVideoFragments: Bool = false, acceptLabels: Bool = false,
+                               acceptDiscoveryExchange: Bool = false) throws -> Metadata {
         guard encoded.count >= headerBytes else { throw ProtocolError.malformed("Truncated end-to-end content") }
         var r = BinaryReader(encoded.prefix(headerBytes).rebased)
         guard try r.bytes(4) == magic else { throw ProtocolError.malformed("Invalid end-to-end content magic") }
         let typeValue = try r.byte()
-        guard let type = EndToEndContentType(rawValue: typeValue), type != .videoFragment || acceptVideoFragments, type != .labels || acceptLabels else {
+        guard let type = EndToEndContentType(rawValue: typeValue), type != .videoFragment || acceptVideoFragments, type != .labels || acceptLabels,
+              type != .discoveryExchange || acceptDiscoveryExchange else {
             throw ProtocolError.malformed("Unknown end-to-end content type \(typeValue)")
         }
         let sequence = try r.u64()
@@ -98,12 +110,14 @@ public final class EndToEndContentOpener {
     public private(set) var nextSequence: UInt64 = 0
     public var acceptVideoFragments = false
     public var acceptLabels = false
+    public var acceptDiscoveryExchange = false
     public init(key: SymmetricKey) { self.key = key }
     /// Copy of the key for a forwarded-stream grant (viewer-forwarder only).
     public var keyBytes: Data { key.withUnsafeBytes { Data($0) } }
     public func open(_ encoded: Data) throws -> EndToEndContentRecord {
         let data = encoded.rebased
-        let meta = try EndToEndContentProtocol.inspect(data, acceptVideoFragments: acceptVideoFragments, acceptLabels: acceptLabels)
+        let meta = try EndToEndContentProtocol.inspect(data, acceptVideoFragments: acceptVideoFragments, acceptLabels: acceptLabels,
+                                                       acceptDiscoveryExchange: acceptDiscoveryExchange)
         guard meta.sequence >= nextSequence else { throw ProtocolError.replay }
         let header = data.prefix(EndToEndContentProtocol.headerBytes)
         let plaintext = try MeshAead.decrypt(key: key, sequence: meta.sequence, ciphertext: data.dropFirst(EndToEndContentProtocol.headerBytes), associatedData: header)
@@ -112,63 +126,3 @@ public final class EndToEndContentOpener {
     }
 }
 
-public struct EndToEndSession {
-    public let peerNodeId: NodeId
-    public let peerCapabilities: NodeCapabilities
-    public let peerFingerprint: IdentityFingerprint
-    public let sealer: EndToEndContentSealer
-    public let opener: EndToEndContentOpener
-}
-
-/// Optional gate run on every endpoint handshake before any content key is used (verified contacts).
-public protocol PeerIdentityGate: AnyObject {
-    /// Throw to refuse (for example a verified contact's prefix with another key).
-    func admit(peer: NodeId, fingerprint: IdentityFingerprint) throws
-    /// A forwarded stream's original source, known only by its 128-bit node ID from the BFG1 grant.
-    func admitForwardedSource(_ source: NodeId) throws
-}
-
-public extension PeerIdentityGate {
-    func admitForwardedSource(_ source: NodeId) throws {}
-}
-
-/// Endpoint handshake (separate signature/KDF domain) over an authenticated link.
-public final class EndToEndHandshake {
-    public let role: HandshakeRole
-    private let identity: SigningIdentity
-    private let capabilities: NodeCapabilities
-    private var pending: PendingHandshake?
-    private weak var gate: PeerIdentityGate?
-    public init(role: HandshakeRole, identity: SigningIdentity, capabilities: NodeCapabilities, gate: PeerIdentityGate? = nil) {
-        self.role = role; self.identity = identity; self.capabilities = capabilities; self.gate = gate
-    }
-    /// Initiator: the BMS1 type-4 payload to send first.
-    public func initiatorHello(ephemeral: P256.KeyAgreement.PrivateKey = .init()) throws -> Data {
-        precondition(role == .initiator)
-        let p = try MeshHandshake.start(identity: identity, role: .initiator, capabilities: capabilities, purpose: .endToEnd, ephemeral: ephemeral)
-        pending = p
-        return try p.hello.encoded()
-    }
-    /// Consumes the peer's type-4 payload. A responder also returns its own hello payload to send.
-    public func receive(_ payload: Data) throws -> (session: EndToEndSession, reply: Data?) {
-        let remote = try SignedHandshakeHello(decoding: payload)
-        let keys: MeshSessionKeys
-        var reply: Data?
-        switch role {
-        case .initiator:
-            guard let pending else { throw ProtocolError.state("Endpoint handshake not started") }
-            keys = try MeshHandshake.finish(pending, remote: remote)
-        case .responder:
-            guard remote.role == .initiator else { throw ProtocolError.state("Expected an end-to-end initiator") }
-            let p = try MeshHandshake.start(identity: identity, role: .responder, capabilities: capabilities, purpose: .endToEnd)
-            keys = try MeshHandshake.finish(p, remote: remote)
-            reply = try p.hello.encoded()
-        }
-        pending = nil
-        let fingerprint = IdentityFingerprint(publicKey: remote.identityPublicKey)
-        try gate?.admit(peer: keys.peerNodeId, fingerprint: fingerprint)
-        let session = EndToEndSession(peerNodeId: keys.peerNodeId, peerCapabilities: remote.capabilities, peerFingerprint: fingerprint,
-                                      sealer: EndToEndContentSealer(key: keys.sendKey), opener: EndToEndContentOpener(key: keys.receiveKey))
-        return (session, reply)
-    }
-}

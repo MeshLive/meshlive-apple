@@ -282,3 +282,189 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(q.count, 3)
     }
 }
+
+/// Android 2026-10-16 on-time reports and the live media states 4-6 (iPhone as viewer).
+final class OnTimeReportTests: XCTestCase {
+    let vp9 = NodeCapabilities.codecVP9
+
+    private func stream() throws -> (StreamSourceEngine, StreamViewerEngine, Pipe, Box) {
+        let sourceId = SoftwareSigningIdentity(), viewerId = SoftwareSigningIdentity()
+        let header = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
+        let source = StreamSourceEngine(transport: .gatt, identity: sourceId, header: header, expectedViewerPrefix: viewerId.nodeId.prefix)
+        let viewer = StreamViewerEngine(transport: .gatt, identity: viewerId, decodeMask: vp9, expectedAdjacentPrefix: sourceId.nodeId.prefix)
+        let box = Box()
+        source.onEvent = { box.source.append($0) }; viewer.onEvent = { box.viewer.append($0) }
+        let pipe = Pipe(source, viewer, gatt: true)
+        try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
+        return (source, viewer, pipe, box)
+    }
+    final class Box { var source: [StreamSourceEngine.Event] = []; var viewer: [StreamViewerEngine.Event] = [] }
+    private func reports(_ events: [StreamSourceEngine.Event]) -> [LinkCapacityReport] {
+        events.compactMap { if case .peerReport(let r) = $0 { return r }; return nil }
+    }
+
+    func testAnUnmeasuredViewerReportsOnTimeEveryTwoSecondsWhileMediaArrives() throws {
+        let (source, viewer, pipe, box) = try stream()
+        try pipe.advance(3)
+        XCTAssertTrue(reports(box.source).isEmpty, "no media yet: nothing to report")
+        for second in 0..<6 {
+            source.sendVideo(flags: second == 0 ? StreamProtocol.flagKeyFrame : 0, presentationTimeUs: Int64(second) * 1_000_000, payload: Data(repeating: 1, count: 800))
+            try pipe.advance(1)
+        }
+        let sent = reports(box.source)
+        XCTAssertTrue((2...4).contains(sent.count), "about one report per 2 s: \(sent.count)")
+        XCTAssertTrue(sent.allSatisfy { $0.arrivalKbps == 0 && !$0.linkLate && $0.receivedBytes == nil })
+        XCTAssertEqual(viewer.onTimeReportsSent, sent.count)
+        // Media stops: the reports stop too (only the version-1 heartbeat keeps the link alive).
+        try pipe.advance(2)  // the last frame may still earn one report
+        let settled = reports(box.source).count
+        XCTAssertLessThanOrEqual(settled, sent.count + 1)
+        try pipe.advance(2); try pipe.advance(1)
+        XCTAssertEqual(reports(box.source).count, settled)
+        XCTAssertEqual(viewer.phase, .open)
+        // A measured link reports for itself and the on-time report stops.
+        viewer.sendLinkReport(arrivalKbps: 640, linkLate: false, addedDelayMs: 0); try pipe.pump()
+        source.sendVideo(flags: 0, presentationTimeUs: 9_000_000, payload: Data(repeating: 1, count: 800)); try pipe.advance(3)
+        XCTAssertEqual(reports(box.source).last?.arrivalKbps, 640)
+        // Off restores the silent viewer.
+        let (source2, viewer2, pipe2, box2) = try stream()
+        viewer2.onTimeReports = false
+        source2.sendVideo(flags: StreamProtocol.flagKeyFrame, presentationTimeUs: 0, payload: Data(repeating: 1, count: 800)); try pipe2.advance(3)
+        XCTAssertTrue(reports(box2.source).isEmpty)
+    }
+
+    /// Android LinkPacer on the source: the backlog waits in the app queue (control still passes), drains as time
+    /// passes at the seeded pace, and the viewer's on-time reports raise the seed while the source backs up.
+    func testASourcePacesItsChildLinkAndOnTimeReportsRaiseTheSeed() throws {
+        let sourceId = SoftwareSigningIdentity(), viewerId = SoftwareSigningIdentity()
+        let header = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
+        let source = StreamSourceEngine(transport: .gatt, identity: sourceId, header: header, expectedViewerPrefix: viewerId.nodeId.prefix, linkPacing: true)
+        let viewer = StreamViewerEngine(transport: .gatt, identity: viewerId, decodeMask: vp9, expectedAdjacentPrefix: sourceId.nodeId.prefix)
+        let pipe = Pipe(source, viewer, gatt: true)
+        try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
+        XCTAssertEqual(source.pacer?.seedKbps, 350, "seeded at the conservative GATT prior")
+        for i in 0..<20 {   // 20 x 6 KB = 120 KB offered at once: about 2.3 s at the paced 52 500 B/s
+            source.sendVideo(flags: i == 0 ? StreamProtocol.flagKeyFrame : 0, presentationTimeUs: Int64(i) * 66_666, payload: Data(repeating: 1, count: 6_000))
+        }
+        try pipe.pump()
+        XCTAssertLessThan(viewer.videoPackets, 3, "held in the app queue, not written ahead of the link")
+        // The transport driver pumps every 100 ms; the pacer releases what one link second carries.
+        func second() throws { for _ in 0..<10 { try pipe.advance(0.1) } }
+        try second()
+        let afterOne = viewer.videoPackets
+        XCTAssertTrue((7...11).contains(afterOne), "about one second of link time: \(afterOne)")
+        // The viewer's on-time report (unmeasured, media arriving) while the source queue is over 0.5 s old: +25%.
+        try second(); try second()   // the next on-time report is due 2 s after the first
+        XCTAssertGreaterThanOrEqual(source.seedRaises, 1, "seed raised: \(source.pacer?.seedKbps ?? 0)")
+        XCTAssertGreaterThan(source.pacer?.seedKbps ?? 0, 350)
+        for _ in 0..<3 { try second() }
+        XCTAssertEqual(viewer.videoPackets, 20, "everything arrives, in order, nothing dropped")
+    }
+
+    func testDueRule() {
+        XCTAssertTrue(StreamViewerEngine.onTimeReportDue(enabled: true, measured: false, late: false, mediaArrived: true, sinceLastReport: 2))
+        XCTAssertFalse(StreamViewerEngine.onTimeReportDue(enabled: true, measured: false, late: false, mediaArrived: true, sinceLastReport: 1.9))
+        XCTAssertFalse(StreamViewerEngine.onTimeReportDue(enabled: true, measured: true, late: false, mediaArrived: true, sinceLastReport: 5))
+        XCTAssertFalse(StreamViewerEngine.onTimeReportDue(enabled: true, measured: false, late: true, mediaArrived: true, sinceLastReport: 5))
+        XCTAssertFalse(StreamViewerEngine.onTimeReportDue(enabled: true, measured: false, late: false, mediaArrived: false, sinceLastReport: 5))
+        XCTAssertFalse(StreamViewerEngine.onTimeReportDue(enabled: false, measured: false, late: false, mediaArrived: true, sinceLastReport: 5))
+    }
+
+    func testLiveMediaStatesDecodeAsLiveVariants() throws {
+        XCTAssertEqual(try StreamLifecycleState(decoding: Data([4])), .liveMuted)
+        XCTAssertEqual(try StreamLifecycleState(decoding: Data([5])), .liveCameraOff)
+        let both = try StreamLifecycleState(decoding: Data([6]))
+        XCTAssertTrue(both.isLive && both.microphoneMuted && both.cameraOff)
+        XCTAssertFalse(StreamLifecycleState.paused.isLive)
+        XCTAssertThrowsError(try StreamLifecycleState(decoding: Data([7])))
+        XCTAssertThrowsError(try StreamLifecycleState(decoding: Data([0])))
+    }
+}
+
+/// Experimental audio-only live end to end (iPhone source to iPhone listener over the in-memory pipe): BTL1 header,
+/// signed config and 200 ms records, marker agreement both ways, and a forged record ending the stream.
+final class AudioLiveEngineTests: XCTestCase {
+    private let header = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
+
+    private func record(_ signer: AudioLiveSigner, at pts: Int64) throws -> MediaPacket {
+        let units = (0..<10).map { MediaPacket(flags: StreamProtocol.flagAudio, presentationTimeUs: pts + Int64($0) * 20_000, payload: Data([0x08, 1, 2, 3])) }
+        let body = try MediaPacket.combineAudio(units)
+        return try signer.sign(flags: body.flags, presentationTimeUs: body.presentationTimeUs, body: body.payload)
+    }
+
+    func testRadioSourceToListener() throws {
+        for gatt in [false, true] {
+            let sourceId = SoftwareSigningIdentity(), viewerId = SoftwareSigningIdentity()
+            let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
+            let transport: MeshTransport = gatt ? .gatt : .l2cap
+            let source = StreamSourceEngine(transport: transport, identity: sourceId, header: header, expectedViewerPrefix: viewerId.nodeId.prefix, audioLive: signer)
+            let viewer = StreamViewerEngine(transport: transport, identity: viewerId, decodeMask: 0, expectedAdjacentPrefix: sourceId.nodeId.prefix, expectAudioOnly: true)
+            var events: [StreamViewerEngine.Event] = []; viewer.onEvent = { events.append($0) }
+            let pipe = Pipe(source, viewer, gatt: gatt)
+            try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
+            XCTAssertTrue(source.ready); XCTAssertTrue(source.useMeshEnvelope)
+            XCTAssertEqual(viewer.audioLiveHeader, signer.header)
+            XCTAssertEqual(viewer.meshStreamId, signer.streamId)
+            source.sendSignedAudio(try signer.sign(flags: StreamProtocol.flagAudio | StreamProtocol.flagCodecConfig, presentationTimeUs: 0, body: OpusHead.make()))
+            for i in 0..<3 { source.sendSignedAudio(try record(signer, at: Int64(i) * 200_000)) }
+            try pipe.pump()
+            XCTAssertEqual(viewer.audioPackets, 30)
+            XCTAssertEqual(viewer.audioLiveGuard?.verifiedRecords, 4)
+            XCTAssertTrue(events.contains(.audioConfig(OpusHead.make())))
+            source.setPaused(true); try pipe.pump()
+            for _ in 0..<4 { try pipe.advance(1) }
+            source.setPaused(false); try pipe.pump()
+            source.sendSignedAudio(try record(signer, at: 60_000_000)) // resume at a later time: baseline restarted
+            try pipe.pump()
+            XCTAssertEqual(viewer.audioPackets, 40)
+            source.endStream(); try pipe.pump()
+            XCTAssertTrue(events.contains(.state(.ended)))
+            XCTAssertEqual(viewer.phase, .closed)
+        }
+    }
+
+    func testMarkerMismatchAndForgeryFailClosed() throws {
+        let sourceId = SoftwareSigningIdentity(), viewerId = SoftwareSigningIdentity()
+        do { // radio stream, unmarked offer
+            let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
+            let source = StreamSourceEngine(transport: .l2cap, identity: sourceId, header: header, expectedViewerPrefix: nil, audioLive: signer)
+            let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: NodeCapabilities.codecVP9, expectedAdjacentPrefix: nil)
+            let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
+            XCTAssertEqual(viewer.phase, .closed)
+            XCTAssertNil(viewer.audioLiveHeader)
+        }
+        do { // video stream, offer marked audio only
+            let source = StreamSourceEngine(transport: .l2cap, identity: sourceId, header: header, expectedViewerPrefix: nil)
+            let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: NodeCapabilities.codecVP9, expectedAdjacentPrefix: nil, expectAudioOnly: true)
+            let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
+            XCTAssertEqual(viewer.phase, .closed)
+            XCTAssertNil(viewer.header)
+        }
+        do { // a record signed by another stream key
+            let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
+            let forger = try AudioLiveSigner(identity: sourceId, streamId: signer.streamId, preset: AudioLive.presetVoice)
+            let source = StreamSourceEngine(transport: .l2cap, identity: sourceId, header: header, expectedViewerPrefix: nil, audioLive: signer)
+            let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: 0, expectedAdjacentPrefix: nil, expectAudioOnly: true)
+            let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
+            source.sendSignedAudio(try record(signer, at: 0)); try pipe.pump()
+            XCTAssertEqual(viewer.audioPackets, 10)
+            source.sendSignedAudio(try record(forger, at: 200_000)); try pipe.pump()
+            XCTAssertEqual(viewer.audioPackets, 10)
+            XCTAssertEqual(viewer.phase, .closed)
+        }
+    }
+}
+
+final class AudioLiveSheddingTests: XCTestCase {
+    func testAudioQueueShedsOldestWholeRecordsOnly() {
+        var q = OutboundQueues()
+        func item(_ at: TimeInterval) -> OutboundItem { OutboundItem(kind: .raw(Data([1])), enqueuedAt: at, isKeyFrame: false, closeAfter: false) }
+        _ = q.push(item(0), .control)
+        for i in 0..<20 { _ = q.push(item(Double(i) * 0.2), .audio) }   // 0.0 ... 3.8 s
+        XCTAssertEqual(q.shedAudio(now: 2.9, trigger: 3, keep: 1.5), 0, "under the trigger")
+        let dropped = q.shedAudio(now: 4.0, trigger: 3, keep: 1.5)
+        XCTAssertEqual(dropped, 13, "records older than 1.5 s at 4.0 s: 0.0 ... 2.4")
+        XCTAssertEqual(q.audioAge(now: 4.0), 1.4, accuracy: 1e-9)
+        XCTAssertEqual(q.count, 1 + 7, "the control item is never shed")
+    }
+}

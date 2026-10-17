@@ -115,7 +115,7 @@ final class CallController: ObservableObject, Identifiable {
     private var linkPeer: NodeId?
 
     init(model: AppModel, role: PrivateCallRole, peerName: String, peerPrefixHex: String?, identity: SigningIdentity,
-         transport: MeshTransport, type: CallType, relayHops: UInt8, rotating: RotatingCallOptions? = nil) {
+         transport: MeshTransport, type: CallType, relayHops: UInt8, rotating: RotatingCallOptions? = nil, bmh3: Bmh3CallOptions? = nil) {
         self.model = model; self.role = role; self.transport = transport; self.peerName = peerName; self.peerPrefixHex = peerPrefixHex
         callType = type; cameraOn = type == .video; speaker = type == .video
         let expected = peerPrefixHex.flatMap { Data(hex: $0) }
@@ -125,7 +125,7 @@ final class CallController: ObservableObject, Identifiable {
                                          videoBitrate: MediaDefaults.videoKbps * 1000, audioBitrate: 24_000)
         engine = CallEngine(role: role, transport: transport, identity: identity, requestedType: type, encodeMask: VideoDecoderSupport.encodeMask,
                             decodeMask: VideoDecoderSupport.decodeMask, settings: settings, expectedPeerPrefix: expected, relayHops: relayHops,
-                            labels: model.callLabelOptions(), rotating: rotating)
+                            labels: model.callLabelOptions(), rotating: rotating, bmh3: bmh3)
         if rotating != nil, role == .callee {
             // RV8 tarpit: strangers' link hellos wait 2^(n-6) s per epoch; verified contacts never wait.
             let runtime = model.rotating
@@ -174,10 +174,15 @@ final class CallController: ObservableObject, Identifiable {
             let contact = model?.contactName(prefixHex: id.prefix.hex)
             let newLabel = PeerLabel(prefix: id.prefix, contactName: contact, verified: verification == .verified)
             label = newLabel; peerName = newLabel.title
-            if let linkPeer, linkPeer != id { relayed = true }
+            if let linkPeer, linkPeer != id, !engine.linkPeerPseudonymous { relayed = true }
+        case .peerStranger:
+            // BMH3 pseudonyms: a throwaway key; the real identity (and the call history entry) only after its reveal.
+            fingerprint = nil; verification = .unverified
+            label = nil; peerName = "Unverified stranger"
         case .phase(let p):
             phase = p
             if p == .incomingRinging { ringer.start() } else { ringer.stop() }
+            CallNotifier.shared.update(for: self)
             switch p {
             case .outgoingInvite: phaseText = "Calling…"
             case .outgoingRinging: phaseText = "Ringing…"
@@ -231,6 +236,8 @@ final class CallController: ObservableObject, Identifiable {
             AppLog.event("call_auth", ["stage": "endpoint", "peer": id.shortLabel, "handle": IdentityHandle.handle(prefix: id.prefix) ?? "?",
                                        "fingerprint": String(fp.hex.prefix(16)), "codec": "\(engine.selectedCodec.map { $0 == StreamProtocol.codecVP9 ? "vp9" : "av1" } ?? "none")",
                                        "peerCaps": engine.endpoint.map { String(format: "t%02x/e%02x/d%02x/max%d", $0.peerCapabilities.transportMask, $0.peerCapabilities.encodeCodecMask, $0.peerCapabilities.decodeCodecMask, $0.peerCapabilities.maxBitrateKbps) } ?? "?"])
+        case .peerStranger:
+            AppLog.event("bmh3", ["event": "peer", "layer": "endpoint", "pseudonymous": "true", "linkBmh3": "\(engine.linkUsedBmh3)"])
         case .phase(let p): AppLog.event("call_phase", ["role": role == .caller ? "caller" : "callee", "phase": "\(p)", "callId": engine.state?.callId.uuidString ?? "-"])
         case .incomingCall(let t), .offeredTypeChanged(let t): AppLog.event("call_offer", ["type": t.rawValue])
         case .startLocalMedia(let h, let t): AppLog.event("call_media_start", ["type": t.rawValue, "codec": "\(h.codecId)", "size": "\(h.width)x\(h.height)", "fps": "\(h.fps)"])
@@ -280,7 +287,7 @@ final class CallController: ObservableObject, Identifiable {
 
     private func startCamera(header: StreamHeader) {
         guard camera == nil, VP9Encoder.isAvailable else { return }
-        let camera = CameraVideo(width: header.width, height: header.height, fps: header.fps, bitrateKbps: engine.settings.videoBitrate / 1000,
+        let camera = CameraVideo(width: header.width, height: header.height, fps: header.fps, bitrateKbps: engine.effectiveVideoBitrate / 1000,
                                  front: true, clockStart: mediaClock)
         camera.onFrame = { [weak self] flags, pts, data in
             guard let self else { return }
@@ -307,7 +314,13 @@ final class CallController: ObservableObject, Identifiable {
             do { self.callType = type; try self.engine.accept(as: type); self.pump() } catch { self.stats = "\(error)" }
         }
     }
-    func decline() { try? engine.decline(.rejected); pump() }
+    func decline() {
+        do { try engine.decline(.rejected); pump() } catch {
+            // Nothing to decline on the wire (the link is not set up, or a DEBUG fixture): close the screen.
+            CallNotifier.shared.clear()
+            ended = "Call declined"; phaseText = "Call declined"; finished("Call declined")
+        }
+    }
     func end() { engine.end(); pump() }
 
     func toggleMute() { setMuted(!muted) }
@@ -379,7 +392,7 @@ final class CallController: ObservableObject, Identifiable {
         } + [VideoResolution(180, 320), VideoResolution(320, 180)]
         let ladder = CallResolutionLadder(requested: requested, offered: offered, codecId: header.codecId)
         self.ladder = ladder
-        let decision = ladder.start(targetBps: engine.settings.videoBitrate, nowMs: nowMs)
+        let decision = ladder.start(targetBps: engine.effectiveVideoBitrate, nowMs: nowMs)
         if decision.resolution != requested { camera?.setResolution(width: decision.resolution.width, height: decision.resolution.height) }
         AppLog.event("call_resolution", ["requested": "\(requested)", "effective": "\(decision.resolution)", "reason": decision.reason,
                                          "rungs": ladder.rungs.map(\.description).joined(separator: ",")])
@@ -391,7 +404,7 @@ final class CallController: ObservableObject, Identifiable {
     private func adaptVideoRate(now: TimeInterval) {
         guard let camera, engine.canSendMedia, cameraOn else { lastRateWindow = nil; return }
         if rateController == nil {
-            let requested = engine.settings.videoBitrate / 1000
+            let requested = engine.effectiveVideoBitrate / 1000
             rateController = VideoRateController(startKbps: requested, maxKbps: requested)
         }
         let encoded = camera.encodedBytes, sent = engine.sentVideoBytes
@@ -492,6 +505,10 @@ final class WatchController: ObservableObject {
     @Published var stats = ""
     @Published var sourceFingerprint: IdentityFingerprint?
     @Published var signedTitle: String?
+    /// Experimental audio-only live: the selected offer is a radio stream (no video; screen-off playback).
+    let isRadio: Bool
+    /// The verified BTL1 preset once the header arrived (1 Low data, 2 Voice, 3 Music).
+    @Published var radioPreset: UInt8?
     let remote = RemoteVideo()
     private let identity: SigningIdentity
     private var engine: StreamViewerEngine?
@@ -500,8 +517,26 @@ final class WatchController: ObservableObject {
     private var timeout: Timer?
     private var statsTimer: Timer?
 
+    // EXPERIMENTAL forwarding (Settings > Advanced, off by default): pass this stream on to one child.
+    let forwardingEnabled: Bool
+    @Published var sharing = false
+    private(set) var forwardOffer: DiscoveryAnnouncement?
+    private var adjacentNodeId: NodeId?
+    private var core: StreamForwardingCore?
+    private var forwarder: (engine: StreamForwarderEngine, driver: ConnectionDriver, row: UUID)?
+    private var connectingChild: UUID?
+    private var downstreamToken: UInt32 = 0
+    private var health = RelayChildHealthPolicy()
+    private var healthTimer: Timer?
+    private var lastUpstreamKeyRequest: TimeInterval = 0
+    private var childSince: TimeInterval?
+    private var bytesAtChildStart: (in: UInt64, out: UInt64) = (0, 0)
+
     init(model: AppModel, identity: SigningIdentity, offer: DiscoveryAnnouncement, name: String, route: String, transport: MeshTransport) {
         self.model = model; self.identity = identity; self.offer = offer; self.name = name; self.route = route; self.transport = transport
+        isRadio = offer.isAudioOnlyOffer
+        // Forwarding an audio-only stream needs the relay shedding and health rules: not on the iPhone yet.
+        forwardingEnabled = model.relayForOthers && offer.streamToken != 0 && !isRadio
         timeout = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
             guard let self, self.awaitingSource else { return }
             self.finish("Could not join. Move closer and try again. The broadcaster's phone needs \"Find iPhones\" turned on.")
@@ -514,8 +549,16 @@ final class WatchController: ObservableObject {
         guard awaitingSource, link.transport == transport else { link.close(); return }
         awaitingSource = false
         state = "Authenticating…"
+        // Signing maxChildren 1 makes the source send BMV1 envelopes this phone can pass on (exactly 1: more is BGK1).
         let engine = StreamViewerEngine(transport: transport, identity: identity, decodeMask: VideoDecoderSupport.decodeMask,
-                                        expectedAdjacentPrefix: offer.nodeIdPrefix, labels: model?.peerLabelsEnabled ?? false)
+                                        expectedAdjacentPrefix: offer.nodeIdPrefix, maxChildren: forwardingEnabled ? 1 : 0,
+                                        labels: model?.peerLabelsEnabled ?? false,
+                                        rotatingOffer: offer.rotating ? offer : nil, expectAudioOnly: isRadio)
+        engine.onTimeReports = AppSettings.onTimeReports
+        if offer.rotating {
+            // Android rotid_downgrade: this viewer's request carries its fixed prefix while it waits for the source.
+            AppLog.event("rotating_ids", ["event": "downgrade", "role": "viewer"])
+        }
         engine.identityGate = model?.book
         engine.onEvent = { [weak self] in self?.handle($0) }
         self.engine = engine
@@ -525,7 +568,12 @@ final class WatchController: ObservableObject {
         driver.start()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, let engine = self.engine else { return }
-            self.stats = "\(self.transport.label) · \(engine.videoPackets) video / \(engine.audioPackets) audio packets · \(self.remote.decoderName)"
+            if self.isRadio {
+                let verified = engine.audioLiveGuard?.verifiedRecords ?? 0
+                self.stats = "\(self.transport.label) · audio only · \(verified) signed records verified · \(engine.audioPackets) Opus frames"
+            } else {
+                self.stats = "\(self.transport.label) · \(engine.videoPackets) video / \(engine.audioPackets) audio packets · \(self.remote.decoderName)"
+            }
         }
     }
 
@@ -533,6 +581,7 @@ final class WatchController: ObservableObject {
         switch event {
         case .sourceAuthenticated(let adjacent, let source, _): AppLog.event("watch_auth", ["adjacent": adjacent.shortLabel, "source": source.shortLabel])
         case .header(let h): AppLog.event("watch_header", ["codec": "\(h.codecId)", "size": "\(h.width)x\(h.height)", "fps": "\(h.fps)", "audio": "\(h.hasAudio)"])
+        case .audioLiveHeader(let h): AppLog.event("watch_header", ["kind": "audio_only", "preset": "\(h.preset)"])
         case .state(let s): AppLog.event("watch_state", ["state": "\(s)"])
         case .ended(let r, let e): AppLog.event("watch_end", ["reason": r, "error": "\(e)", "video": "\(engine?.videoPackets ?? 0)", "audio": "\(engine?.audioPackets ?? 0)", "decoded": "\(remote.decodedFrames)"])
         case .title: AppLog.event("watch_title", ["title": "set"])
@@ -540,8 +589,9 @@ final class WatchController: ObservableObject {
         }
         switch event {
         case .linkAuthenticated: break
-        case .sourceAuthenticated(_, _, let fp):
-            sourceFingerprint = fp; model?.noteAuthenticated(fp); state = "Waiting for video…"
+        case .sourceAuthenticated(let adjacent, _, let fp):
+            adjacentNodeId = adjacent
+            sourceFingerprint = fp; model?.noteAuthenticated(fp); state = isRadio ? "Waiting for sound…" : "Waiting for video…"
         case .header(let h):
             remote.configure(header: h)
             if h.hasAudio {
@@ -549,14 +599,30 @@ final class WatchController: ObservableObject {
                 audio.start(capture: false); self.audio = audio
             }
             state = ""
+            if forwardingEnabled { considerForwarding(header: h) }
+        case .audioLiveHeader(let h):
+            radioPreset = h.preset
+            let audio = CallAudio(bitrate: AudioLive.presetKbps(h.preset) * 1_000, route: .speaker)
+            audio.start(capture: false); self.audio = audio
+            state = ""
+        case .audioConfig: break
         case .audio(let p): audio?.receive(presentationTimeUs: p.presentationTimeUs, opus: p.payload)
         case .video(let p): remote.decode(p)
         case .rotation(let d): remote.sink.rotation = d
         case .state(let s):
+            let wasPaused = paused
             paused = s == .paused
-            state = s == .paused ? "Paused by the broadcaster" : s == .ended ? "The broadcast ended" : ""
-            if s == .live { remote.requestKeyFrame() }
-        case .envelope: break
+            switch s {
+            case .paused: state = "Paused by the broadcaster"
+            case .ended: state = "The broadcast ended"
+            case .liveMuted: state = "Muted"
+            case .liveCameraOff: state = "Camera off"
+            case .liveMutedCameraOff: state = "Muted, camera off"
+            case .live: state = ""
+            }
+            // An audio-only receiver never asks for a keyframe (PROTOCOL: no type 5 on a radio stream).
+            if !isRadio, s == .live || (s.isLive && wasPaused) { remote.requestKeyFrame() }
+        case .envelope(let e): relay(e)
         case .title(let t): signedTitle = t
         case .routeWithdrawn: state = "This way to the stream is full. Try another one nearby."
         case .ended(let reason, _): finish(reason)
@@ -565,8 +631,153 @@ final class WatchController: ObservableObject {
 
     func stop() { driver?.cancel(); finish("Stopped watching") }
 
+    // MARK: Experimental forwarding
+
+    /// Admission after the header (Android: skipped when the offer's bitrate is unknown), then the offer onward.
+    private func considerForwarding(header: StreamHeader) {
+        guard let model, forwardOffer == nil, let engine, engine.meshStreamId != nil, engine.mediaOpenKey != nil else {
+            AppLog.event("relay_admission", ["started": "false", "reason": "no mesh stream (source sent direct records)"]); return
+        }
+        let learned = AppSettings.relayLearned
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let decision = RelayAdmission.evaluate(learned: learned, advertisedKbps: Int(offer.streamBitrateKbps), fps: header.fps, nowMs: nowMs)
+        AppLog.event("relay_admission", ["cold_start": "\(decision.coldStart)", "needKbps": String(format: "%.0f", decision.needKbps),
+                                         "budgetKbps": String(format: "%.0f", decision.budgetKbps), "measuredKbps": String(format: "%.0f", decision.measuredKbps),
+                                         "fits": "\(decision.fits)", "proven": "\(learned.provenKbps)", "ceiling": "\(learned.ceilingKbps.map(String.init) ?? "none")"])
+        guard decision.fits, let own = model.identityPrefix else { return }
+        downstreamToken = StreamRouteToken.downstream(upstreamRouteToken: offer.streamToken, parentPrefix: offer.nodeIdPrefix, ownPrefix: own)
+        var flags = DiscoveryAnnouncement.flagStreamAvailable | DiscoveryAnnouncement.flagRelayCapable
+        if transport == .gatt { flags |= DiscoveryAnnouncement.flagGattTransport }
+        forwardOffer = DiscoveryAnnouncement(nodeIdPrefix: own, flags: flags, capabilitySummary: StreamProtocol.capabilityMask(codecId: header.codecId),
+                                             streamToken: downstreamToken, routeCost: min(offer.routeCost + 1, 15),
+                                             streamWidth: UInt16(header.displayWidth), streamHeight: UInt16(header.displayHeight),
+                                             streamFps: UInt8(header.fps), streamBitrateKbps: offer.streamBitrateKbps)
+        AppLog.event("relay_offer", ["token": String(format: "%08x", downstreamToken), "routeCost": "\(min(offer.routeCost + 1, 15))", "transport": transport.rawValue])
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.checkChildHealth() }
+        model.refreshAdvertising()
+    }
+
+    private func relay(_ envelope: MeshEnvelope) {
+        guard forwardingEnabled else { return }
+        if core == nil, let adjacent = adjacentNodeId {
+            core = StreamForwardingCore(localNodeId: identity.nodeId, upstreamPeerNodeId: adjacent, streamId: envelope.streamId, sourceNodeId: envelope.sourceNodeId)
+        }
+        guard let core else { return }
+        do {
+            switch try core.receive(envelope) {
+            case .forward(let copy, _):
+                // Relay-child media age: a slow child skips to a keyframe; its paced recovery request goes upstream.
+                if forwarder?.engine.forward(copy, now: ConnectionDriver.now) == .shedWaitingForKeyFrame { requestUpstreamKeyFrame(force: true) }
+                forwarder?.driver.pump()
+            case .waitingForJoinKeyFrame: requestUpstreamKeyFrame()
+            case .rejected: break
+            }
+        } catch {
+            AppLog.event("relay_error", ["stage": "core", "error": "\(error)"])
+        }
+    }
+
+    private func requestUpstreamKeyFrame(force: Bool = false) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard force || now - lastUpstreamKeyRequest > 1 else { return }
+        lastUpstreamKeyRequest = now
+        engine?.requestKeyFrame(); driver?.pump()
+    }
+
+    /// Children advertise a viewer request carrying this phone's downstream token; connect as central.
+    func viewerRequestsChanged(_ peers: [DiscoveredPeer]) {
+        guard forwardOffer != nil, forwarder == nil, connectingChild == nil, ended == nil, let model, let identity = Optional(identity) else { return }
+        guard let peer = peers.first(where: { $0.announcement.isViewerRequest(routeToken: downstreamToken) && $0.announcement.transport == transport }),
+              let engine, let source = engine.mediaSourceNodeId, let streamId = engine.meshStreamId, let key = engine.mediaOpenKey, let header = engine.header else { return }
+        connectingChild = peer.id
+        AppLog.event("relay_child", ["stage": "connect", "prefix": peer.prefixHex, "transport": transport.rawValue])
+        let grant = ForwardedStreamGrant(sourceNodeId: source, streamId: streamId, key: key)
+        model.radio.connect(to: peer.id, transport: transport) { [weak self] result in
+            guard let self else { return }
+            self.connectingChild = nil
+            guard case .success(let link) = result, self.ended == nil, self.forwarder == nil else {
+                if case .success(let l) = result { l.close() }
+                AppLog.event("relay_child", ["stage": "connect_failed"]); return
+            }
+            let labels = self.engine?.labelInbox.verifiedEncoded().isEmpty == false ? try? SignedLabelCodec.encodeContainer(self.engine!.labelInbox.verifiedEncoded()) : nil
+            let child = StreamForwarderEngine(transport: self.transport, identity: identity, grant: grant, codecId: header.codecId,
+                                              expectedChildPrefix: peer.announcement.nodeIdPrefix, labelsContainer: labels)
+            child.linkPacing = AppSettings.linkPacing; child.onTimeSeedRaise = AppSettings.onTimeSeedRaise
+            child.mediaAge = AppSettings.relayChildMediaAge
+            child.identityGate = model.book
+            let driver = ConnectionDriver(engine: child, link: link)
+            child.onEvent = { [weak self] in self?.handleChild($0) }
+            driver.onFinished = { [weak self] reason in self?.removeChild(reason) }
+            self.forwarder = (child, driver, peer.id)
+            self.engine?.holdEndAck = true
+            driver.start()
+            model.refreshAdvertising()   // presence stops while a child is connected
+        }
+    }
+
+    private func handleChild(_ event: StreamForwarderEngine.Event) {
+        guard let forwarder else { return }
+        switch event {
+        case .childAuthenticated(let id, _):
+            AppLog.event("relay_child", ["stage": "authenticated", "child": id.shortLabel])
+            do {
+                for e in try core?.addChild(id) ?? [] { forwarder.engine.forward(e) }
+                forwarder.driver.pump()
+                requestUpstreamKeyFrame(force: true)      // a join needs a fresh keyframe
+                health = RelayChildHealthPolicy(sheddingActive: forwarder.engine.mediaAge)
+                childSince = ProcessInfo.processInfo.systemUptime
+                bytesAtChildStart = (engine?.receivedMediaBytes ?? 0, 0)
+                sharing = true
+            } catch { AppLog.event("relay_error", ["stage": "add_child", "error": "\(error)"]); forwarder.driver.cancel() }
+        case .keyFrameRequested: requestUpstreamKeyFrame(force: true)
+        case .endAcknowledged: engine?.releaseEndAck(); driver?.pump()
+        case .routeWithdrawalAcknowledged, .report: break
+        case .ended(let reason, let error): AppLog.event("relay_child", ["stage": "ended", "reason": reason, "error": "\(error)"])
+        }
+    }
+
+    private func removeChild(_ reason: String) {
+        guard let f = forwarder else { return }
+        if let child = f.engine.endpoint?.peerNodeId { core?.removeChild(child) }
+        learnFromChild(engine: f.engine, withdrawn: false)
+        forwarder = nil; sharing = false; childSince = nil
+        AppLog.event("relay_child", ["stage": "removed", "reason": reason, "forwarded": "\(f.engine.forwardedEnvelopes)"])
+        if let engine, engine.holdEndAck { engine.holdEndAck = false; engine.releaseEndAck() }
+        if ended == nil { model?.refreshAdvertising() }   // offer again
+    }
+
+    /// Withdraw a child whose link stays behind live (hop-local; it can reroute).
+    private func checkChildHealth() {
+        guard let f = forwarder, f.engine.ready else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let backlog = f.engine.backlog(now: now)
+        if health.shouldWithdraw(backlog: backlog, now: now) {
+            AppLog.event("relay_withdraw", ["backlogMs": "\(Int(backlog * 1000))", "queued": "\(f.engine.queuedEnvelopes)"])
+            learnFromChild(engine: f.engine, withdrawn: true)
+            f.engine.withdrawRoute(); f.driver.pump()
+        }
+    }
+
+    /// Proven after a clean relay of at least 10 s (two 5 s windows); a withdrawal records a ceiling.
+    private func learnFromChild(engine child: StreamForwarderEngine, withdrawn: Bool) {
+        guard let since = childSince, let viewer = engine else { return }
+        let seconds = ProcessInfo.processInfo.systemUptime - since
+        guard seconds >= 2 else { return }
+        let kbps = Int(Double((viewer.receivedMediaBytes - bytesAtChildStart.in) + child.forwardedBytes) * 8 / seconds / 1000)
+        var learned = AppSettings.relayLearned
+        if withdrawn {
+            learned.ceilingKbps = kbps; learned.ceilingMeasuredAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+        } else if seconds >= 10 {
+            learned.provenKbps = max(learned.provenKbps, kbps)
+        } else { return }
+        AppSettings.relayLearned = learned
+        AppLog.event("relay_learned", ["kbps": "\(kbps)", "withdrawn": "\(withdrawn)", "proven": "\(learned.provenKbps)", "ceiling": "\(learned.ceilingKbps.map(String.init) ?? "none")"])
+        childSince = nil
+    }
+
     private func finish(_ reason: String) {
         guard ended == nil else { return }
+        healthTimer?.invalidate(); forwarder?.driver.cancel(); forwardOffer = nil
         ended = reason; state = reason; awaitingSource = false
         timeout?.invalidate(); statsTimer?.invalidate()
         audio?.stop(); audio = nil; remote.stop()
@@ -603,8 +814,31 @@ final class LiveController: ObservableObject {
     let labelsEnabled: Bool
     let title: String?
 
-    init(model: AppModel, identity: SigningIdentity, transport: MeshTransport, labels: Bool = false, title: String? = nil) {
+    // Experimental audio-only live ("radio"): microphone only, Opus in 200 ms records signed by a per-stream key.
+    let audioOnly: Bool
+    let preset: UInt8
+    private var signer: AudioLiveSigner?
+    private var signedConfig: MediaPacket?
+    private var batch: [MediaPacket] = []
+    private var nextPts: Int64?
+    @Published var signedRecords = 0
+    /// Audio-only Mute (Android AudioLiveBatcher, review 16): pending units become silence and every later frame
+    /// is replaced by a silence frame, so nothing recorded before the tap goes out and the cadence never changes.
+    @Published var muted = false
+    /// A CELT fullband 20 ms mono frame that decodes to silence (TOC 0xF8, code 0), as Android.
+    static let silenceFrame = Data([0xf8, 0xff, 0xfe])
+
+    func toggleMute() {
+        guard audioOnly else { return }
+        muted.toggle()
+        if muted { batch = batch.map { MediaPacket(flags: $0.flags, presentationTimeUs: $0.presentationTimeUs, payload: Self.silenceFrame) } }
+        AppLog.event("radio_mute", ["muted": "\(muted)"])
+    }
+
+    init(model: AppModel, identity: SigningIdentity, transport: MeshTransport, labels: Bool = false, title: String? = nil,
+         audioOnly: Bool = false, preset: UInt8 = AudioLive.presetVoice) {
         self.model = model; self.identity = identity; self.transport = transport; labelsEnabled = labels; self.title = title
+        self.audioOnly = audioOnly; self.preset = AudioLive.isValidPreset(preset) ? preset : AudioLive.presetVoice
         header = StreamHeader(width: MediaDefaults.width, height: MediaDefaults.height, fps: MediaDefaults.fps, codecId: StreamProtocol.codecVP9,
                               rotationDegrees: 0, includeAudio: true)
         routeToken = (try? StreamRouteToken.forAdvertiser(logical: logicalToken, prefix: identity.nodeId.prefix)) ?? 0
@@ -615,12 +849,18 @@ final class LiveController: ObservableObject {
         if transport == .gatt { flags |= DiscoveryAnnouncement.flagGattTransport }
         if paused { flags |= DiscoveryAnnouncement.flagStreamPaused }
         let full = sessions.count >= maxViewers ? DiscoveryAnnouncement.sequenceSourceFull : 0
+        if audioOnly {
+            // The 0x40 marker with no geometry; the bitrate is the nominal Opus rate (display only).
+            return DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: flags, capabilitySummary: AudioLive.summaryAudioOnly, streamToken: routeToken, routeCost: 0,
+                                         sequence: (generation & 0x7f) | full, streamBitrateKbps: UInt16(AudioLive.presetKbps(preset)))
+        }
         return DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: flags, capabilitySummary: NodeCapabilities.codecVP9, streamToken: routeToken, routeCost: 0,
                                      sequence: (generation & 0x7f) | full, streamWidth: UInt16(header.width), streamHeight: UInt16(header.height),
                                      streamFps: UInt8(header.fps), streamBitrateKbps: UInt16(MediaDefaults.videoKbps))
     }
 
     func start() {
+        if audioOnly { startRadio(); return }
         guard VP9Encoder.isAvailable else { state = "Video can't start on this phone."; return }
         running = true
         let clock = ProcessInfo.processInfo.systemUptime
@@ -642,6 +882,45 @@ final class LiveController: ObservableObject {
         }
     }
 
+    /// Audio-only: the identity key certifies a fresh stream key once; the microphone's 20 ms Opus frames are
+    /// batched into 200 ms records with contiguous timestamps, each signed once and sent to every listener.
+    private func startRadio() {
+        guard CallAudio.opusAvailable else { state = "Audio can't start on this phone."; return }
+        do { signer = try AudioLiveSigner(identity: identity, streamId: streamId, preset: preset) }
+        catch { state = "Could not start: \(error)"; return }
+        signedConfig = try? signer?.sign(flags: StreamProtocol.flagAudio | StreamProtocol.flagCodecConfig, presentationTimeUs: 0, body: OpusHead.make())
+        running = true
+        let audio = CallAudio(bitrate: AudioLive.presetKbps(preset) * 1_000, route: .speaker)
+        audio.onPacket = { [weak self] pts, data in self?.radioFrame(pts: pts, opus: data) }
+        audio.onFailure = { [weak self] message in self?.state = message }
+        audio.start(capture: true)
+        self.audio = audio
+        AppLog.event("radio_start", ["preset": "\(preset)", "stream": streamId.uuidString.prefix(8).description, "transport": transport.rawValue])
+        state = "Live. Waiting for listeners…"
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.stats = "\(self.transport.label) · audio only · \(self.sessions.count) listener(s) · \(self.signedRecords) signed records"
+        }
+    }
+
+    private func radioFrame(pts: Int64, opus: Data) {
+        guard running, !paused, let signer else { return }
+        // Contiguous 20 ms steps from the first frame (the listener's unit rule); a resume re-anchors.
+        let at = nextPts ?? pts
+        nextPts = at + AudioLive.frameUs
+        batch.append(MediaPacket(flags: StreamProtocol.flagAudio, presentationTimeUs: at, payload: muted ? Self.silenceFrame : opus))
+        guard batch.count >= AudioLive.defaultBatchFrames else { return }
+        let units = batch; batch = []
+        do {
+            let body = try MediaPacket.combineAudio(units)
+            let record = try signer.sign(flags: body.flags, presentationTimeUs: body.presentationTimeUs, body: body.payload)
+            signedRecords += 1
+            broadcast { $0.sendSignedAudio(record) }
+        } catch {
+            AppLog.event("radio_error", ["stage": "sign", "error": "\(error)"])
+        }
+    }
+
     private func broadcast(_ send: (StreamSourceEngine) -> Void) {
         for (_, s) in sessions where s.engine.ready { send(s.engine); s.driver.pump() }
     }
@@ -658,14 +937,16 @@ final class LiveController: ObservableObject {
                 self.connecting.remove(peer.id)
                 guard case .success(let link) = result, self.running else { if case .success(let l) = result { l.close() }; return }
                 let engine = StreamSourceEngine(transport: self.transport, identity: self.identity, header: self.header,
-                                                expectedViewerPrefix: viewerPrefix, streamId: self.streamId, labels: self.labelsEnabled, title: self.title)
+                                                expectedViewerPrefix: viewerPrefix, streamId: self.streamId, labels: self.labelsEnabled, title: self.title,
+                                                linkPacing: AppSettings.linkPacing, audioLive: self.signer)
+                engine.onTimeSeedRaise = AppSettings.onTimeSeedRaise
                 engine.identityGate = model.book
                 let driver = ConnectionDriver(engine: engine, link: link)
                 engine.onEvent = { [weak self] event in
                     switch event {
                     case .viewerAuthenticated(let id, let fp):
                         model.noteAuthenticated(fp)
-                        engine.sendAudioConfig()
+                        if let config = self?.signedConfig { engine.sendSignedAudio(config) } else { engine.sendAudioConfig() }
                         self?.camera?.requestKeyFrame()
                         self?.viewers.append(model.contactName(prefixHex: id.prefix.hex) ?? "Viewer \(id.shortLabel.prefix(6))")
                         self?.state = "Live"
@@ -689,6 +970,8 @@ final class LiveController: ObservableObject {
 
     func togglePause() {
         paused.toggle()
+        // Audio-only: nothing captured before the pause is sent after it; the listener's clock baseline restarts.
+        batch = []; nextPts = nil
         for (_, s) in sessions { s.engine.setPaused(paused); s.driver.pump() }
         if !paused { camera?.requestKeyFrame() }
         model?.refreshAdvertising()
@@ -706,6 +989,96 @@ final class LiveController: ObservableObject {
             for (_, s) in self.sessions { s.driver.cancel() }
             self.sessions.removeAll()
             self.model?.liveFinished(self)
+        }
+    }
+}
+
+
+// MARK: - Experimental call relay hop (default off)
+
+/// One relay hop for one call: child (callee or next relay) first as central, then one parent as peripheral.
+/// End-to-end records are copied unchanged; this phone never sees the call's audio or video.
+final class CallRelayController: ObservableObject {
+    weak var model: AppModel?
+    let row: UUID
+    let transport: MeshTransport
+    let hop: CallRelayHop
+    @Published var state = "Connecting to the callee"
+    private var childDriver: ConnectionDriver?
+    private var parentDriver: ConnectionDriver?
+    private var timer: Timer?
+    private var done = false
+
+    init(model: AppModel, identity: SigningIdentity, row: UUID, childOffer: DiscoveryAnnouncement, transport: MeshTransport) {
+        self.model = model; self.row = row; self.transport = transport
+        hop = CallRelayHop(identity: identity, transport: transport, childOffer: childOffer,
+                           hiddenIdentities: model.hiddenIdentities, pins: model.bmh3Pins)
+        hop.onStateChange = { [weak self] s in self?.stateChanged(s) }
+    }
+
+    var awaitingParent: Bool { hop.state == .waitingForParent && hop.parent == nil }
+    var parentOffer: DiscoveryAnnouncement? { hop.parent == nil ? hop.parentOffer : nil }
+
+    func start() {
+        AppLog.event("relay_call", ["stage": "connect_child", "callee": hop.calleePrefix.hex, "childCost": "\(hop.childOffer.routeCost)", "transport": transport.rawValue])
+        model?.radio.connect(to: row, transport: transport) { [weak self] result in
+            guard let self, !self.done else { return }
+            switch result {
+            case .success(let link):
+                let driver = ConnectionDriver(engine: self.hop.child, link: link)
+                driver.onFinished = { [weak self] reason in self?.hop.close("Child link: \(reason)") }
+                self.childDriver = driver
+                driver.start()
+            case .failure(let error):
+                self.finish("Could not reach the callee: \(error)")
+            }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.hop.tick(now: ConnectionDriver.now)
+            self.childDriver?.pump(); self.parentDriver?.pump()
+        }
+    }
+
+    func attachParent(_ link: MeshLink) {
+        guard link.transport == transport, let engine = hop.attachParent() else { link.close(); return }
+        AppLog.event("relay_call", ["stage": "parent_connected", "transport": link.transport.rawValue])
+        let driver = ConnectionDriver(engine: engine, link: link)
+        driver.onFinished = { [weak self] reason in self?.hop.close("Parent link: \(reason)") }
+        parentDriver = driver
+        driver.start()
+        // Copied records are pulled by each link's own driver; pump the other side when one receives.
+        engine.onRecordCopied = { [weak self] in self?.childDriver?.pump() }
+        hop.child.onRecordCopied = { [weak self] in self?.parentDriver?.pump() }
+    }
+
+    private func stateChanged(_ s: CallRelayHop.State) {
+        switch s {
+        case .connectingChild: state = "Connecting to the callee"
+        case .waitingForParent:
+            state = "Passing calls on for a phone near you"
+            AppLog.event("relay_call", ["stage": "child_authenticated", "offerCost": "\(hop.parentOffer?.routeCost ?? 0)"])
+            model?.refreshAdvertising()
+        case .relaying:
+            state = "Passing a call on"
+            AppLog.event("relay_call", ["stage": "relaying"])
+            model?.refreshAdvertising()
+        case .closed(let reason): finish(reason)
+        }
+    }
+
+    func stop() { hop.close("Stopped") }
+
+    private func finish(_ reason: String) {
+        guard !done else { return }
+        done = true
+        timer?.invalidate()
+        AppLog.event("relay_call", ["stage": "closed", "reason": reason, "copiedToCallee": "\(hop.child.copiedRecords)", "copiedToCaller": "\(hop.parent?.copiedRecords ?? 0)"])
+        // Let copied final records (hang-up) drain before closing (Android drains 400 ms).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self else { return }
+            self.childDriver?.cancel(); self.parentDriver?.cancel()
+            self.model?.callRelayFinished(self)
         }
     }
 }

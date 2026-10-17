@@ -1,42 +1,33 @@
 import SwiftUI
 import NearbyCore
 
-struct WatchListView: View {
-    @EnvironmentObject var model: AppModel
-    var body: some View {
-        List {
-            if !model.streams.isEmpty {
-                Section {
-                    ForEach(model.streams) { row in
-                        NavigationLink { WatchView(row: row) } label: {
-                            HStack(spacing: 12) {
-                                MonogramView(label: row.label, size: 40)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(row.title).font(Typo.rowTitle)
-                                    Text(row.detail).font(Typo.secondary).foregroundStyle(Palette.dimInk)
-                                }
-                            }
-                        }
-                        .disabled(model.watch != nil || model.live != nil)
-                    }
-                }
-            }
-        }
-        .monoList()
-        .overlay {
-            if model.streams.isEmpty { EmptyState(icon: AppIcon.watch, title: "No one is live nearby yet", message: "Streams appear here automatically.") }
-        }
-        .navigationTitle("Watch")
+/// List wording (Android 2026-10-17): the advertised title plainly, else "Live from <name>"; the route in words.
+extension StreamRow {
+    var listTitle: String { advertisedTitle ?? "Live from \(label.title)" }
+    var listDetail: String {
+        var text = announcement.routeCost == 0 ? "Nearby" : "Through \(announcement.routeCost) other phone\(announcement.routeCost == 1 ? "" : "s")"
+        if audioOnly { text = "Audio only, " + text }
+        if paused { text += ", paused" } else if full { text += ", full right now" }
+        return text
     }
 }
 
+extension LiveController: Identifiable {}
+
 struct WatchView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
     let row: StreamRow
     var body: some View {
         Group {
-            if let watch = model.watch { WatchPlayer(watch: watch, sink: watch.remote.sink, title: watch.signedTitle ?? row.label.title) }
-            else { Color.black.ignoresSafeArea() }
+            if let watch = model.watch, watch.isRadio { RadioPlayer(watch: watch, title: watch.signedTitle ?? row.listTitle) }
+            else if let watch = model.watch { WatchPlayer(watch: watch, sink: watch.remote.sink, title: watch.signedTitle ?? row.listTitle) }
+            else {
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    VStack { Spacer(); RoundControl(icon: "xmark", label: "Leave") { dismiss() }.padding(.bottom, 16) }
+                }
+            }
         }
         .toolbar(.hidden, for: .navigationBar)
         .onAppear { if model.watch == nil { model.startWatching(row) } }
@@ -72,6 +63,9 @@ private struct WatchPlayer: View {
                     Text(watch.state).font(Typo.body).foregroundStyle(.white).multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity).padding().background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
+                if watch.sharing {
+                    Label("Sharing with a phone near you", systemImage: "arrow.triangle.branch").font(Typo.caption).foregroundStyle(.white.opacity(0.85))
+                }
                 RoundControl(icon: "xmark", label: "Leave") { watch.stop(); dismiss() }
                     .padding(.top, 12)
             }
@@ -79,6 +73,53 @@ private struct WatchPlayer: View {
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showInfo) { NavigationStack { StreamInfoSheet(watch: watch, title: title) } }
+    }
+}
+
+/// Listening to an audio-only stream: black, the radio glyph, the title, "Audio only", the state and Leave.
+/// It keeps playing with the screen locked or MeshLive in the background.
+private struct RadioPlayer: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var watch: WatchController
+    let title: String
+    @State private var showInfo = false
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 18) {
+                HStack(alignment: .top) {
+                    if watch.sourceFingerprint != nil && watch.ended == nil { LiveTag(text: watch.paused ? "Paused" : "Live", blinking: !watch.paused) }
+                    Spacer()
+                    if watch.sourceFingerprint != nil {
+                        Button { showInfo = true } label: {
+                            Image(systemName: AppIcon.lock).font(.title3).frame(width: 44, height: 44).foregroundStyle(.white)
+                        }
+                        .accessibilityLabel("Stream info: encryption and source")
+                    }
+                }
+                Spacer()
+                IconDisc(icon: "radio", size: 120)
+                Text(title).font(.title2.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center).lineLimit(3)
+                Text(subtitle).font(.subheadline).foregroundStyle(Palette.dimInk)
+                if !watch.state.isEmpty {
+                    Text(watch.state).font(.body).foregroundStyle(.white).multilineTextAlignment(.center)
+                }
+                Spacer()
+                Text("Keeps playing with the screen off.").font(.footnote).foregroundStyle(Palette.dimInk)
+                RoundControl(icon: "xmark", label: "Leave") { watch.stop(); dismiss() }
+            }
+            .padding(20)
+        }
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showInfo) { NavigationStack { StreamInfoSheet(watch: watch, title: title) } }
+    }
+    private var subtitle: String {
+        switch watch.radioPreset {
+        case AudioLive.presetLowData?: return "Audio only \u{00B7} Low data"
+        case AudioLive.presetMusic?: return "Audio only \u{00B7} Music"
+        case AudioLive.presetVoice?: return "Audio only \u{00B7} Voice"
+        default: return "Audio only"
+        }
     }
 }
 
@@ -108,42 +149,26 @@ struct StreamInfoSheet: View {
     }
 }
 
-struct LiveView: View {
-    @EnvironmentObject var model: AppModel
-    var body: some View {
-        Group {
-            if let live = model.live { LivePanel(live: live) }
-            else {
-                List {
-                    Section {
-                        Text("Share your camera and voice with phones nearby. Each viewer connects to you directly, and the video is encrypted end to end.")
-                            .font(Typo.body)
-                    } footer: { FooterText("Anyone nearby who opens Watch can see it.") }
-                    if model.peerLabelsEnabled {
-                        Section {
-                            TextField("Title (optional)", text: $model.liveTitle)
-                        } footer: { FooterText("Experimental. Signed with your ID; people nearby see it before they join.") }
-                    }
-                }
-                .monoList()
-                .safeAreaInset(edge: .bottom) {
-                    PrimaryButton(title: "Go live", systemImage: AppIcon.goLive) { model.goLive() }
-                        .disabled(model.call != nil || model.watch != nil)
-                        .padding(.horizontal, 20).padding(.vertical, 8).background(.bar)
-                }
-            }
-        }
-        .navigationTitle("Go live")
-    }
-}
-
-private struct LivePanel: View {
+/// The broadcaster screen (full screen over the Live tab while `model.live` is set).
+struct LivePanel: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var live: LiveController
+    private var radioSubtitle: String {
+        let quality = live.preset == AudioLive.presetLowData ? "Low data" : live.preset == AudioLive.presetMusic ? "Music" : "Voice"
+        return "Audio only \u{00B7} \(quality) \u{00B7} keeps going with the screen off"
+    }
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             if let camera = live.camera { CameraPreviewView(session: camera.session).ignoresSafeArea() }
+            if live.audioOnly {
+                VStack(spacing: 16) {
+                    IconDisc(icon: "radio", size: 120)
+                    Text(live.title ?? "Audio only").font(.title2.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
+                    Text(radioSubtitle).font(.subheadline).foregroundStyle(Palette.dimInk)
+                }
+                .padding(20)
+            }
             VStack {
                 HStack {
                     if !live.state.isEmpty {
@@ -152,6 +177,7 @@ private struct LivePanel: View {
                     }
                     Spacer()
                     LiveTag(text: live.paused ? "Paused" : "Live  \(live.viewers.count)", blinking: !live.paused)
+                        .accessibilityLabel(live.paused ? "Paused" : "Live, \(live.viewers.count) \(live.audioOnly ? "listeners" : "viewers")")
                 }
                 if let health = model.healthMessage {
                     Label(health, systemImage: "thermometer.medium").font(Typo.caption).foregroundStyle(.white)
@@ -159,8 +185,12 @@ private struct LivePanel: View {
                 }
                 Spacer()
                 HStack(spacing: 40) {
+                    if live.audioOnly {
+                        RoundControl(icon: live.muted ? "mic.slash.fill" : "mic.fill", label: live.muted ? "Unmute" : "Mute",
+                                     fill: live.muted ? .white : Palette.callControl, foreground: live.muted ? .black : .white) { live.toggleMute() }
+                    }
                     RoundControl(icon: live.paused ? "play.fill" : "pause.fill", label: live.paused ? "Resume" : "Pause") { live.togglePause() }
-                    RoundControl(icon: "stop.fill", label: "End", fill: Palette.callEnd, size: 68) { live.stop() }
+                    RoundControl(icon: "stop.fill", label: "End", fill: Palette.liveEnd, size: 68) { live.stop() }
                 }
                 .padding(.vertical, 20).frame(maxWidth: .infinity)
                 .background(LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .top, endPoint: .bottom).ignoresSafeArea())

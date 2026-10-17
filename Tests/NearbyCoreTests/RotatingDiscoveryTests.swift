@@ -218,7 +218,7 @@ final class RotatingDiscoveryLinkTests: XCTestCase {
         let calleeId = SoftwareSigningIdentity()
         let entry = RotatingDiscoveryIds.ownEntry(presenceKey: Data(repeating: 7, count: 32), nodeId: calleeId.nodeId.bytes, epoch: 1_990_656, role: 0)
         let caller = CallEngine(role: .caller, transport: .l2cap, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                expectedPeerPrefix: entry.rdi, rotating: RotatingCallOptions(selected: advert(entry.rdi)))
+                                expectedPeerPrefix: entry.rdi, rotating: RotatingCallOptions(selected: advert(entry.rdi), wallEpoch: { 1_990_656 }))
         let callee = CallEngine(role: .callee, transport: .l2cap, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
                                 rotating: RotatingCallOptions(entries: { [entry] }))
         try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
@@ -231,14 +231,14 @@ final class RotatingDiscoveryLinkTests: XCTestCase {
         let entry = RotatingDiscoveryIds.ownEntry(presenceKey: Data(repeating: 7, count: 32), nodeId: realCallee.nodeId.bytes, epoch: 1_990_656, role: 0)
         // Another identity replaying the real callee's entry: the RDI does not recompute from its node ID.
         let caller = CallEngine(role: .caller, transport: .l2cap, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                rotating: RotatingCallOptions(selected: advert(entry.rdi)))
+                                rotating: RotatingCallOptions(selected: advert(entry.rdi), wallEpoch: { 1_990_656 }))
         let impostor = CallEngine(role: .callee, transport: .l2cap, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
                                   rotating: RotatingCallOptions(entries: { [entry] }))
         try caller.start(now: 0); try impostor.start(now: 0); pump(caller, impostor)
         XCTAssertEqual(caller.phase, .closed); XCTAssertNil(impostor.state)
         // An old callee (no bit 3) cannot answer a selected rotating advert.
         let caller2 = CallEngine(role: .caller, transport: .l2cap, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                 rotating: RotatingCallOptions(selected: advert(entry.rdi)))
+                                 rotating: RotatingCallOptions(selected: advert(entry.rdi), wallEpoch: { 1_990_656 }))
         let old = CallEngine(role: .callee, transport: .l2cap, identity: realCallee, requestedType: .voice, encodeMask: vp9, decodeMask: vp9)
         try caller2.start(now: 0); try old.start(now: 0); pump(caller2, old)
         XCTAssertEqual(caller2.phase, .closed)
@@ -252,5 +252,103 @@ final class RotatingDiscoveryLinkTests: XCTestCase {
         try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
         XCTAssertNil(caller.peerOpening); XCTAssertFalse(caller.openingExpected)
         XCTAssertEqual(callee.state?.phase, .incomingRinging, "bit 3 on one side only changes nothing")
+    }
+}
+
+/// RD4 (opening epoch window) and RH4 (2-epoch ahead bound), Android 2026-10-11 / 2026-10-14.
+final class OpeningEpochWindowTests: XCTestCase {
+    func testAnOpeningMoreThanTwoEpochsFromTheVerifiersClockIsStale() {
+        let id = SoftwareSigningIdentity()
+        let e: Int64 = 1_990_656
+        let entry = RotatingDiscoveryIds.ownEntry(presenceKey: Data(repeating: 3, count: 32), nodeId: id.nodeId.bytes, epoch: e, role: 0)
+        var selected = DiscoveryAnnouncement(nodeIdPrefix: entry.rdi, flags: DiscoveryAnnouncement.flagPrivateCallAvailable | DiscoveryAnnouncement.flagAcceptingConnections,
+                                             capabilitySummary: 1, streamToken: 0, routeCost: 0)
+        selected.rotating = true
+        for (wall, expected) in [(e, DiscoverySelectionCheck.Result.pass), (e + 2, .pass), (e - 2, .pass), (e + 3, .openingStale), (e - 3, .openingStale)] {
+            XCTAssertEqual(DiscoverySelectionCheck.check(selected: selected, expectedRole: 0, peerNodeId: id.nodeId.bytes, openingEntries: [entry],
+                                                         verifierWallEpoch: wall), expected, "wall \(wall - e)")
+        }
+        XCTAssertEqual(DiscoveryEpochClock.maxAheadEpochs, 2)
+    }
+
+    func testACallerWhoseClockIsThreeEpochsOffRefusesTheOpening() throws {
+        let vp9 = NodeCapabilities.codecVP9
+        let calleeId = SoftwareSigningIdentity()
+        let entry = RotatingDiscoveryIds.ownEntry(presenceKey: Data(repeating: 7, count: 32), nodeId: calleeId.nodeId.bytes, epoch: 1_990_656, role: 0)
+        var selected = DiscoveryAnnouncement(nodeIdPrefix: entry.rdi, flags: DiscoveryAnnouncement.flagPrivateCallAvailable | DiscoveryAnnouncement.flagAcceptingConnections,
+                                             capabilitySummary: 1, streamToken: 0, routeCost: 0)
+        selected.rotating = true
+        let caller = CallEngine(role: .caller, transport: .l2cap, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                rotating: RotatingCallOptions(selected: selected, wallEpoch: { 1_990_659 }))
+        let callee = CallEngine(role: .callee, transport: .l2cap, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                rotating: RotatingCallOptions(entries: { [entry] }))
+        try caller.start(now: 0); try callee.start(now: 0)
+        for _ in 0..<50 {
+            var moved = false
+            while let d = caller.nextOutgoing(now: 0) { callee.receive(d, now: 0); moved = true }
+            while let d = callee.nextOutgoing(now: 0) { caller.receive(d, now: 0); moved = true }
+            if !moved { break }
+        }
+        XCTAssertEqual(caller.phase, .closed)
+    }
+}
+
+/// Phase 1b streams: Android version 5 stream offers decode, and a viewer of one checks the connector's role-1 BDO1.
+final class RotatingStreamTests: XCTestCase {
+    let vp9 = NodeCapabilities.codecVP9
+    let epoch: Int64 = 1_990_656
+
+    func testAndroidVersion5StreamOfferVector() throws {
+        // PROTOCOL vector: role-1 RDI bb2d061f6480, flags 0x0c, VP9, token for logical 0x12345678, 640x360 15 FPS 300 kbps.
+        let bytes = Data(hex: "05bb2d061f64800c0192529fc40001028001680f012c")!
+        let a = try DiscoveryAnnouncement(decoding: bytes, acceptRotating: true)
+        XCTAssertTrue(a.rotating && a.isStreamOffer); XCTAssertEqual(a.transport, .gatt)
+        XCTAssertEqual(a.streamToken, 0x92529fc4); XCTAssertEqual(a.logicalStreamToken, 0x12345678)
+        XCTAssertEqual(a.streamWidth, 640); XCTAssertEqual(a.streamFps, 15); XCTAssertEqual(a.streamBitrateKbps, 300)
+        XCTAssertEqual(try a.encoded().hex, bytes.hex)
+        XCTAssertThrowsError(try DiscoveryAnnouncement(decoding: bytes), "version 5 is rejected when off")
+        // A version 5 viewer request is still refused (the iPhone never offers a version 5 stream).
+        XCTAssertThrowsError(try DiscoveryAnnouncement(decoding: Data(hex: "05974ae410ea91090092529fc400000000000000012c")!, acceptRotating: true))
+    }
+
+    private func run(sourceId: SigningIdentity, entryOwner: SigningIdentity, sourceEntries: Bool = true, verifierEpoch: Int64? = nil)
+        throws -> (StreamSourceEngine, StreamViewerEngine) {
+        let entry = RotatingDiscoveryIds.ownEntry(presenceKey: Data(repeating: 5, count: 32), nodeId: entryOwner.nodeId.bytes, epoch: epoch, role: 1)
+        let token = try StreamRouteToken.forAdvertiser(logical: 0x1234, prefix: entry.rdi)
+        var offer = DiscoveryAnnouncement(nodeIdPrefix: entry.rdi, flags: DiscoveryAnnouncement.flagStreamAvailable | DiscoveryAnnouncement.flagGattTransport,
+                                          capabilitySummary: vp9, streamToken: token, routeCost: 0)
+        offer.rotating = true
+        let viewerId = SoftwareSigningIdentity()
+        let reference = verifierEpoch ?? epoch
+        let header = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
+        let source = StreamSourceEngine(transport: .gatt, identity: sourceId, header: header, expectedViewerPrefix: viewerId.nodeId.prefix,
+                                        rotatingEntries: sourceEntries ? { [entry] } : nil)
+        let viewer = StreamViewerEngine(transport: .gatt, identity: viewerId, decodeMask: vp9, expectedAdjacentPrefix: offer.nodeIdPrefix,
+                                        rotatingOffer: offer, wallEpoch: { reference })
+        try source.start(now: 0); try viewer.start(now: 0)
+        for _ in 0..<50 {
+            var moved = false
+            while let d = source.nextOutgoing(now: 0) { viewer.receive(d, now: 0); moved = true }
+            while let d = viewer.nextOutgoing(now: 0) { source.receive(d, now: 0); moved = true }
+            if !moved { break }
+        }
+        return (source, viewer)
+    }
+
+    func testAViewerOfARotatingOfferJoinsWhenTheSourceOpensIt() throws {
+        let sourceId = SoftwareSigningIdentity()
+        let (source, viewer) = try run(sourceId: sourceId, entryOwner: sourceId)
+        XCTAssertTrue(source.ready, "\(viewer.closeReason ?? "")"); XCTAssertEqual(viewer.header?.width, 640)
+        XCTAssertEqual(source.peerOpening, [], "the viewer advertised a fixed prefix and opens nothing")
+    }
+
+    func testAnImpostorSourceAStaleOpeningAndAMissingBit3AllFail() throws {
+        let (_, impostorViewer) = try run(sourceId: SoftwareSigningIdentity(), entryOwner: SoftwareSigningIdentity())
+        XCTAssertEqual(impostorViewer.phase, .closed)
+        let sourceId = SoftwareSigningIdentity()
+        let (_, staleViewer) = try run(sourceId: sourceId, entryOwner: sourceId, verifierEpoch: epoch + 3)
+        XCTAssertEqual(staleViewer.phase, .closed)
+        let (_, noBitViewer) = try run(sourceId: sourceId, entryOwner: sourceId, sourceEntries: false)
+        XCTAssertEqual(noBitViewer.phase, .closed)
     }
 }

@@ -28,13 +28,89 @@ public struct RotatingCallOptions {
     public var selected: DiscoveryAnnouncement?
     /// Callee: this phone's pinned role-0 opening entries (pin rule).
     public var entries: (() -> [OpeningEntry])?
-    public init(selected: DiscoveryAnnouncement? = nil, entries: (() -> [OpeningEntry])? = nil) { self.selected = selected; self.entries = entries }
+    /// The verifier's wall-clock epoch for the RD4 window of an opening.
+    public var wallEpoch: () -> Int64
+    /// Phase 2: the presence-lease exchange with a mutual verified contact (nil = no OFFER/LEASE).
+    public var presence: PresenceCallHooks?
+    public init(selected: DiscoveryAnnouncement? = nil, entries: (() -> [OpeningEntry])? = nil,
+                wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
+        self.selected = selected; self.entries = entries; self.wallEpoch = wallEpoch
+    }
+}
+
+/// Phase 2 presence leases for one call: what the app's vault answers. Every check runs again at send time.
+public struct PresenceCallHooks {
+    /// This side may offer: the peer's real identity is a verified contact, its "Can see when I'm nearby" switch is on
+    /// and the vault is persistent.
+    public var eligible: (NodeId, IdentityFingerprint) -> Bool
+    /// The lease for the peer, recorded as delivered first; nil withholds it.
+    public var lease: (NodeId, IdentityFingerprint) -> DiscoveryExchange.PresenceLease?
+    /// A lease from the peer passed the session rules.
+    public var store: (NodeId, DiscoveryExchange.PresenceLease) -> Void
+    /// The peer's fingerprint is verified in the store right now.
+    public var verified: (IdentityFingerprint) -> Bool
+    public init(eligible: @escaping (NodeId, IdentityFingerprint) -> Bool, lease: @escaping (NodeId, IdentityFingerprint) -> DiscoveryExchange.PresenceLease?,
+                store: @escaping (NodeId, DiscoveryExchange.PresenceLease) -> Void, verified: @escaping (IdentityFingerprint) -> Bool) {
+        self.eligible = eligible; self.lease = lease; self.store = store; self.verified = verified
+    }
+}
+
+/// EXPERIMENTAL BMH3 for one call (Android "Hidden identities" and "Pseudonymous toward strangers"; nil = BMH2 only).
+public struct Bmh3CallOptions {
+    /// Pseudonym mode (rule P): strangers meet a throwaway key; needs rotating IDs, as on Android. It also means this
+    /// phone never speaks BMH2 and refuses a BMH2 caller (PR1).
+    public var pseudonyms: Bool
+    /// Caller: the offer the user selected (any version; a version 5 one is always BMH3, a version 2 one with the hint).
+    public var selected: DiscoveryAnnouncement?
+    public var pins: Bmh3Pins?
+    /// The responder's signing budget (process-wide by default).
+    public var budget: Bmh3SigningBudget
+    public var wallEpoch: () -> Int64
+    /// Phase 2 (caller): the contact tag for a recognised contact's selected advert.
+    public var contactTag: Bmh3ContactTag?
+    /// Phase 2 (callee): this phone's tag checks for the adverts it has on air, and the lease recipients.
+    public var tagChecks: (() -> [Bmh3ContactTag])?
+    public var admitTagged: ((NodeId) -> Bool)?
+    public init(pseudonyms: Bool, selected: DiscoveryAnnouncement? = nil, pins: Bmh3Pins? = nil,
+                budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
+        self.pseudonyms = pseudonyms; self.selected = selected; self.pins = pins; self.budget = budget; self.wallEpoch = wallEpoch
+    }
+
+    /// The per-connection BMH3 settings, or nil when this connection speaks BMH2 (the caller's `Bmh3Choice`).
+    func settings(role: PrivateCallRole, openingEntries: (() -> [OpeningEntry])?) -> Bmh3CallSettings? {
+        switch role {
+        case .caller:
+            let pinned = selected.map { pins?.isPinned($0.nodeIdPrefix) ?? false } ?? false
+            guard Bmh3Choice.decide(enabled: true, only: pseudonyms, offer: selected, pinned: pinned).bmh3 else { return nil }
+            let towardRelay = (selected?.routeCost ?? 0) > 0
+            let settings = Bmh3CallSettings(
+                speak: true,
+                stranger: pseudonyms && selected != nil ? SoftwareSigningIdentity() : nil,
+                linkIdentityOverride: towardRelay ? SoftwareSigningIdentity() : nil,
+                checkResponder: selected.map { Bmh3CallSettings.selectionCheck($0, wallEpoch: wallEpoch) } ?? { _, _ in })
+            if let pins, !towardRelay { settings.onRealResponder = { peer in pins.pin(peer.nodeId.prefix) } }
+            settings.contactTag = contactTag
+            settings.linkTag = !towardRelay
+            return settings
+        case .callee:
+            // Rule P fails closed: in pseudonym mode every untagged connection meets a fresh throwaway for this connection.
+            let settings = Bmh3CallSettings(speak: false, acceptBmh2: !pseudonyms, stranger: pseudonyms ? SoftwareSigningIdentity() : nil,
+                                            opening: { Bmh3CallSettings.openingValue(openingEntries?() ?? []) },
+                                            replayCache: Bmh3CallSettings.sharedReplayCache, budget: budget)
+            if let tagChecks { settings.tagChecks = tagChecks }
+            if let admitTagged { settings.admitTagged = admitTagged }
+            return settings
+        }
+    }
 }
 
 public final class CallEngine: MeshConnection {
     public enum Event: Equatable {
         case linkAuthenticated(NodeId)
         case peerAuthenticated(NodeId, IdentityFingerprint)
+        /// BMH3 pseudonyms: the peer is an unverified stranger behind a throwaway key (no node ID, no fingerprint) until
+        /// its reveal, which then arrives as `peerAuthenticated` with the real identity.
+        case peerStranger
         case phase(PrivateCallPhase)
         case incomingCall(CallType)
         case offeredTypeChanged(CallType)
@@ -62,6 +138,8 @@ public final class CallEngine: MeshConnection {
     public var onEvent: ((Event) -> Void)?
     public private(set) var state: PrivateCallState?
     public private(set) var relayHops: UInt8
+    /// Relayed calls cap video at 110 kbps (Android PrivateCallMedia: 15 fps / 110 kbps when hops > 0).
+    public var effectiveVideoBitrate: Int { relayHops > 0 ? min(settings.videoBitrate, 110_000) : settings.videoBitrate }
     public private(set) var selectedCodec: UInt8?
     public private(set) var remoteHeader: StreamHeader?
     public private(set) var localHeader: StreamHeader?
@@ -95,9 +173,10 @@ public final class CallEngine: MeshConnection {
     public init(role: PrivateCallRole, transport: MeshTransport, identity: SigningIdentity, requestedType: CallType,
                 encodeMask: UInt8, decodeMask: UInt8, settings: CallMediaSettings = CallMediaSettings(),
                 expectedPeerPrefix: Data? = nil, relayHops: UInt8 = 0, videoFragments: Bool = false, labels: CallLabelOptions? = nil,
-                rotating: RotatingCallOptions? = nil) {
+                rotating: RotatingCallOptions? = nil, bmh3: Bmh3CallOptions? = nil) {
         labelOptions = labels
         rotatingOptions = rotating
+        bmh3Options = bmh3
         callRole = role
         negotiation = VoiceCallNegotiation(role: role, requested: requestedType)
         self.relayHops = relayHops
@@ -111,8 +190,11 @@ public final class CallEngine: MeshConnection {
         if rotating != nil { link.transportMask |= NodeCapabilities.transportDiscoveryOpening }
         if videoFragments { endpointCaps.transportMask |= NodeCapabilities.transportVideoFragments }
         endpointCaps = PeerLabelFeature.advertise(endpointCaps, enabled: labels != nil)
+        // Rotating IDs phase 1b: call endpoints also sign end-to-end bit 3 (BDX1 OPENING / reveal exchange).
+        if rotating != nil { endpointCaps.transportMask |= NodeCapabilities.endpointDiscoveryExchange }
+        let bmh3Settings = bmh3?.settings(role: role, openingEntries: rotating?.entries)
         super.init(role: role == .caller ? .initiator : .responder, transport: transport, identity: identity,
-                   linkCapabilities: link, endpointCapabilities: endpointCaps)
+                   linkCapabilities: link, endpointCapabilities: endpointCaps, bmh3: bmh3Settings)
         self.expectedPeerPrefix = rotating?.selected?.rotating == true ? nil : expectedPeerPrefix
         if let rotating {
             discoveryOpeningEntries = { [weak self] in self?.callRole == .callee ? (rotating.entries?() ?? []) : [] }
@@ -125,16 +207,131 @@ public final class CallEngine: MeshConnection {
     private var selectedRotating: DiscoveryAnnouncement? { rotatingOptions?.selected.flatMap { $0.rotating ? $0 : nil } }
 
     public override func validateLinkPeer() throws {
-        // A selected rotating advert needs the opening; a peer without bit 3 fails like a prefix mismatch.
-        if selectedRotating != nil, (link.peerCapabilities?.transportMask ?? 0) & NodeCapabilities.transportDiscoveryOpening == 0 {
+        // A selected rotating advert needs the opening; a peer without bit 3 fails like a prefix mismatch. A pseudonymous
+        // BMH3 answerer withholds its opening until its reveal; a relay (route cost above 0) cannot open the callee's ID.
+        if selectedRotating != nil, !link.peerPseudonymous, (selectedRotating?.routeCost ?? 0) == 0,
+           (link.peerCapabilities?.transportMask ?? 0) & NodeCapabilities.transportDiscoveryOpening == 0 {
             throw ProtocolError.authentication
         }
+    }
+
+    // MARK: Experimental BMH3 pseudonyms and the BDX1 exchange (phase 1b)
+    private let bmh3Options: Bmh3CallOptions?
+    /// Both endpoint hellos carried bit 3: BDX1 (content type 11) records are exchanged.
+    public private(set) var discoveryNegotiated = false
+    /// Caller: the callee's first end-to-end record must be its BDX1 OPENING for the selected rotating offer.
+    private var awaitingOpening = false
+    /// Caller: the callee answered with a throwaway; its reveal must arrive (before Accept) and open the selection.
+    private var awaitingReveal = false
+    /// Caller labels held until the callee proved itself (reveal or relayed OPENING).
+    private var heldCallerLabels: Data?
+    /// Callee: the role-0 entries pinned when the connection was set up (sent in the OPENING or the reveal).
+    private var calleeEntries: [OpeningEntry] = []
+    /// The peer's real identity after a verified reveal.
+    public private(set) var revealedPeer: Bmh3Reveal.Verified?
+    /// True while the peer is a stranger behind a throwaway key.
+    public var peerIsStranger: Bool { endpoint?.peerPseudonymous == true && revealedPeer == nil }
+    /// The key this phone signs labels with (a pseudonym in a stranger session).
+    private var labelSigner: SigningIdentity { endpoint?.presentedIdentity ?? identity }
+
+    private var selectedOffer: DiscoveryAnnouncement? { bmh3Options?.selected ?? rotatingOptions?.selected }
+
+    private func handleDiscoveryExchange(_ payload: Data) throws {
+        let record: DiscoveryExchange.Record
+        do { record = try DiscoveryExchange.decode(payload) } catch {
+            // A BDX1 record never fails a call, except a reveal (below) or a missing OPENING the caller waits for.
+            if awaitingOpening { throw ProtocolError.authentication }
+            return
+        }
+        switch record {
+        case .opening(let entries):
+            guard awaitingOpening, let selected = selectedOffer, let endpoint else { return } // not examined otherwise
+            awaitingOpening = false
+            guard DiscoverySelectionCheck.check(selected: selected, expectedRole: RotatingDiscoveryIds.roleCallOffer,
+                                                peerNodeId: endpoint.peerNodeId.bytes, openingEntries: entries, verifierWallEpoch: rotatingOptions?.wallEpoch()) == .pass else {
+                throw ProtocolError.authentication
+            }
+            releaseHeldCallerLabels()
+        case .identityReveal(let reveal):
+            guard let session = endpoint?.reveal else { throw ProtocolError.state("Unexpected identity reveal") }
+            let verified = try session.onPeerReveal(reveal)
+            // A verified contact's prefix with another key ends the call before this phone reveals anything.
+            try identityGate?.admit(peer: verified.nodeId, fingerprint: verified.fingerprint)
+            if callRole == .caller {
+                guard awaitingReveal, let selected = selectedOffer else { throw ProtocolError.state("Unexpected callee reveal") }
+                guard DiscoverySelectionCheck.check(selected: selected, expectedRole: RotatingDiscoveryIds.roleCallOffer,
+                                                    peerNodeId: verified.nodeId.bytes, openingEntries: verified.entries, verifierWallEpoch: rotatingOptions?.wallEpoch()) == .pass else {
+                    throw ProtocolError.authentication
+                }
+                awaitingReveal = false
+                revealedPeer = verified
+                onEvent?(.peerAuthenticated(verified.nodeId, verified.fingerprint))
+                if session.callerMayReveal {
+                    enqueue(.content(.discoveryExchange, 0, try session.sendOwn(real: identity, entries: [])), .control)
+                }
+                releaseHeldCallerLabels()
+            } else {
+                revealedPeer = verified
+                onEvent?(.peerAuthenticated(verified.nodeId, verified.fingerprint))
+                // The callee answered before it knew who called: the presence exchange starts with the real identity now.
+                if state?.phase == .negotiatingMedia || state?.phase == .active { startPresence() }
+            }
+        case .recognitionOffer, .presenceLease:
+            // Phase 2: never fails a call; anything the session rules refuse is dropped and logged by the app.
+            guard let session = presenceSessionIfReady(), let peer = realPeer, let hooks = rotatingOptions?.presence else { return }
+            perform(session.onRecord(record, peerVerifiedNow: hooks.verified(peer.fingerprint)))
+        }
+    }
+
+    // MARK: Phase 2 presence leases (answered calls between mutual verified contacts)
+    private var presenceSession: PresenceSession?
+    public private(set) var presenceRejections: [String] = []
+    public private(set) var presenceLeasesSent = 0, presenceLeasesStored = 0
+
+    /// The peer's real identity: the endpoint, or after a pseudonym session its verified reveal; nil while a stranger.
+    private var realPeer: (nodeId: NodeId, fingerprint: IdentityFingerprint)? {
+        if let revealedPeer { return (revealedPeer.nodeId, revealedPeer.fingerprint) }
+        guard let endpoint, !endpoint.peerPseudonymous else { return nil }
+        return (endpoint.peerNodeId, endpoint.peerFingerprint)
+    }
+
+    private func presenceSessionIfReady() -> PresenceSession? {
+        if let presenceSession { return presenceSession }
+        guard discoveryNegotiated, let hooks = rotatingOptions?.presence, let peer = realPeer else { return nil }
+        let session = PresenceSession(localEligible: hooks.eligible(peer.nodeId, peer.fingerprint))
+        presenceSession = session
+        return session
+    }
+
+    /// The call was answered: offer (the peer may have offered first).
+    private func startPresence() { if let session = presenceSessionIfReady() { perform(session.start()) } }
+
+    private func perform(_ actions: [PresenceSession.Action]) {
+        guard let hooks = rotatingOptions?.presence, let peer = realPeer else { return }
+        for action in actions {
+            switch action {
+            case .sendOffer:
+                if hooks.eligible(peer.nodeId, peer.fingerprint), let bytes = try? DiscoveryExchange.encode(.recognitionOffer) {
+                    enqueue(.content(.discoveryExchange, 0, bytes), .control)
+                } else { presenceSession?.offerWithheld() }
+            case .sendLease:
+                if let lease = hooks.lease(peer.nodeId, peer.fingerprint), let bytes = try? DiscoveryExchange.encode(.presenceLease(lease)) {
+                    enqueue(.content(.discoveryExchange, 0, bytes), .control); presenceLeasesSent += 1
+                }
+            case .storeLease(let lease): hooks.store(peer.nodeId, lease); presenceLeasesStored += 1
+            case .reject(let reason): presenceRejections.append(reason)
+            }
+        }
+    }
+
+    private func releaseHeldCallerLabels() {
+        if let held = heldCallerLabels { heldCallerLabels = nil; enqueue(.content(.labels, 0, held), .control) }
     }
 
     private func checkOpening(_ entries: [OpeningEntry]) throws {
         guard let selected = selectedRotating, let peer = link.peerNodeId else { return }
         guard DiscoverySelectionCheck.check(selected: selected, expectedRole: RotatingDiscoveryIds.roleCallOffer, peerNodeId: peer.bytes,
-                                            openingEntries: entries) == .pass else { throw ProtocolError.authentication }
+                                            openingEntries: entries, verifierWallEpoch: rotatingOptions?.wallEpoch()) == .pass else { throw ProtocolError.authentication }
     }
 
     // A relayed caller's adjacent link is the relay; the endpoint must still match the callee prefix.
@@ -143,11 +340,29 @@ public final class CallEngine: MeshConnection {
     public override func linkDidAuthenticate() { if let id = link.peerNodeId { onEvent?(.linkAuthenticated(id)) } }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
-        // Phase 1 calls rotating offers only directly: the endpoint must be the link peer that opened the ID.
-        if selectedRotating != nil {
-            guard session.peerNodeId == link.peerNodeId, peerOpening != nil else { throw ProtocolError.authentication }
+        discoveryNegotiated = rotatingOptions != nil &&
+            session.peerCapabilities.transportMask & NodeCapabilities.endpointDiscoveryExchange != 0
+        session.opener.acceptDiscoveryExchange = discoveryNegotiated
+        if callRole == .callee { calleeEntries = rotatingOptions?.entries?() ?? [] }
+        if callRole == .caller, let selected = selectedOffer {
+            if session.peerPseudonymous {
+                // The callee answered with a throwaway (any offer version): the binding arrives in its reveal, after
+                // Accept. A direct call must still reach the same throwaway at both layers.
+                guard discoveryNegotiated, session.reveal != nil else { throw ProtocolError.authentication }
+                guard selected.routeCost > 0 || session.peerNodeId == link.peerNodeId else { throw ProtocolError.authentication }
+                awaitingReveal = true
+            } else if selected.rotating {
+                // RV15: the check follows the selected version 5 offer. A direct call keeps the link opening and requires
+                // the endpoint to be the link peer; with bit 3 on both sides the callee's first record is its OPENING.
+                if selected.routeCost == 0 {
+                    guard session.peerNodeId == link.peerNodeId, peerOpening != nil || link.usedBmh3 else { throw ProtocolError.authentication }
+                }
+                if discoveryNegotiated { awaitingOpening = true }
+                else if selected.routeCost > 0 { throw ProtocolError.authentication }
+            }
         }
-        onEvent?(.peerAuthenticated(session.peerNodeId, session.peerFingerprint))
+        if session.peerPseudonymous { onEvent?(.peerStranger) }
+        else { onEvent?(.peerAuthenticated(session.peerNodeId, session.peerFingerprint)) }
         peerAcceptsFragments = fragmentsEnabled && relayHops == 0 && session.peerCapabilities.transportMask & NodeCapabilities.transportVideoFragments != 0
         session.opener.acceptVideoFragments = fragmentsEnabled
         session.opener.acceptLabels = labelOptions != nil
@@ -168,7 +383,12 @@ public final class CallEngine: MeshConnection {
             if peerAcceptsLabels, let options = labelOptions {
                 let binding = LabelBinding.call(initial.callId)
                 let labels = [signLabel(.personName, options.localName, binding), signLabel(.callSubject, options.subject, binding)].compactMap { $0 }
-                if !labels.isEmpty, let container = try? SignedLabelCodec.encodeContainer(labels) { enqueue(.content(.labels, 0, container), .control) }
+                if !labels.isEmpty, let container = try? SignedLabelCodec.encodeContainer(labels) {
+                    // A stranger session holds the caller's name and subject until the callee proved itself (PR6), as does
+                    // a relayed rotating offer until its OPENING passed.
+                    if awaitingReveal || (awaitingOpening && (selectedOffer?.routeCost ?? 0) > 0) { heldCallerLabels = container }
+                    else { enqueue(.content(.labels, 0, container), .control) }
+                }
             }
             for signal in negotiation.inviteSignals() { try sendSignal(signal) }
         }
@@ -213,7 +433,11 @@ public final class CallEngine: MeshConnection {
     }
 
     private func handleContent(_ content: EndToEndContentRecord) throws {
+        // Rotating IDs phase 1b: the callee's first end-to-end record is its OPENING; anything else ends the call.
+        if awaitingOpening && content.type != .discoveryExchange { throw ProtocolError.authentication }
         switch content.type {
+        case .discoveryExchange:
+            try handleDiscoveryExchange(content.payload)
         case .privateCallSignal:
             try handleSignal(try PrivateCallSignalMessage(decoding: content.payload))
         case .streamHeader:
@@ -254,7 +478,7 @@ public final class CallEngine: MeshConnection {
 
     private func signLabel(_ kind: LabelKind, _ text: String?, _ binding: LabelBinding) -> Data? {
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return try? SignedLabelCodec.sign(identity: identity, kind: kind, binding: binding, text: text)
+        return try? SignedLabelCodec.sign(identity: labelSigner, kind: kind, binding: binding, text: text)
     }
 
     private func applyLabels(_ payload: Data, callId: UUID) {
@@ -300,6 +524,11 @@ public final class CallEngine: MeshConnection {
             state = incoming
             ringingSince = now
             onEvent?(.phase(incoming.phase))
+            // Rotating IDs phase 1b: the OPENING goes first, ahead of any label or answer (RD6). A pseudonymous callee
+            // keeps its salt until its reveal at Accept.
+            if discoveryNegotiated, endpoint?.reveal?.ownPseudonymous != true {
+                enqueue(.content(.discoveryExchange, 0, try DiscoveryExchange.encode(.opening(calleeEntries))), .control)
+            }
             try sendSignal(.ringing)
             if let buffered = bufferedLabels { bufferedLabels = nil; applyLabels(buffered, callId: message.callId) }
             if peerAcceptsLabels { prepareCalleeLabels(callId: message.callId) }
@@ -310,7 +539,10 @@ public final class CallEngine: MeshConnection {
         switch message.signal {
         case .ringing: try transition(.remoteRinging)
         case .accept:
+            // A pseudonymous callee's reveal precedes its Accept; an Accept without one could not prove the offer.
+            if awaitingReveal { throw ProtocolError.authentication }
             try transition(.remoteAccept)
+            startPresence()
             startLocalMedia()
         case .decline:
             try transition(.remoteDecline); finish("Call declined (\(message.reason))", error: false)
@@ -351,10 +583,16 @@ public final class CallEngine: MeshConnection {
         try transition(.localAccept)
         let answerVoice = (type ?? negotiation.localType) == .voice
         cameraEnabled = !answerVoice
+        // BMH3 pseudonyms: accepting tells a stranger caller who this phone is. The reveal (with the pinned opening
+        // entries) goes before the name and the Accept in the same ordered queue.
+        if let reveal = endpoint?.reveal, reveal.ownPseudonymous, reveal.peerPseudonymous {
+            enqueue(.content(.discoveryExchange, 0, try reveal.sendOwn(real: identity, entries: calleeEntries)), .control)
+        }
         // R1: the callee's name travels immediately before Accept (never on decline, cancel or no answer).
         if let labels = pendingAcceptLabels { pendingAcceptLabels = nil; enqueue(.content(.labels, 0, labels), .control) }
         try sendSignal(.accept)
         if answerVoice { try sendSignal(.cameraOff) }
+        startPresence()
         startLocalMedia()
     }
 

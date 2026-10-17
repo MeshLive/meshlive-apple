@@ -53,7 +53,7 @@ configs = []
 coreconfigs = []
 for name in ["Debug", "Release"]:
     settings = {
-        "PRODUCT_NAME":"NearbyIntercom", "PRODUCT_BUNDLE_IDENTIFIER":"org.nearbyintercom.ios",
+        "PRODUCT_NAME":"NearbyIntercom", "PRODUCT_BUNDLE_IDENTIFIER":"io.github.meshlive.app",
         "IPHONEOS_DEPLOYMENT_TARGET":"16.0", "SDKROOT":"iphoneos", "TARGETED_DEVICE_FAMILY":"1",
         "SUPPORTED_PLATFORMS":"iphoneos iphonesimulator", "SWIFT_VERSION":"5.0",
         "INFOPLIST_FILE":"App/Info.plist", "SWIFT_OBJC_BRIDGING_HEADER":"Experimental/V1App/BridgingHeader.h" if v1 else "App/BridgingHeader.h",
@@ -96,7 +96,7 @@ if not v1 and (root / "UITests").exists():
     uiphase = obj("ui-sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(uibuild)}); runOnlyForDeploymentPostprocessing = 0;')
     uiconfigs = []
     for name in ["Debug", "Release"]:
-        us = {"PRODUCT_NAME": "NearbyIntercomUITests", "PRODUCT_BUNDLE_IDENTIFIER": "org.nearbyintercom.ios.uitests", "TEST_TARGET_NAME": "NearbyIntercom",
+        us = {"PRODUCT_NAME": "NearbyIntercomUITests", "PRODUCT_BUNDLE_IDENTIFIER": "io.github.meshlive.app.uitests", "TEST_TARGET_NAME": "NearbyIntercom",
               "GENERATE_INFOPLIST_FILE": "YES", "IPHONEOS_DEPLOYMENT_TARGET": "16.0", "SDKROOT": "iphoneos", "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator",
               "TARGETED_DEVICE_FAMILY": "1", "SWIFT_VERSION": "5.0", "CODE_SIGN_STYLE": "Automatic", "SWIFT_OPTIMIZATION_LEVEL": "-Onone"}
         uvalues = " ".join(f'{k} = {quote(v)};' for k, v in us.items())

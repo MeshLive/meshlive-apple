@@ -51,6 +51,8 @@ MeshLive for iPhone is **early and mostly untested on hardware.**
 | Watch a live stream | needs the same Android experiment on the source | needs the same experiment on the viewer |
 | Identity verification (QR, safety code) | same codes on both | same codes on both |
 
+**Experimental, off by default (this branch, `relay`):** passing streams and calls on to other phones (Settings › Advanced › "Help pass streams and calls to others nearby (experimental)"). Not yet tried on phones.
+
 **Impossible or restricted on iOS**
 
 - Bluetooth Classic RFCOMM: no public API.
@@ -59,7 +61,7 @@ MeshLive for iPhone is **early and mostly untested on hardware.**
 - Manufacturer data in advertisements: hence the compact UUID.
 - VP9/AV1 hardware encoding: the iPhone encodes VP9 in software with libvpx.
 
-**Not implemented yet:** relaying streams and calls (in development), store-and-forward messages, group (BGK1) relays, CallKit.
+**Not implemented yet:** store-and-forward messages, group (BGK1) relays, relay re-anchor and parent-silence recovery, the route-recovery hint and CallKit.
 
 ## Help wanted (iPhone owners)
 
@@ -89,7 +91,7 @@ bash Scripts/build.sh iphoneos    # unsigned device build; iphonesimulator = ad-
 bash Scripts/smoke-simulator.sh   # launch in a simulator (UI only; simulators have no Bluetooth)
 ```
 
-To run on a phone, open `NearbyIntercom.xcodeproj`, choose your team and a unique bundle identifier, and run the **NearbyIntercom** scheme, or use `TEAM=<team> BUNDLE=<id> bash Scripts/run-device.sh`. The bundle identifier in the repository (`org.nearbyintercom.ios`) is a placeholder, so use your own. The phone must run iOS 16 or newer and have Bluetooth, Camera and Microphone allowed; for test launches it must be unlocked with the screen on. Physical test steps are in [TESTING.md](TESTING.md).
+To run on a phone, open `NearbyIntercom.xcodeproj`, choose your team and a unique bundle identifier, and run the **NearbyIntercom** scheme, or use `TEAM=<team> BUNDLE=<id> bash Scripts/run-device.sh`. The bundle identifier is `io.github.meshlive.app`, the same as the Android app; pass `BUNDLE=<id>` only if your Apple team cannot register it. The phone must run iOS 16 or newer and have Bluetooth, Camera and Microphone allowed; for test launches it must be unlocked with the screen on. Physical test steps are in [TESTING.md](TESTING.md).
 
 There are no screenshots in this repository yet.
 
@@ -121,14 +123,15 @@ One product on two platforms. Android's design direction (`DESIGN-DIRECTION.md` 
 
 - **Shared tokens:** `Design/design-tokens.json` copies Android's colours, type scale and dimensions. `python3 Scripts/tokens.py` generates `App/UI/DesignTokens.swift`; `--check` fails when it is stale. The iPhone uses the brand colours on iOS semantic roles: amber is the app tint and the primary action, teal means safe or connected (never a button), red means stop, on air or danger. Text and backgrounds are iOS system colours.
 - **Components:** `App/UI/Components.swift` is the one component set every screen uses: SF Symbol counterparts of Android's icons, list rows, the status line, primary/secondary/destructive buttons, notices, the empty state, the Live tag and round call controls.
-- **Wording:** the same plain words as Android, with no jargon (transport, codec, relay, mesh) outside Advanced and the call's link details: "Reachable for calls", "Hold Mute to talk", "Couldn't reach ABCDE-FGHIJ - they may have moved away".
+- **Wording:** the same plain words as Android, with no jargon (transport, codec, relay, mesh) outside Advanced and the call's link details: "Allow calls", "Hold Mute to talk", "Couldn't reach ABCDE-FGHIJ - they may have moved away".
 
-Screens (the same order and flow as Android):
-- **Home:** status line ("Bluetooth on", "Visible to nearby phones"), "Your ID", Watch, Go live, and one prominent "Call someone" button at the bottom.
-- **People nearby:** contacts by their saved name, everyone else by full handle.
+Screens (the same tabs and flow as Android's 2026-10-17 redesign; pure black, white text, red only for live, ending a call and Wipe everything):
+- **Tabs:** Live, Calls, Contacts and Settings. Each tab has a large title and a status dot (green when Bluetooth is ready); three quick taps on the title ask to erase when the opt-in quick wipe is on.
+- **Live:** "Live nearby" streams (the title, else "Live from <name>", and the route in words; audio-only rows have the radio disc and "Audio only") and the white "Go live" capsule with the red broadcast icon. Go live offers "Video and audio" or "Audio only" (Voice, Low data or Music) and, with names and titles on, the optional title. Audio-only streams (experimental "radio", interoperable with Android: `0x40` offer marker, `BTL1` header, every record signed by a per-stream key certified by the source identity) keep playing and broadcasting with the screen off. Watching and broadcasting are full screen.
+- **Calls:** Nearby and Recent chips. Nearby rows show contacts by their saved name with a check mark, everyone else by full handle; a row opens "Call <name>" with Voice call and Video call.
+- **Contacts:** your verified contacts with video call, voice call and info buttons, and "Add contact" (your code and scanning theirs). The info sheet shows how and when you verified them, the short and full ID, "Can see when I'm nearby" (rotating IDs) and Forget. Android's Rename and Block have no iPhone counterpart yet.
 - **Call:** always dark. One name line and a state line or timer. Encryption, route, verification and the safety code are in the info sheet behind the lock; only an identity mismatch shows loudly. There is no push-to-talk mode: while muted, press and hold Mute to talk, with a one-time hint. A short message appears only when the phone is hot or the battery is at 20 % or less.
-- **Watch and Go live:** a red Live tag with a blinking dot and viewer count; the viewer screen has no broadcaster controls.
-- **Settings:** Your identity, Calls and video, Safety, then Advanced (connection type, mismatch policy, codecs and experiments).
+- **Settings:** grouped cards: Your name and Your ID; Allow calls, Call alerts, Relay video for others and Privacy (quick wipe, names and titles, then Advanced privacy: rotating IDs, hidden identities, pseudonyms, mismatch policy); Advanced (Connection, Experiments); About this app; and the red Wipe everything (type WIPE to confirm).
 
 Every screen reads names through `PeerLabel`, following the naming review (R5). It shows your verified contact's saved name; otherwise a signed self-chosen name in quotes (experimental labels); otherwise the full handle. It never uses advertised device names or raw hex. The handle is Crockford Base32 of the 48-bit prefix (`M6SC7-N75YR`).
 
@@ -163,6 +166,8 @@ Every screen reads names through `PeerLabel`, following the naming review (R5). 
 | Call resolution ladder | On (user calls) | `CallResolutionLadder`: WebRTC start limits; the portrait 240x426 call steps to 180x320 below 120 kbps and back with hysteresis (keyframe restart, header unchanged). DEBUG `-NearbyResolutionLadder 0` turns it off, as Android benchmark launches |
 | Call audio error correction (libopus in-band FEC) | Off | Settings › Advanced › "Call audio error correction (experimental)", Android `test_call_native_opus`: 10 % loss hint, constrained VBR, the frame before an arrived packet rebuilt with decode_fec |
 | Rotating discovery IDs, phase 1 | Off | Settings › Advanced › "Rotating discovery IDs (experimental)": call-ready presence advertises compact UUID v2 with a 15-minute role-0 RDI (P in the Keychain, RV4 clock, 1-8 s boundary silence), BDO1 openings with link hello bit 3, the RV15 caller check, pins, the RV8 tarpit and "Visible by your ID for 10 to 25 minutes". iOS cannot change the device name (RV1): the setting tells the user to rename the phone |
+| Stream forwarding (viewer passes a stream on to one child) | Off | Settings › Advanced › "Help pass streams and calls to others nearby (experimental)". Port of Android's hop-local forwarder: BFG1 grant, unchanged BMV1 envelopes in order, cold-start admission (one child with no relay evidence), child health withdrawal, hop-local keyframe/end/withdrawal. Foreground only; one advertised UUID (the onward offer only while no child is connected) |
+| Call relay hop | Off | DEBUG launch argument `-NearbyRelayCallee <handle>` with the same switch, as Android's DEBUG-only `test_private_call_relay`. Downstream first, one parent and one child, bit 6 and maxChildren 1 in both link hellos, end-to-end records copied unchanged, heartbeats replaced with version-1 liveness, 180 s parent wait, relayed calls capped at 110 kbps video |
 | Video rate adaptation | On | `VideoRateController`: the encoder follows the delivered video rate, bounded by the requested bitrate. It was added after a measured GATT backlog |
 
 ## How this was built
@@ -198,4 +203,4 @@ This program is free software: you can redistribute it and/or modify it under th
 
 Third-party components keep their own licences: libopus and libvpx (BSD-3-Clause; libvpx also grants the patent licence in `Vendor/LIBVPX-PATENTS`), Unicode data (Unicode License v3), and, for the default-off experimental v1 reference only, Bouncy Castle, JSON-java and noise-c. Their texts are in `Vendor/`, and [Vendor/README.md](Vendor/README.md) describes how the pinned libraries are fetched and built. The scripts download libopus and libvpx sources at build time; no third-party binaries are included.
 
-The bundle identifier (`org.nearbyintercom.ios`) is a placeholder until the first release.
+The bundle identifier is `io.github.meshlive.app`, the same as the Android app.

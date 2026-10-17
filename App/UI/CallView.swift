@@ -11,6 +11,7 @@ struct CallView: View {
     @State private var showInfo = false
     @State private var controlsVisible = true
     @State private var lastInteraction = Date()
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     init(call: CallController) { self.call = call; _sink = ObservedObject(wrappedValue: call.remote.sink) }
 
@@ -25,8 +26,13 @@ struct CallView: View {
             } else {
                 VStack(spacing: 20) {
                     Spacer()
-                    if let label = call.label { MonogramView(label: label, size: 112) }
-                    else { Circle().fill(Palette.callControl).frame(width: 112, height: 112) }
+                    // Accessibility text sizes need the room for the controls: a smaller disc.
+                    let disc: CGFloat = typeSize.isAccessibilitySize ? 64 : 112
+                    // At accessibility sizes the name line is enough; the disc would sit under the wrapped controls.
+                    if !typeSize.isAccessibilitySize {
+                        if let label = call.label { MonogramView(label: label, size: disc) }
+                        else { Circle().fill(Palette.callControl).frame(width: disc, height: disc) }
+                    }
                     Spacer(); Spacer()
                 }
             }
@@ -108,11 +114,21 @@ struct CallView: View {
     private var mismatchBanner: some View {
         Button { showInfo = true } label: {
             Label("Identity does not match. Someone may be pretending to be this person. Tap for details.", systemImage: "exclamationmark.octagon.fill")
-                .font(Typo.secondary.weight(.semibold)).foregroundStyle(.white).padding(12)
+                .font(Typo.secondary.weight(.semibold)).foregroundStyle(.black).padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Palette.mismatch, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                // Inverted (white on black screen) instead of red: red is reserved for live.
+                .background(Palette.ink, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder private var callControls: some View {
+        MuteControl(call: call) { lastInteraction = Date(); maybeShowHoldHint() }
+        RoundControl(icon: call.cameraOn ? "video.fill" : "video.slash.fill",
+                     label: call.cameraOn ? "Video off" : (call.callType == .voice ? "Add video" : "Video on")) { call.toggleCamera(); lastInteraction = Date() }
+        if call.cameraOn { RoundControl(icon: "camera.rotate.fill", label: "Flip") { call.flipCamera(); lastInteraction = Date() } }
+        RoundControl(icon: "speaker.wave.2.fill", label: "Speaker", fill: call.speaker ? .white : Palette.callControl,
+                     foreground: call.speaker ? .black : .white) { call.toggleSpeaker(); lastInteraction = Date() }
     }
 
     @ViewBuilder private var bottomControls: some View {
@@ -122,7 +138,7 @@ struct CallView: View {
             } else if call.phase == .incomingRinging {
                 Text(call.offeredType == .voice ? "Voice call" : "Video call").font(Typo.secondary).foregroundStyle(Palette.dimInk)
                 HStack(spacing: 56) {
-                    RoundControl(icon: "phone.down.fill", label: "Decline", fill: Palette.callEnd, size: 76) { call.decline() }
+                    RoundControl(icon: "phone.down.fill", label: "Decline", fill: Palette.callEnd, foreground: .white, size: 76) { call.decline() }
                     if call.offeredType == .video {
                         RoundControl(icon: "phone.fill", label: "Voice", size: 76) { call.accept(as: .voice) }
                     }
@@ -138,13 +154,10 @@ struct CallView: View {
                             .background(Palette.callControl, in: Capsule())
                             .transition(.opacity)
                     }
-                    HStack(spacing: 18) {
-                        MuteControl(call: call) { lastInteraction = Date(); maybeShowHoldHint() }
-                        RoundControl(icon: call.cameraOn ? "video.fill" : "video.slash.fill",
-                                     label: call.cameraOn ? "Video off" : (call.callType == .voice ? "Add video" : "Video on")) { call.toggleCamera(); lastInteraction = Date() }
-                        if call.cameraOn { RoundControl(icon: "camera.rotate.fill", label: "Flip") { call.flipCamera(); lastInteraction = Date() } }
-                        RoundControl(icon: "speaker.wave.2.fill", label: "Speaker", fill: call.speaker ? .white : Palette.callControl,
-                                     foreground: call.speaker ? .black : .white) { call.toggleSpeaker(); lastInteraction = Date() }
+                    // One row; at large Dynamic Type sizes the controls wrap into a grid instead of being clipped.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 18) { callControls }
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) { callControls }
                     }
                 }
                 RoundControl(icon: "phone.down.fill", label: call.phase == .active ? "End" : "Cancel", fill: Palette.callEnd, size: 68) { call.end() }
@@ -178,7 +191,7 @@ struct CallInfoSheet: View {
                 case .verified:
                     InfoLine(icon: "checkmark.shield.fill", tint: Palette.connected, title: "Verified", detail: "You checked this person's code in person.")
                 case .mismatch:
-                    InfoLine(icon: "exclamationmark.octagon.fill", tint: Palette.red, title: "Identity does not match",
+                    InfoLine(icon: "exclamationmark.octagon.fill", tint: Palette.ink, title: "Identity does not match",
                              detail: "This phone's identity differs from the one you verified for this person. Do not share anything sensitive. End the call and check in person.")
                 case .unverified:
                     InfoLine(icon: "questionmark.circle", tint: Palette.dimInk, title: "Not verified yet", detail: "Compare the safety code below to be sure who you are talking to.")
@@ -224,17 +237,20 @@ struct MuteControl: View {
     var interacted: () -> Void
     @State private var pressStart: Date?
     @State private var holdWork: DispatchWorkItem?
+    @ScaledMetric(relativeTo: .caption) private var scale: CGFloat = 1
 
     var body: some View {
         let active = call.muted && !call.talking
+        let side = 60 * min(scale, 1.4)
         VStack(spacing: 6) {
             Image(systemName: call.talking ? "mic.fill" : (call.muted ? "mic.slash.fill" : "mic.fill"))
-                .font(.system(size: 22, weight: .semibold))
-                .frame(width: 60, height: 60)
+                .font(.system(size: side * 0.36, weight: .semibold))
+                .frame(width: side, height: side)
                 .background(call.talking ? Palette.connected : (active ? .white : Palette.callControl), in: Circle())
                 .foregroundStyle(call.talking ? .white : (active ? .black : .white))
                 .scaleEffect(call.talking ? 1.08 : 1)
             Text(call.talking ? "Talking" : (call.muted ? "Unmute" : "Mute")).font(Typo.caption).foregroundStyle(.white)
+                .lineLimit(1).fixedSize()
         }
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0)

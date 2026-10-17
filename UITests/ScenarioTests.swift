@@ -34,10 +34,10 @@ final class ScenarioTests: XCTestCase {
     /// Launch, Home, then the people list with the visible peers written to an attachment.
     func testPeopleList() {
         app.launch(); sleep(2); shot("01-home")
-        app.buttons["Call someone"].tap()
+        app.buttons["Calls"].firstMatch.tap()
         sleep(UInt32(env["NEARBY_SCAN_SECONDS"].flatMap(UInt32.init) ?? 8))
         shot("02-people")
-        let names = app.cells.allElementsBoundByIndex.map { $0.staticTexts.allElementsBoundByIndex.map(\.label).joined(separator: " | ") }
+        let names = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'person-'")).allElementsBoundByIndex.map(\.label)
         note("people.txt", names.isEmpty ? "(nobody visible)" : names.joined(separator: "\n"))
     }
 
@@ -47,13 +47,15 @@ final class ScenarioTests: XCTestCase {
         let type = env["NEARBY_CALL_TYPE"] ?? "voice"
         let hold = Double(env["NEARBY_HOLD_SECONDS"] ?? "20") ?? 20
         app.launch(); sleep(2); shot("01-home")
-        app.buttons["Call someone"].tap()
-        let prefix = type == "video" ? "Video call " : "Voice call "
-        let predicate = target == "first" ? NSPredicate(format: "label BEGINSWITH %@", prefix)
-            : NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS[c] %@", prefix, String(target.prefix(5)))
-        let button = app.buttons.matching(predicate).firstMatch
-        guard button.waitForExistence(timeout: 60) else { shot("02-not-found"); XCTFail("\(target) not listed within 60 s"); return }
+        app.buttons["Calls"].firstMatch.tap()
+        let predicate = target == "first" ? NSPredicate(format: "identifier BEGINSWITH 'person-'")
+            : NSPredicate(format: "identifier BEGINSWITH 'person-' AND label CONTAINS[c] %@", String(target.prefix(5)))
+        let row = app.descendants(matching: .any).matching(predicate).firstMatch
+        guard row.waitForExistence(timeout: 60) else { shot("02-not-found"); XCTFail("\(target) not listed within 60 s"); return }
         shot("02-people")
+        row.tap()
+        let button = app.buttons[type == "video" ? "Video call" : "Voice call"].firstMatch
+        guard button.waitForExistence(timeout: 5) else { shot("02-no-dialog"); XCTFail("no call dialog"); return }
         button.tap()
         app.tap() // lets the interruption monitor answer a permission prompt
         sleep(3); shot("03-calling")

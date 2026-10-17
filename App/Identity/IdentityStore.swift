@@ -31,7 +31,8 @@ enum KeychainItem {
     }
     static func deleteAll() {
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
-        // Earlier experimental v1 identity, too.
+        // The phase 1 rotating-ID presence key (now replaced by the presence vault), and the earlier v1 identity.
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.rotating"] as CFDictionary)
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.identity.v1"] as CFDictionary)
     }
     private static func base(_ account: String) -> [String: Any] {
@@ -142,6 +143,40 @@ struct AppSettings {
         get { d.bool(forKey: "experimentalPeerLabels") }
         set { d.set(newValue, forKey: "experimentalPeerLabels") }
     }
+    /// Experimental BMH3 "Hidden identities" for calls (Android `bmh3`; Android ships it ON since 0.2.0-beta, the
+    /// iPhone keeps it off until phone tests pass and the root reviews it).
+    static var hiddenIdentities: Bool {
+        get { d.bool(forKey: "experimentalBmh3") }
+        set { d.set(newValue, forKey: "experimentalBmh3") }
+    }
+    /// Experimental "Pseudonymous toward strangers" (Android `bmh3_pseudonyms`, a child of Hidden identities that also
+    /// needs rotating discovery IDs). In this mode the phone neither speaks nor accepts BMH2 for calls.
+    static var bmh3Pseudonyms: Bool {
+        get { d.bool(forKey: "experimentalBmh3Pseudonyms") }
+        set { d.set(newValue, forKey: "experimentalBmh3Pseudonyms") }
+    }
+    /// Stream link pacing (Android LinkPacer, on) and the on-time seed raise (on since 2026-10-16). Control arms for
+    /// tests only: launch arguments `-linkPacing NO`, `-onTimeSeedRaise NO`; there is no Settings switch.
+    static var linkPacing: Bool { d.object(forKey: "linkPacing") as? Bool ?? true }
+    static var onTimeSeedRaise: Bool { d.object(forKey: "onTimeSeedRaise") as? Bool ?? true }
+    /// Viewer on-time reports (Android test_on_time_reports, on); control arm `-onTimeReports NO`.
+    static var onTimeReports: Bool { d.object(forKey: "onTimeReports") as? Bool ?? true }
+    /// Advanced "Relay: slow viewers skip to keyframes" (Android relay_child_media_age, default ON).
+    static var relayChildMediaAge: Bool {
+        get { d.object(forKey: "relayChildMediaAge") as? Bool ?? true }
+        set { d.set(newValue, forKey: "relayChildMediaAge") }
+    }
+    /// Quick wipe gesture (Android `panic_wipe_gesture`): off by default, so a stray triple-tap erases nothing.
+    /// UserDefaults key `quickWipeGesture` (a launch argument `-quickWipeGesture YES` sets it for UI tests).
+    static var quickWipeGesture: Bool {
+        get { d.bool(forKey: "quickWipeGesture") }
+        set { d.set(newValue, forKey: "quickWipeGesture") }
+    }
+    /// The one-time question for call alerts (local notifications) was asked.
+    static var callAlertsAsked: Bool {
+        get { d.bool(forKey: "callAlertsAsked") }
+        set { d.set(newValue, forKey: "callAlertsAsked") }
+    }
     /// The one-time "Hold Mute to talk" hint was shown.
     static var holdMuteHintShown: Bool {
         get { d.bool(forKey: "holdMuteHintShown") }
@@ -161,6 +196,16 @@ struct AppSettings {
     static var rotatingIds: Bool {
         get { d.bool(forKey: "experimentalRotatingIds") }
         set { d.set(newValue, forKey: "experimentalRotatingIds") }
+    }
+    /// EXPERIMENTAL, off by default: pass streams (and calls) on to other phones nearby.
+    static var relayForOthers: Bool {
+        get { d.bool(forKey: "experimentalRelayForOthers") }
+        set { d.set(newValue, forKey: "experimentalRelayForOthers") }
+    }
+    /// What this phone learned about relaying (proven load, saturation ceiling), as Android's link_capacity.
+    static var relayLearned: LearnedLinkCapacity {
+        get { (d.data(forKey: "relayLearnedCapacity")).flatMap { try? JSONDecoder().decode(LearnedLinkCapacity.self, from: $0) } ?? LearnedLinkCapacity() }
+        set { d.set(try? JSONEncoder().encode(newValue), forKey: "relayLearnedCapacity") }
     }
     static var onboardingDone: Bool {
         get { d.bool(forKey: "onboardingDone") }

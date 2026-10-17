@@ -3,53 +3,50 @@ import AVFoundation
 import CoreImage.CIFilterBuiltins
 import NearbyCore
 
-/// "Verify a contact": your BVMID1 QR code and full ID, scan theirs, and the verified-contact list.
+/// "Add contact" (verify in person): your BVMID1 QR code and full ID, and scan theirs. The contact list is the Contacts tab.
 struct VerifyView: View {
     @EnvironmentObject var model: AppModel
     @State private var scanning = false
     @State private var result: String?
 
     var body: some View {
-        List {
-            Section {
-                Text("Meet in person. Scan each other's code, or compare the safety code on both screens during a call. If they match, no one is in the middle.")
-                    .font(Typo.secondary)
-            }
-            Section("Your code") {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                CardNote("Meet in person. Scan each other's code, or compare the safety code on both screens during a call. If they match, no one is in the middle.")
+                    .padding(.bottom, 4)
                 if let text = model.myQrText(), let image = qrImage(text) {
-                    Image(uiImage: image).interpolation(.none).resizable().scaledToFit().frame(maxWidth: 260).frame(maxWidth: .infinity)
+                    Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
+                        .padding(14).background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .frame(maxWidth: 260).frame(maxWidth: .infinity)
                         .accessibilityLabel("QR code with your ID for the other person to scan")
                 }
-                LabeledContent("Your ID") { Text(model.handle).font(Typo.code) }
-            }
-            Section("Full fingerprint") {
-                Text(model.fingerprint?.grouped ?? "").font(.footnote.monospaced()).textSelection(.enabled)
-            }
-            Section {
-                PrimaryButton(title: "Scan their code", systemImage: AppIcon.scan) { scanning = true }
-                    .disabled(model.call != nil)
-                if let result { Text(result).font(.footnote).foregroundStyle(.secondary) }
-            } footer: { FooterText("Call or watch them first, so this phone has checked their key; then scan.") }
-            if let unreadable = model.contactsUnreadable {
-                Section("Verified contacts unavailable") {
-                    Text("The saved list could not be opened (\(unreadable)). Everyone counts as unverified until you reset it.").font(.footnote)
-                    Button("Reset verified contacts", role: .destructive) { model.resetContacts() }
-                }
-            }
-            Section("Verified contacts") {
-                if model.contacts.isEmpty { Text("None yet").foregroundStyle(.secondary) }
-                ForEach(model.contacts, id: \.fingerprintHex) { contact in
-                    VStack(alignment: .leading) {
-                        Text(contact.displayName).font(Typo.rowTitle)
-                        Text("ID \(IdentityHandle.handle(prefix: Data(hex: contact.nodePrefixHex) ?? Data()) ?? ""), checked by \(contact.method == "qr" ? "QR code" : "safety code")")
-                            .font(Typo.caption).foregroundStyle(Palette.dimInk)
+                Card {
+                    HStack {
+                        Text("Your ID").font(.body.weight(.medium)).foregroundStyle(Palette.ink)
+                        Spacer()
+                        Text(model.handle).font(Typo.code).foregroundStyle(Palette.dimInk)
                     }
-                    .swipeActions { Button("Forget", role: .destructive) { model.forget(contact) } }
+                    .padding(.horizontal, 16).frame(minHeight: 56)
+                    .accessibilityElement(children: .combine)
+                    CardDivider(inset: 16)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Full fingerprint").font(.body.weight(.medium)).foregroundStyle(Palette.ink)
+                        Text(model.fingerprint?.grouped ?? "").font(.footnote.monospaced()).foregroundStyle(Palette.dimInk).textSelection(.enabled)
+                    }
+                    .padding(16).frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .padding(.top, 8)
+                CapsuleButton(title: "Scan their code", systemImage: AppIcon.scan, kind: .white) { scanning = true }
+                    .disabled(model.call != nil)
+                    .padding(.top, 8)
+                if let result { Text(result).font(.subheadline).foregroundStyle(Palette.ink) }
+                CardNote("Call or watch them first, so this phone has checked their key; then scan.")
             }
+            .padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 24)
         }
-        .monoList()
-        .navigationTitle("Verify a contact")
+        .background(Palette.ground.ignoresSafeArea())
+        .navigationTitle("Add contact")
+        .navigationBarTitleDisplayMode(.large)
         .sheet(isPresented: $scanning) {
             QRScannerView { text in
                 scanning = false

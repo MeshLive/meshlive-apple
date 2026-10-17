@@ -82,6 +82,17 @@ public struct OutboundQueues {
     func oldestAge(now: TimeInterval) -> TimeInterval {
         [control.first, audio.first, video.first].compactMap { $0?.enqueuedAt }.min().map { now - $0 } ?? 0
     }
+    /// Audio-only live age bound (PROTOCOL "Age shedding"): when the oldest queued audio record is older than
+    /// `trigger`, drops the oldest whole records until the oldest is at most `keep` old. Only the audio queue is
+    /// touched (signed media records); control (header, OpusHead, lifecycle) never sheds. Returns the count dropped.
+    mutating func shedAudio(now: TimeInterval, trigger: TimeInterval, keep: TimeInterval) -> Int {
+        guard let first = audio.first, now - first.enqueuedAt > trigger else { return 0 }
+        var dropped = 0
+        while let oldest = audio.first, now - oldest.enqueuedAt > keep { audio.removeFirst(); dropped += 1 }
+        droppedAudioPackets += dropped
+        return dropped
+    }
+    func audioAge(now: TimeInterval) -> TimeInterval { audio.first.map { now - $0.enqueuedAt } ?? 0 }
     /// Age of the oldest queued video frame (0 when none): how far video sending lags capture.
     func videoAge(now: TimeInterval) -> TimeInterval { video.first.map { now - $0.enqueuedAt } ?? 0 }
 }
@@ -123,17 +134,43 @@ open class MeshConnection {
     private var heldHello: (bytes: Data, releaseAt: TimeInterval)?
     private var responderHelloHandled = false
     public var setupTimeout: TimeInterval = 20
+    /// Stream child links (source and relay sender): writes paced at the child-measured rate (Android LinkPacer).
+    /// Control records are never held; audio, video and ordered envelopes wait their turn in the app queue.
+    public var pacer: LinkPacer?
+    /// A pacer on this connection's clock (the transport driver's monotonic `now`).
+    public func makePacer() -> LinkPacer { LinkPacer(nanoTime: { [weak self] in Int64((self?.now ?? 0) * 1_000_000_000) }) }
+    /// Android on-time seed raise (default ON since 2026-10-16): a held seed grows while this queue backs up.
+    public var onTimeSeedRaise = true
+    public private(set) var seedRaises = 0
+
+    /// A hop-local report from the child: a measurement replaces the seed; an unmeasured on-time report holds it
+    /// (and raises it while this sender's own queue is at least 0.5 s old); a late or delivery-only report changes nothing.
+    func applyPacingReport(_ report: LinkCapacityReport) {
+        guard let pacer, !report.deliveryOnly else { return }
+        if report.arrivalKbps > 0 { pacer.setMeasuredLinkKbps(report.arrivalKbps); return }
+        guard !report.linkLate else { return }
+        let before = pacer.seedKbps
+        let backlogMs = onTimeSeedRaise ? Int64(queues.oldestAge(now: now) * 1000) : -1
+        if pacer.holdSeed(raiseBacklogMs: backlogMs), pacer.seedKbps > before { seedRaises += 1 }
+    }
     var now: TimeInterval = 0
 
+    /// Experimental BMH3 (calls only); nil = BMH2 exactly as before.
+    public let bmh3: Bmh3CallSettings?
+
     public init(role: HandshakeRole, transport: MeshTransport, identity: SigningIdentity,
-                linkCapabilities: NodeCapabilities, endpointCapabilities: NodeCapabilities) {
+                linkCapabilities: NodeCapabilities, endpointCapabilities: NodeCapabilities, bmh3: Bmh3CallSettings? = nil) {
         self.role = role; self.transport = transport; self.identity = identity
         self.linkCapabilities = linkCapabilities; self.endpointCapabilities = endpointCapabilities
-        link = SecureLink(role: role, identity: identity, capabilities: linkCapabilities)
+        self.bmh3 = bmh3
+        link = SecureLink(role: role, identity: identity, capabilities: linkCapabilities, bmh3: bmh3)
     }
 
     public var peerLinkNodeId: NodeId? { link.peerNodeId }
     public var peerLinkCapabilities: NodeCapabilities? { link.peerCapabilities }
+    /// BMH3: the link peer presented a throwaway key / this phone did.
+    public var linkPeerPseudonymous: Bool { link.peerPseudonymous }
+    public var linkUsedBmh3: Bool { link.usedBmh3 }
 
     /// Begins the connection once the byte stream is open. The initiator queues its link hello.
     public func start(now: TimeInterval) throws {
@@ -175,14 +212,24 @@ open class MeshConnection {
             throw ProtocolError.incompatible("Peer did not authenticate \(transport.label) support")
         }
         try validateLinkPeer()
-        if linkCapabilities.transportMask & NodeCapabilities.transportDiscoveryOpening != 0,
+        // A pseudonymous BMH3 responder presented its link capabilities without bit 3: then no BDO1 either way.
+        if link.presentedCapabilities.transportMask & NodeCapabilities.transportDiscoveryOpening != 0,
            caps.transportMask & NodeCapabilities.transportDiscoveryOpening != 0 {
             // Both link hellos carry bit 3: exactly one BDO1 is the first hop record each way.
             openingExpected = true
             enqueue(.record(.discoveryOpening, try DiscoveryOpeningCodec.encode(discoveryOpeningEntries?() ?? [])), .control)
         }
+        if linkOnly {
+            // A call relay hop: link handshake only; endpoint records pass through opaquely
+            // (a BDO1 opening, if negotiated, was queued above and is consumed by handleRecord first).
+            phase = .open
+            linkDidAuthenticate()
+            return
+        }
         phase = .endpointHandshake
-        let handshake = EndToEndHandshake(role: role, identity: identity, capabilities: endpointCapabilities, gate: identityGate)
+        // BMH3: the caller speaks it end to end when it spoke it on the link; a responder dispatches on the magic.
+        let handshake = EndToEndHandshake(role: role, identity: identity, capabilities: endpointCapabilities, gate: identityGate,
+                                          bmh3: bmh3, speakBmh3: role == .initiator && link.usedBmh3)
         endpointHandshake = handshake
         if role == .initiator { enqueue(.record(.endToEndHandshake, try handshake.initiatorHello()), .control) }
         linkDidAuthenticate()
@@ -201,9 +248,11 @@ open class MeshConnection {
             guard record.type == .endToEndHandshake, let handshake = endpointHandshake else {
                 throw ProtocolError.state("Expected an end-to-end handshake")
             }
-            let (session, reply) = try handshake.receive(record.payload)
+            let (completed, reply) = try handshake.receive(record.payload)
             if let reply { enqueue(.record(.endToEndHandshake, reply), .control) }
-            if let expectedPeerPrefix, expectedPrefixAppliesToEndpoint {
+            guard let session = completed else { return } // BMH3 responder: msg2 sent, msg3 follows
+            // A pseudonymous peer cannot carry the announced prefix; its reveal is checked against the selection instead.
+            if let expectedPeerPrefix, expectedPrefixAppliesToEndpoint, !session.peerPseudonymous {
                 guard session.peerNodeId.prefix == expectedPeerPrefix else {
                     throw ProtocolError.authentication
                 }
@@ -218,6 +267,8 @@ open class MeshConnection {
     }
 
     // MARK: Subclass hooks
+    /// True for a relay hop: no endpoint handshake of its own (the endpoints' records are copied).
+    open var linkOnly: Bool { false }
     open var expectedPrefixAppliesToEndpoint: Bool { true }
     open func validateLinkPeer() throws {}
     open func linkDidAuthenticate() {}
@@ -248,6 +299,8 @@ open class MeshConnection {
             heldHello = nil; sentBytes += UInt64(held.bytes.count); lastSendAt = now
             return held.bytes
         }
+        // Pacing: nothing but control leaves before the pacer allows it (the burst allowance is 50 ms).
+        if let pacer, queues.control.isEmpty, pacer.waitNs() > 0 { return nil }
         while let item = queues.pop() {
             do {
                 let bytes: Data
@@ -263,6 +316,7 @@ open class MeshConnection {
                     continue // expanded by OutboundQueues.pop
                 }
                 sentBytes += UInt64(bytes.count); lastSendAt = now
+                pacer?.onSent(bytes.count)
                 if case .content(let type, let flags, _) = item.kind,
                    type == .videoFragment || (type == .mediaPacket && flags & StreamProtocol.flagAudio == 0) {
                     sentVideoBytes += UInt64(bytes.count)
@@ -273,16 +327,26 @@ open class MeshConnection {
                 fail(describe(error)); return nil
             }
         }
+        // Ordered media after control/audio/video queues (a stream forwarder's envelopes, which must keep
+        // their BMV1 sequence order; a call relay's copied endpoint records). It drains after a graceful finish.
+        guard phase == .open || phase == .closed else { return nil }
+        do {
+            if let bytes = try nextOrderedOutgoing(now: now) { sentBytes += UInt64(bytes.count); lastSendAt = now; pacer?.onSent(bytes.count); return bytes }
+        } catch { fail(describe(error)) }
         return nil
     }
+
+    /// Subclass hook: the next sealed record of an ordered media stream, pulled when the queues are empty.
+    open func nextOrderedOutgoing(now: TimeInterval) throws -> Data? { nil }
+    open var hasOrderedOutput: Bool { false }
 
     open func sealMesh(type: EndToEndContentType, flags: UInt8, payload: Data, extraMeshFlags: UInt8) throws -> Data {
         throw ProtocolError.state("This connection does not write mesh envelopes")
     }
 
     /// True once a terminal record was handed to the transport; close after it drains.
-    public var shouldCloseAfterFlush: Bool { closeRequested && queues.isEmpty }
-    public var hasPendingOutput: Bool { !queues.isEmpty }
+    public var shouldCloseAfterFlush: Bool { closeRequested && queues.isEmpty && !hasOrderedOutput }
+    public var hasPendingOutput: Bool { !queues.isEmpty || hasOrderedOutput }
 
     /// Timers: setup deadline and subclass liveness.
     public func tick(now: TimeInterval) {

@@ -89,7 +89,7 @@ public struct DiscoveryAnnouncement: Equatable {
             throw ProtocolError.malformed("Route-recovery discovery metadata and flag must agree")
         }
         var w = BinaryWriter(capacity: Self.encodedBytes)
-        guard !rotating || isPrivateCallOffer else { throw ProtocolError.malformed("Only call offers rotate in phase 1") }
+        guard !rotating || isPrivateCallOffer || isStreamOffer else { throw ProtocolError.malformed("Only call and stream offers rotate here") }
         w.byte(rotating ? Self.rotatingVersion : Self.version); w.bytes(nodeIdPrefix); w.byte(flags); w.byte(capabilitySummary); w.u32(streamToken); w.byte(routeCost)
         if let recovery = recoveryFromNodeIdPrefix {
             guard recovery.count == NodeId.prefixBytes else { throw ProtocolError.malformed("Invalid recovery prefix") }
@@ -122,7 +122,9 @@ public struct DiscoveryAnnouncement: Equatable {
             recoveryFromNodeIdPrefix = nil
             sequence = try c.byte(); streamWidth = try c.u16(); streamHeight = try c.u16(); streamFps = try c.byte()
         }
-        if rotating && !isPrivateCallOffer { throw ProtocolError.malformed("Only call offers rotate in phase 1") }
+        // Phase 1b: Android's version 5 stream offers (role-1 RDI, route token = logical XOR mask(RDI)) decode too, so
+        // an iPhone sees default Android streams; version 5 viewer requests answer only version 5 offers (never ours).
+        if rotating && !isPrivateCallOffer && !isStreamOffer { throw ProtocolError.malformed("Only call and stream offers rotate here") }
     }
 
     /// Android manufacturer-specific data as Core Bluetooth reports it: little-endian company ID, then the value.
@@ -148,6 +150,10 @@ public enum StreamRouteToken {
         return logical ^ mask(prefix)
     }
     public static func logical(routeToken: UInt32, prefix: Data) -> UInt32 { routeToken ^ mask(prefix) }
+    /// A forwarder's own route token for the same logical stream (Android ReceiverStreamForwarder).
+    public static func downstream(upstreamRouteToken: UInt32, parentPrefix: Data, ownPrefix: Data) -> UInt32 {
+        logical(routeToken: upstreamRouteToken, prefix: parentPrefix) ^ mask(ownPrefix)
+    }
     public static func newLogicalToken() -> UInt32 {
         while true {
             let value = randomBytes(4).reduce(0) { $0 << 8 | UInt32($1) } & 0x7fff_ffff
@@ -180,9 +186,15 @@ public enum CompactAnnouncement {
         }
         // R11: call offers may carry capabilitySummary bit 4 (0x10, "may be relayed") as UUID bit 18.
         let allowed: UInt8 = kind == .privateCallOffer ? NodeCapabilities.codecMask | CompactAnnouncement.relayConsent : NodeCapabilities.codecMask
-        guard a.capabilitySummary & ~allowed == 0 else { throw ProtocolError.malformed("Unsupported capability bits") }
+        // Experimental audio-only live: summary 0x40 on a stream offer with zero geometry is codec mask 0 with
+        // resolution index 3 and FPS index 3 (Android CompactDiscoveryAnnouncement).
+        let audioOnly = kind == .streamOffer && a.capabilitySummary == AudioLive.summaryAudioOnly
+        if audioOnly, a.streamWidth != 0 || a.streamHeight != 0 || a.streamFps != 0 {
+            throw ProtocolError.malformed("An audio-only offer has no video geometry")
+        }
+        guard audioOnly || a.capabilitySummary & ~allowed == 0 else { throw ProtocolError.malformed("Unsupported capability bits") }
         // Review R1: encoders keep the H.264 bit (56) at 0 until H.264 is negotiated; decoders carry all three.
-        let codecs = a.capabilitySummary & (StreamProtocol.h264Enabled ? 0x7 : 0x3)
+        let codecs = audioOnly ? 0 : a.capabilitySummary & (StreamProtocol.h264Enabled ? 0x7 : 0x3)
         // Compact v2 (rotating discovery IDs, phase 1): call offers only; version bits 111..110 = 10.
         if a.rotating, kind != .privateCallOffer { throw ProtocolError.malformed("Only call offers rotate in phase 1") }
         var hi: UInt64 = UInt64(magic) << 48 | (a.rotating ? 2 : 1) << 46 | UInt64(kind.rawValue) << 44
@@ -257,6 +269,7 @@ public enum CompactAnnouncement {
         case .streamOffer:
             a.sequence = UInt8(specific >> 11 & 0xff)
             let res = Int(specific >> 9 & 0x3), fps = Int(specific >> 7 & 0x3)
+            if codecs == 0 && res == 3 && fps == 3 { a.capabilitySummary = AudioLive.summaryAudioOnly }
             if res < 3 { a.streamWidth = resolutions[res].0; a.streamHeight = resolutions[res].1 }
             if fps < 3 { a.streamFps = fpsValues[fps] }
             a.streamBitrateKbps = UInt16(specific & 0x7f) * 25

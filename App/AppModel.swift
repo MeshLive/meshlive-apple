@@ -35,6 +35,9 @@ struct StreamRow: Identifiable, Equatable {
     var route: String { announcement.routeCost == 0 ? "direct" : "via \(announcement.routeCost) phone\(announcement.routeCost == 1 ? "" : "s")" }
     var paused: Bool { announcement.flags & DiscoveryAnnouncement.flagStreamPaused != 0 }
     var full: Bool { announcement.isFullStreamOffer }
+    /// Experimental audio-only live ("radio"): the offer carries the 0x40 marker (unauthenticated hint; the
+    /// signed BTL1 header must agree when joining).
+    var audioOnly: Bool { announcement.isAudioOnlyOffer }
 }
 
 /// App state and orchestration on the main queue. One radio; one advertised role at a time
@@ -52,11 +55,75 @@ final class AppModel: ObservableObject {
     @Published var mismatchWarning: String?
     @Published var displayName = AppSettings.displayName { didSet { AppSettings.displayName = displayName; refreshAdvertising() } }
     @Published var transport = AppSettings.transport { didSet { AppSettings.transport = transport; refreshAdvertising() } }
-    @Published var availableForCalls = AppSettings.availableForCalls { didSet { AppSettings.availableForCalls = availableForCalls; refreshAdvertising() } }
+    @Published var availableForCalls = AppSettings.availableForCalls {
+        didSet {
+            AppSettings.availableForCalls = availableForCalls; refreshAdvertising()
+            if availableForCalls && !oldValue { CallNotifier.shared.requestIfAppropriate(.reachableTurnedOn) }
+        }
+    }
+    /// Settings > Safety "Quick wipe: triple-tap the status line" (off by default, as Android).
+    @Published var quickWipeGesture = AppSettings.quickWipeGesture { didSet { AppSettings.quickWipeGesture = quickWipeGesture } }
+    /// Set by three quick taps on a tab header (when the quick wipe is on): the root asks to erase.
+    @Published var askQuickWipe = false
+    /// Local incoming-call alerts (notification permission), shown in Settings.
+    @Published var callAlerts: CallAlertPolicy.Authorization = .notDetermined
+    private var notifierConfigured = false
+    func configureCallAlerts() {
+        guard !notifierConfigured else { CallNotifier.shared.refreshAuthorization(); return }
+        notifierConfigured = true
+        CallNotifier.shared.onAuthorizationChange = { [weak self] in self?.callAlerts = $0 }
+        CallNotifier.shared.configure(model: self)
+    }
+    /// The app left or regained the front while a call may ring (inactive or background).
+    func appActivityChanged() { CallNotifier.shared.update(for: call) }
     @Published var wiped = false
     /// EXPERIMENTAL rotating discovery IDs (Settings > Advanced).
     @Published var rotatingIds = AppSettings.rotatingIds {
         didSet { AppSettings.rotatingIds = rotatingIds; radio.acceptRotating = rotatingIds; refreshAdvertising() }
+    }
+    /// Phase 2 presence leases: the OFFER/LEASE exchange with a mutual verified contact in an answered call.
+    func withPresence(_ options: RotatingCallOptions) -> RotatingCallOptions {
+        var options = options
+        let vault = rotating.vault, runtime = rotating, book = book
+        options.presence = PresenceCallHooks(
+            eligible: { id, fp in book.state(of: fp) == .verified && vault.persistent && vault.canSeeMe(id) },
+            lease: { id, fp in vault.deliverLease(to: id, epoch: runtime.currentEpoch(), verified: book.state(of: fp) == .verified) },
+            store: { id, lease in vault.store(lease, from: id, myEpoch: runtime.currentEpoch()) },
+            verified: { fp in book.state(of: fp) == .verified })
+        return options
+    }
+
+    /// A rotating advert: "Nearby phone", or a recognised contact's own label marked unconfirmed (never a check mark;
+    /// a hit is a hint that anyone replaying the ID can fake, and never a reason to connect).
+    func rotatingLabel(_ announcement: DiscoveryAnnouncement) -> PeerLabel {
+        let hits = rotating.vault.recognition.lookup(announcement.nodeIdPrefix)
+        if hits.count == 1, let contact = contacts.first(where: { $0.fingerprintHex.hasPrefix(hits[0].contact.hex) }) {
+            return PeerLabel.recognized(contactName: contact.displayName, seed: announcement.nodeIdPrefix)
+        }
+        return PeerLabel.nearbyPhone(seed: announcement.nodeIdPrefix)
+    }
+
+    /// EXPERIMENTAL BMH3 (Settings > Advanced "Hidden identities" and its child "Pseudonymous toward strangers").
+    @Published var hiddenIdentities = AppSettings.hiddenIdentities { didSet { AppSettings.hiddenIdentities = hiddenIdentities } }
+    @Published var bmh3Pseudonyms = AppSettings.bmh3Pseudonyms { didSet { AppSettings.bmh3Pseudonyms = bmh3Pseudonyms } }
+    let bmh3Pins = Bmh3Pins()
+    /// The BMH3 options of one call, or nil (BMH2 only). Pseudonyms need rotating IDs, as on Android.
+    func bmh3Options(selected: DiscoveryAnnouncement?) -> Bmh3CallOptions? {
+        guard hiddenIdentities else { return nil }
+        var options = Bmh3CallOptions(pseudonyms: bmh3Pseudonyms && rotatingIds, selected: selected, pins: bmh3Pins)
+        if rotatingIds {
+            // Phase 2: real keys between contacts through the lease-derived contact tag (PROTOCOL "Real lease keys").
+            let vault = rotating.vault, pins = rotating.pins
+            if let selected {
+                options.contactTag = PresenceContactTags.initiatorTag(selected: selected, recognition: vault.recognition) { vault.leaseKey(of: $0, day: $1) }
+            } else {
+                options.tagChecks = {
+                    PresenceContactTags.responderChecks(entries: pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs)) { vault.ownDayKey(epoch: $0) }
+                }
+                options.admitTagged = { vault.deliveredTo($0) }
+            }
+        }
+        return options
     }
     let rotating = RotatingDiscoveryRuntime()
     private var rotationTimer: Timer?
@@ -67,6 +134,8 @@ final class AppModel: ObservableObject {
     private func checkRotation() {
         guard rotatingIds, advertisedEpoch >= 0, boundarySilenceUntil == nil else { return }
         guard rotating.currentEpoch() != advertisedEpoch else { return }
+        // Phase 2: the recognition table follows the epoch (RV10).
+        rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch())
         let silence = Double.random(in: 1...8)
         boundarySilenceUntil = Date().addingTimeInterval(silence)
         rotating.pins.offAir(elapsedMs: RotatingDiscoveryRuntime.elapsedMs)
@@ -80,6 +149,29 @@ final class AppModel: ObservableObject {
     func startVisibleByHandle() { rotating.startVisibleWindow(); refreshAdvertising() }
     /// Recent calls on this phone (newest first); Home shows the last 3.
     @Published var recentCalls: [CallRecord] = CallHistory.all
+    /// EXPERIMENTAL (Settings > Advanced): help pass streams and calls to others nearby.
+    @Published var relayForOthers = AppSettings.relayForOthers { didSet { AppSettings.relayForOthers = relayForOthers } }
+    /// EXPERIMENTAL call relay hop (DEBUG launch argument only, like Android's test_private_call_relay).
+    @Published var callRelay: CallRelayController?
+
+    /// Relays calls to `person` (the callee): connects to it first, then offers its call with route cost + 1.
+    func startCallRelay(to person: PersonRow) {
+        guard relayForOthers, callRelay == nil, call == nil, watch == nil, live == nil, let identity,
+              let peer = radio.peers[person.id], CallRelayChain.admitsOffer(peer.announcement, ownPrefix: identity.nodeId.prefix) else {
+            AppLog.event("relay_call", ["stage": "refused", "reason": "not admitted or busy"]); return
+        }
+        let relay = CallRelayController(model: self, identity: identity, row: person.id, childOffer: peer.announcement,
+                                        transport: peer.announcement.transport ?? .gatt)
+        callRelay = relay
+        relay.start()
+        refreshAdvertising()
+    }
+
+    func callRelayFinished(_ relay: CallRelayController) {
+        guard callRelay === relay else { return }
+        callRelay = nil
+        refreshAdvertising()
+    }
     /// Shown on call and live screens only when the phone is hot or the battery is at 20 % or less.
     @Published var healthMessage: String?
     private var healthObservers: [NSObjectProtocol] = []
@@ -132,6 +224,7 @@ final class AppModel: ObservableObject {
 
     var fingerprint: IdentityFingerprint? { identity?.fingerprint }
     var nodePrefixHex: String { identity?.nodeId.prefix.hex ?? "" }
+    var identityPrefix: Data? { identity?.nodeId.prefix }
     /// Your handle (Crockford Base32 of your prefix), never raw hex.
     var handle: String { identity.flatMap { IdentityHandle.handle(prefix: $0.nodeId.prefix) } ?? "" }
     var decodeMask: UInt8 { VideoDecoderSupport.decodeMask }
@@ -161,6 +254,7 @@ final class AppModel: ObservableObject {
 
     func start() {
         guard identity != nil else { return }
+        if rotatingIds { rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch()) }
         if automation == nil, let auto = Automation(model: self) {
             automation = auto
             if auto.args["Labels"] == "1" { peerLabelsEnabled = true }
@@ -185,6 +279,21 @@ final class AppModel: ObservableObject {
     /// bluetooth-central/peripheral keep its link and audio session running), with this phone's video off.
     /// Everything else stops; foregrounding restarts discovery.
     func enterBackground() {
+        // An audio-only stream keeps playing with the screen locked or the app in the background (audio and
+        // bluetooth-central background modes); its link stays, discovery pauses.
+        if let watch, watch.isRadio, watch.ended == nil, call == nil {
+            AppLog.event("app_state", ["state": "background_radio"])
+            live?.stop()
+            radio.pauseDiscovery()
+            return
+        }
+        // Broadcasting audio only also continues with the screen off (connected listeners keep listening).
+        if let live, live.audioOnly, live.running, call == nil {
+            AppLog.event("app_state", ["state": "background_radio_source"])
+            watch?.stop()
+            radio.pauseDiscovery()
+            return
+        }
         watch?.stop(); live?.stop()
         if let call, call.ended == nil {
             AppLog.event("app_state", ["state": "background_call", "video": "\(call.cameraOn)"])
@@ -196,6 +305,8 @@ final class AppModel: ObservableObject {
     }
 
     func enterForeground() {
+        CallNotifier.shared.clear()
+        configureCallAlerts()
         call?.enterForeground()
         start()
     }
@@ -203,6 +314,9 @@ final class AppModel: ObservableObject {
     // MARK: Lists
 
     private func rebuildLists() {
+        #if DEBUG
+        if debugFixtureActive { return } // keep the simulator fixture rows
+        #endif
         // Stable order: contacts first by name, then others by handle (rows no longer use advertised names).
         let peers = radio.peers.values.sorted { a, b in
             let ca = contactName(prefixHex: a.prefixHex), cb = contactName(prefixHex: b.prefixHex)
@@ -212,15 +326,18 @@ final class AppModel: ObservableObject {
         people = peers.filter { $0.announcement.isPrivateCallOffer && !$0.announcement.usesClassic }.map { p in
             // Pre-connect the prefix is an unauthenticated hint: a verified contact's local name may label the row,
             // but the row never claims "verified" (Android shows no badge here either).
-            PersonRow(id: p.id, label: p.announcement.rotating ? PeerLabel.nearbyPhone(seed: p.announcement.nodeIdPrefix)
+            PersonRow(id: p.id, label: p.announcement.rotating ? rotatingLabel(p.announcement)
                         : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex)),
                       prefixHex: p.prefixHex, transport: p.announcement.transport ?? .gatt, relays: Int(p.announcement.routeCost), isIPhone: p.isIPhone)
         }
-        streams = peers.filter { $0.announcement.isStreamOffer && !$0.announcement.usesClassic }.map {
-            StreamRow(id: $0.id, label: PeerLabel(prefix: $0.announcement.nodeIdPrefix, contactName: contactName(prefixHex: $0.prefixHex)),
+        // A malformed audio-only marker is ignored (Android StreamOfferKind.MALFORMED).
+        streams = peers.filter { $0.announcement.isStreamOffer && !$0.announcement.usesClassic && $0.announcement.streamOfferKind != .malformed }.map {
+            StreamRow(id: $0.id, label: $0.announcement.rotating ? PeerLabel.nearbyPhone(seed: $0.announcement.nodeIdPrefix)
+                        : PeerLabel(prefix: $0.announcement.nodeIdPrefix, contactName: contactName(prefixHex: $0.prefixHex)),
                       announcement: $0.announcement, advertisedTitle: peerLabelsEnabled ? radio.titleBoard.title(routeToken: $0.announcement.streamToken) : nil)
         }
         live?.viewerRequestsChanged(peers)
+        watch?.viewerRequestsChanged(peers)
     }
 
     func contactName(prefixHex: String) -> String? { contacts.first { $0.nodePrefixHex == prefixHex }?.displayName }
@@ -232,14 +349,20 @@ final class AppModel: ObservableObject {
         let prefix = identity.nodeId.prefix
         let gattFlag = { (t: MeshTransport) in t == .gatt ? DiscoveryAnnouncement.flagGattTransport : 0 }
         var announcement: DiscoveryAnnouncement?
-        if let watch, watch.awaitingSource {
+        if let relayOffer = callRelay?.parentOffer {
+            // Experimental call relay: the callee's offer with route cost + 1 until one parent connects.
+            announcement = relayOffer
+        } else if let watch, !watch.awaitingSource, let forward = watch.forwardOffer {
+            // Experimental forwarding: offer the stream onward until a child connects (one UUID at a time).
+            announcement = forward
+        } else if let watch, watch.awaitingSource {
             let offer = watch.offer
             announcement = DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: DiscoveryAnnouncement.flagAcceptingConnections | gattFlag(watch.transport),
                                                  capabilitySummary: decodeMask, streamToken: offer.streamToken, routeCost: offer.routeCost,
                                                  streamBitrateKbps: offer.streamBitrateKbps)
         } else if let live, live.running {
             announcement = live.offerAnnouncement(prefix: prefix)
-        } else if availableForCalls, call == nil, watch == nil {
+        } else if availableForCalls, call == nil, watch == nil, callRelay == nil {
             announcement = DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: DiscoveryAnnouncement.flagAcceptingConnections |
                                                  DiscoveryAnnouncement.flagPrivateCallAvailable | gattFlag(transport),
                                                  capabilitySummary: encodeMask & decodeMask, streamToken: 0, routeCost: 0)
@@ -259,12 +382,14 @@ final class AppModel: ObservableObject {
     // MARK: Incoming links
 
     private func handleIncoming(_ link: MeshLink) {
+        if let relay = callRelay, relay.awaitingParent { relay.attachParent(link); refreshAdvertising(); return }
         if let watch, watch.awaitingSource { watch.attach(link); refreshAdvertising(); return }
         guard call == nil, availableForCalls, let identity else { link.close(); return }
         let pins = rotating.pins
         let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
                                         identity: identity, transport: link.transport, type: .video, relayHops: 0,
-                                        rotating: rotatingIds ? RotatingCallOptions(entries: { pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) }) : nil)
+                                        rotating: rotatingIds ? withPresence(RotatingCallOptions(entries: { pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) })) : nil,
+                                        bmh3: bmh3Options(selected: nil))
         call = controller
         controller.attach(link)
         refreshAdvertising()
@@ -298,7 +423,8 @@ final class AppModel: ObservableObject {
         let controller = CallController(model: self, role: .caller, peerName: person.label.title,
                                         peerPrefixHex: peer.announcement.rotating ? nil : person.prefixHex, identity: identity, transport: person.transport, type: type,
                                         relayHops: UInt8(min(Int(peer.announcement.routeCost), 15)),
-                                        rotating: rotatingIds ? RotatingCallOptions(selected: peer.announcement) : nil)
+                                        rotating: rotatingIds ? withPresence(RotatingCallOptions(selected: peer.announcement)) : nil,
+                                        bmh3: bmh3Options(selected: peer.announcement))
         call = controller
         pendingCallSubject = ""
         refreshAdvertising()
@@ -335,6 +461,8 @@ final class AppModel: ObservableObject {
     }
 
     func callFinished(_ controller: CallController) {
+        CallNotifier.shared.clear()
+        if controller.activeSince != nil { CallNotifier.shared.requestIfAppropriate(.callEnded) }
         guard call === controller else { return }
         remember(controller)
         if controller.failedEarly, let ended = controller.ended { callNotice = ended }
@@ -359,10 +487,11 @@ final class AppModel: ObservableObject {
 
     // MARK: Going live
 
-    func goLive() {
+    func goLive(audioOnly: Bool = false, preset: UInt8 = AudioLive.presetVoice) {
         guard live == nil, let identity else { return }
         live = LiveController(model: self, identity: identity, transport: transport,
-                              labels: peerLabelsEnabled, title: liveTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : liveTitle)
+                              labels: peerLabelsEnabled, title: liveTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : liveTitle,
+                              audioOnly: audioOnly, preset: preset)
         live?.start()
         refreshAdvertising()
     }
@@ -396,7 +525,32 @@ final class AppModel: ObservableObject {
         try saveContacts()
     }
 
-    func forget(_ contact: VerifiedContact) { book.forget(contact.fingerprintHex); try? saveContacts() }
+    /// Phase 2: the node ID of a verified contact (the first 16 bytes of its fingerprint).
+    private func nodeId(of contact: VerifiedContact) -> NodeId? {
+        Data(hex: String(contact.fingerprintHex.prefix(32))).flatMap { try? NodeId(bytes: $0) }
+    }
+    /// "Can see when I'm nearby" (default on, as Android).
+    func canSeeMe(_ contact: VerifiedContact) -> Bool { nodeId(of: contact).map { rotating.vault.canSeeMe($0) } ?? true }
+    func setCanSeeMe(_ contact: VerifiedContact, _ on: Bool) {
+        guard let node = nodeId(of: contact) else { return }
+        rotating.vault.setCanSeeMe(node, on, epoch: rotating.currentEpoch())
+        objectWillChange.send()
+    }
+    /// "Reset presence key": a new generation; contacts recognise this phone again after the next mutual call.
+    func resetPresenceKey() {
+        rotating.vault.newGeneration(epoch: rotating.currentEpoch(), reason: "reset")
+        presenceGeneration = rotating.vault.generation
+        refreshAdvertising()
+    }
+    @Published var presenceGeneration: UInt32 = 0
+
+    func forget(_ contact: VerifiedContact) {
+        book.forget(contact.fingerprintHex); try? saveContacts()
+        // A contact that holds this phone's lease: a new presence generation, so the old keys recognise nothing.
+        if let node = Data(hex: String(contact.fingerprintHex.prefix(32))).flatMap({ try? NodeId(bytes: $0) }) {
+            rotating.vault.forget(node, epoch: rotating.currentEpoch())
+        }
+    }
 
     func resetContacts() { VerifiedContactsStore.reset(); book.reset(); contacts = []; contactsUnreadable = nil }
 
@@ -423,13 +577,65 @@ final class AppModel: ObservableObject {
     }
 
     #if DEBUG
-    /// Screenshot aid only (`-NearbyScreen call`): an unconnected outgoing call screen.
-    func showDebugCall() {
+    /// Simulator fixture (`-NearbyFixture populated`): made-up people, streams and recent calls, in memory only
+    /// (nothing is written to the call history), so every list state can be screenshot without radios.
+    private(set) var debugFixtureActive = false
+    func applyDebugFixture(_ name: String) {
+        guard name == "populated" else { return }
+        debugFixtureActive = true
+        let asha = Data(hex: "a1b2c3d4e5f6")!, ravi = Data(hex: "0102030405a8")!, stranger = Data(hex: "112233445566")!
+        people = [
+            PersonRow(id: UUID(), label: PeerLabel(prefix: asha, contactName: "Asha"), prefixHex: asha.hex, transport: .gatt, relays: 0, isIPhone: false),
+            PersonRow(id: UUID(), label: PeerLabel(prefix: ravi), prefixHex: ravi.hex, transport: .l2cap, relays: 2, isIPhone: false),
+            PersonRow(id: UUID(), label: PeerLabel.nearbyPhone(seed: stranger), prefixHex: stranger.hex, transport: .gatt, relays: 0, isIPhone: true),
+        ]
+        let streamFlags = DiscoveryAnnouncement.flagStreamAvailable | DiscoveryAnnouncement.flagGattTransport
+        streams = [
+            StreamRow(id: UUID(), label: PeerLabel(prefix: asha, contactName: "Asha"),
+                      announcement: DiscoveryAnnouncement(nodeIdPrefix: asha, flags: streamFlags, capabilitySummary: 1, streamToken: 0x8123_4567,
+                                                          routeCost: 0, sequence: 1, streamWidth: 640, streamHeight: 360, streamFps: 15, streamBitrateKbps: 300)),
+            StreamRow(id: UUID(), label: PeerLabel(prefix: ravi),
+                      announcement: DiscoveryAnnouncement(nodeIdPrefix: ravi, flags: streamFlags | DiscoveryAnnouncement.flagStreamPaused, capabilitySummary: 1,
+                                                          streamToken: 0x8765_4321, routeCost: 2, sequence: 1, streamWidth: 426, streamHeight: 240, streamFps: 15,
+                                                          streamBitrateKbps: 200)),
+            // Experimental audio-only live: a radio row (0x40 marker, no geometry).
+            StreamRow(id: UUID(), label: PeerLabel(prefix: stranger),
+                      announcement: DiscoveryAnnouncement(nodeIdPrefix: stranger, flags: streamFlags, capabilitySummary: AudioLive.summaryAudioOnly,
+                                                          streamToken: 0x8555_1234, routeCost: 0, sequence: 1, streamBitrateKbps: 25),
+                      advertisedTitle: "Neighbourhood radio, ward 12 updates"),
+        ]
+        // In memory only: a verified contact for the Verify screen (its presence switch is a real vault entry).
+        contacts = [VerifiedContact(fingerprint: IdentityFingerprint(publicKey: try! SoftwareSigningIdentity(rawScalar: Data(repeating: 7, count: 32)).publicKeyEncoded),
+                                    displayName: "Asha", method: "qr")]
+        recentCalls = [
+            CallRecord(prefixHex: asha.hex, direction: .outgoing, video: true, at: Date().addingTimeInterval(-300), seconds: 125),
+            CallRecord(prefixHex: ravi.hex, direction: .missed, video: false, at: Date().addingTimeInterval(-3_600), seconds: 0),
+            CallRecord(prefixHex: asha.hex, direction: .incoming, video: false, at: Date().addingTimeInterval(-86_400), seconds: 3_725),
+        ]
+    }
+
+    /// Screenshot aid only: `-NearbyScreen call` (outgoing, ringing), `call-incoming`, `call-incoming-voice`,
+    /// `call-active`, `call-ended`, `call-mismatch`. Unconnected: no engine runs, nothing is sent.
+    func showDebugCall(_ variant: String = "call") {
         guard call == nil, let identity else { return }
-        call = CallController(model: self, role: .caller, peerName: "Asha", peerPrefixHex: "a1b2c3d4e5f6", identity: identity,
-                              transport: .gatt, type: .voice, relayHops: 0)
-        call?.label = PeerLabel(prefix: Data(hex: "a1b2c3d4e5f6")!, selfName: "Asha")
-        call?.phaseText = "Ringing…"
+        let incoming = variant.hasPrefix("call-incoming")
+        let controller = CallController(model: self, role: incoming ? .callee : .caller, peerName: "Asha", peerPrefixHex: "a1b2c3d4e5f6",
+                                        identity: identity, transport: .gatt, type: variant == "call-incoming" ? .video : .voice, relayHops: 0)
+        controller.label = PeerLabel(prefix: Data(hex: "a1b2c3d4e5f6")!, selfName: "Asha")
+        switch variant {
+        case "call-incoming", "call-incoming-voice":
+            controller.phase = .incomingRinging; controller.offeredType = variant == "call-incoming" ? .video : .voice
+            controller.phaseText = "Incoming call"
+        case "call-active", "call-mismatch":
+            controller.phase = .active; controller.activeSince = Date().addingTimeInterval(-83)
+            controller.fingerprint = SoftwareSigningIdentity().fingerprint
+            if variant == "call-mismatch" { controller.verification = .mismatch }
+        case "call-ended":
+            controller.phase = .ended; controller.ended = "Call ended"
+        default:
+            controller.phase = .outgoingRinging; controller.phaseText = "Ringing…"
+        }
+        call = controller
     }
     #endif
 

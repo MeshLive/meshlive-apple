@@ -5,7 +5,8 @@ import NearbyCore
 /// One product, native on each platform: Android and iOS share the screens, flow, features, wording and the
 /// monochrome dark theme (Design/design-tokens.json -> DesignTokens.swift). Dark always: true black ground, white
 /// primary text, grey secondary, hairline dividers and flat surfaces; white is the accent (the primary button is
-/// white with black text); red only for live, recording and destructive; a muted green only for "connected".
+/// white with black text); red only for live (on air, recording, ending a broadcast); a muted green only for "connected".
+/// Problems, destructive actions, identity warnings and ending a call are white or grey, never red.
 /// SF Pro with Dynamic Type and thin SF Symbols.
 struct TokenColor {
     let dark: UInt32, light: UInt32
@@ -24,12 +25,13 @@ enum Palette {
     static let accent = C.accent.color          // primary action: white, with black text
     static let onAccent = C.onAccent.color
     static let connected = C.connected.color
-    static let red = C.red.color
     static let recordRed = C.recordRed.color
     static let liveRed = C.liveRed.color
     static let callAccept = C.callAccept.color
+    /// Ending or declining a call: red, as Android's call_end (2026-10-17 redesign: red only for end and live).
     static let callEnd = C.callEnd.color
-    static let mismatch = C.mismatchRed.color
+    /// Ending a live broadcast is part of being live: red.
+    static let liveEnd = C.liveRed.color
     static let ink = C.ink.color
     static let dimInk = C.dimInk.color
     static let ground = C.ground.color
@@ -40,6 +42,14 @@ enum Palette {
     static let callControl = Color.white.opacity(0.16)
     /// Avatars: a neutral disc (no per-person colours).
     static let avatar = C.panelVariant.color
+    /// Grouped settings cards and sheets (Android 2026-10-17 redesign: #121212 on black).
+    static let card = Color(UIColor(rgb: 0x121212))
+    /// Secondary capsules, chips and icon discs.
+    static let chip = Color(UIColor(rgb: 0x262626))
+    /// A switch that is on: light grey track (the iPhone's white thumb stays visible on it).
+    static let switchOn = Color(UIColor(rgb: 0xB8B8B8))
+    /// Inset separators in lists and between card rows (Android card outline grey).
+    static let separator = Color(UIColor(rgb: 0x262626))
 }
 
 extension UIColor {
@@ -89,6 +99,10 @@ struct PeerLabel: Equatable {
     static func nearbyPhone(seed: Data) -> PeerLabel {
         PeerLabel(title: "Nearby phone", handle: "", hue: Double(seed.last ?? 0) / 255)
     }
+    /// A rotating advert recognised through a contact's presence lease: their own label, "seen nearby, unconfirmed".
+    static func recognized(contactName: String, seed: Data) -> PeerLabel {
+        PeerLabel(title: "\(contactName), seen nearby, unconfirmed", handle: "", hue: Double(seed.last ?? 0) / 255)
+    }
     private init(title: String, handle: String, hue: Double) {
         self.title = title; self.handle = handle; shortHandle = ""; selfName = nil; contactName = nil; verified = false
         color = Color(hue: hue, saturation: 0.25, brightness: 0.6)
@@ -108,11 +122,14 @@ struct PeerLabel: Equatable {
 struct MonogramView: View {
     let label: PeerLabel
     var size: CGFloat = 44
+    /// Follows Dynamic Type (the disc grows with the text, up to 1.6x, so rows stay aligned at accessibility sizes).
+    @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
     var body: some View {
+        let side = size * min(scale, 1.6)
         Text(label.monogram)
-            .font(.system(size: size * 0.42, weight: .semibold, design: .rounded))
+            .font(.system(size: side * 0.42, weight: .semibold, design: .rounded))
             .foregroundStyle(Palette.ink)
-            .frame(width: size, height: size)
+            .frame(width: side, height: side)
             .background(Palette.avatar, in: Circle())
             .accessibilityHidden(true)
     }

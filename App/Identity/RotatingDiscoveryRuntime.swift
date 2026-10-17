@@ -2,8 +2,7 @@ import Foundation
 import Security
 import NearbyCore
 
-/// EXPERIMENTAL rotating discovery IDs (Settings > Advanced, off): the phone's presence key P (Keychain, this
-/// device only, never synced or sent in phase 1), the RV4 epoch clock, the opening pins, the stranger tarpit and
+/// EXPERIMENTAL rotating discovery IDs (Settings > Advanced, off): the presence vault (day keys and leases), the RV4 epoch clock, the opening pins, the stranger tarpit and
 /// the Visible-by-handle window. Call-ready presence advertises the role-0 RDI as compact UUID v2.
 final class RotatingDiscoveryRuntime {
     private let defaults = UserDefaults.standard
@@ -18,6 +17,7 @@ final class RotatingDiscoveryRuntime {
         clock = DiscoveryEpochClock(state: state, bootId: RotatingDiscoveryRuntime.bootId) { s in
             defaults.set(try? JSONEncoder().encode(s), forKey: "rotatingEpochClock")
         }
+        Self.deleteLegacyPresenceKey()
     }
 
     static var nowMs: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
@@ -31,38 +31,27 @@ final class RotatingDiscoveryRuntime {
         return "\(tv.tv_sec).\(tv.tv_usec)"
     }
 
-    /// The epoch to advertise now (a new generation replaces P).
+    /// Phase 2: the day-key window, the generation and the contacts' leases (Keychain, this device only).
+    let vault = PresenceVault(epoch: RotatingDiscoveryIds.currentWallEpoch)
+
+    /// The epoch to advertise now (a forward-jump recovery starts a new presence generation: a new key window).
     func currentEpoch() -> Int64 {
         let reading = clock.read(wallMs: Self.nowMs, elapsedMs: Self.elapsedMs)
         if reading.newGeneration {
             AppLog.event("rotating_ids", ["event": "new_generation", "generation": "\(clock.state.generation)"])
-            _ = presenceKey(regenerate: true)
+            vault.newGeneration(epoch: reading.epoch, reason: "forward_jump")
         }
         return reading.epoch
     }
 
-    /// Role-0 entry for this epoch (salts keyed by this week's lease key, RV11).
+    /// Role-0 entry for this epoch: the salt keyed by today's independent random day key (PROTOCOL "Keys and epochs").
     func callEntry(nodeId: NodeId) -> OpeningEntry {
-        RotatingDiscoveryIds.ownEntry(presenceKey: presenceKey(), nodeId: nodeId.bytes, epoch: currentEpoch(), role: RotatingDiscoveryIds.roleCallOffer)
+        vault.entry(nodeId: nodeId, epoch: currentEpoch(), role: RotatingDiscoveryIds.roleCallOffer)
     }
 
-    /// 32 random bytes, Keychain, AfterFirstUnlockThisDeviceOnly; removed by the emergency wipe with every item.
-    func presenceKey(regenerate: Bool = false) -> Data {
-        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.rotating",
-                                   kSecAttrAccount as String: Self.keyAccount]
-        if !regenerate {
-            var query = base; query[kSecReturnData as String] = true
-            var out: CFTypeRef?
-            if SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let data = out as? Data, data.count == 32 { return data }
-        }
-        SecItemDelete(base as CFDictionary)
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes)
-        var add = base
-        add[kSecValueData as String] = Data(bytes)
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(add as CFDictionary, nil)
-        return Data(bytes)
+    /// The phase 1 presence key P (one long-lived key, weekly derivation) is no longer used: delete it once.
+    static func deleteLegacyPresenceKey() {
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.rotating"] as CFDictionary)
     }
 
     // MARK: Visible by handle (compact v1 until the first boundary at least 10 min later; 25 min monotonic cap)

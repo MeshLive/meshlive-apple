@@ -18,6 +18,8 @@ public enum RotatingDiscoveryIds {
     public static let leaseDomain = Data("BluetoothVideoMesh/Discovery/Lease/1".utf8) + Data([0])
 
     public static func wallEpoch(unixSeconds: Int64) -> Int64 { Int64((Double(unixSeconds) / Double(epochSeconds)).rounded(.down)) }
+    /// This phone's wall-clock epoch now (the verifier's reference for RD4).
+    public static func currentWallEpoch() -> Int64 { wallEpoch(unixSeconds: Int64(Date().timeIntervalSince1970)) }
     /// Lease week of an epoch (672 epochs = 7 days).
     public static func week(of epoch: Int64) -> Int64 { Int64((Double(epoch) / 672).rounded(.down)) }
 
@@ -87,11 +89,20 @@ public enum DiscoveryOpeningCodec {
 
 /// RV15: the check follows the advert the caller selected, never the peer's hello.
 public enum DiscoverySelectionCheck {
-    public enum Result: Equatable { case pass, prefixMismatch, openingMissing, openingMismatch }
-    public static func check(selected: DiscoveryAnnouncement, expectedRole: UInt8, peerNodeId: Data, openingEntries: [OpeningEntry]?) -> Result {
+    public enum Result: Equatable { case pass, prefixMismatch, openingMissing, openingMismatch, openingStale }
+    /// RD4: an opening entry counts only within two epochs of the verifier's wall-clock epoch, so a forger cannot
+    /// build one 2^48 table for a fixed epoch and invert any victim ID of any epoch.
+    public static let epochTolerance: Int64 = 2
+    /// - Parameter verifierWallEpoch: this phone's wall epoch (nil skips the RD4 window; only tests of the ID itself do).
+    public static func check(selected: DiscoveryAnnouncement, expectedRole: UInt8, peerNodeId: Data, openingEntries: [OpeningEntry]?,
+                             verifierWallEpoch: Int64? = nil) -> Result {
         guard selected.rotating else { return peerNodeId.prefix(6) == selected.nodeIdPrefix ? .pass : .prefixMismatch }
         guard let entries = openingEntries else { return .openingMissing }
-        return entries.contains { $0.opens(selected: selected.nodeIdPrefix, nodeId: peerNodeId, expectedRole: expectedRole) } ? .pass : .openingMismatch
+        guard let opening = entries.first(where: { $0.opens(selected: selected.nodeIdPrefix, nodeId: peerNodeId, expectedRole: expectedRole) }) else {
+            return .openingMismatch
+        }
+        if let wall = verifierWallEpoch, abs(opening.epoch - wall) > epochTolerance { return .openingStale }
+        return .pass
     }
 }
 
@@ -109,7 +120,7 @@ public struct EpochClockState: Equatable, Codable {
 
 public final class DiscoveryEpochClock {
     public static let elapsedTickMs: Int64 = (RotatingDiscoveryIds.epochSeconds + 60) * 1000
-    public static let maxAheadEpochs: Int64 = 96
+    public static let maxAheadEpochs: Int64 = 2  // RH4 (Android 2026-10-14; was 96)
     public static let aheadRecoveryMs: Int64 = 3_600_000
     public static let consistentWallToleranceMs: Int64 = 120_000
     public struct Reading: Equatable { public let epoch: Int64; public let ticked: Bool; public let newGeneration: Bool }

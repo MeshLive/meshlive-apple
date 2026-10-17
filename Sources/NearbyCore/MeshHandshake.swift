@@ -61,6 +61,10 @@ public struct NodeCapabilities: Equatable {
     public static let transportCallRelay: UInt8 = 1 << 6
     /// Experimental call video fragments (end-to-end hellos only).
     public static let transportVideoFragments: UInt8 = 1 << 7
+    /// Android's updater build tag (link hellos only): bit 7 says nonce bytes 0-1 are a build tag. Never a capability.
+    public static let transportBuildTag: UInt8 = 1 << 7
+    /// End-to-end hello bit 3: call endpoints with rotating IDs exchange BDX1 (content type 11).
+    public static let endpointDiscoveryExchange: UInt8 = 1 << 3
     public static let codecVP9: UInt8 = 1
     public static let codecAV1: UInt8 = 1 << 1
     /// Proposed (PROTOCOL addendum B, not yet in Android): H.264.
