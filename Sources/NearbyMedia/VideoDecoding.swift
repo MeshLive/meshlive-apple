@@ -16,9 +16,10 @@ public enum VideoDecoderSupport {
         }
         return false
     }
-    /// AV1 hardware decoding (A17 Pro / M3 and later).
+    /// AV1 hardware decoding (A17 Pro / M3 and later). The probe matters on virtual Macs, which report AV1
+    /// hardware but cannot open the decoder (-12906); without it the AV1 decode bit would be advertised wrongly.
     public static var videoToolboxAV1: Bool {
-        if #available(iOS 17.0, macOS 14.0, *) { return VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) }
+        if #available(iOS 17.0, macOS 14.0, *) { return VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) && probe(kCMVideoCodecType_AV1) }
         return false
     }
     /// NodeCapabilities decode mask: VP9 is always decodable (VideoToolbox or bundled libvpx).
@@ -31,12 +32,22 @@ public enum VideoDecoderSupport {
     /// Encode mask: libvpx VP9 only.
     public static var encodeMask: UInt8 { VP9Encoder.isAvailable ? NodeCapabilities.codecVP9 : 0 }
 
+    /// Main profile, 8-bit 4:2:0, 640x360: the sequence header OBU of Tests/NearbyMediaTests/Fixtures/av1-640x360.ivf.
+    static let av1ProbeSequenceHeader = Data([0x0a, 0x0b, 0x00, 0x00, 0x00, 0x0c, 0xc4, 0xff, 0x67, 0x36, 0xbe, 0x40, 0x10])
+
     private static func probe(_ codec: CMVideoCodecType) -> Bool {
         var format: CMFormatDescription?
-        let atoms = ["vpcC": VP9Bitstream.vpcC(VP9FrameInfo(profile: 0, keyFrame: true, showFrame: true, bitDepth: 8, colorSpace: 2, fullRange: false,
+        let atoms: [String: CFData], width: Int32, height: Int32
+        if codec == kCMVideoCodecType_AV1 {
+            guard let seq = try? AV1Bitstream.sequenceHeader(in: av1ProbeSequenceHeader) else { return false }
+            atoms = ["av1C": AV1Bitstream.av1C(seq) as CFData]; width = Int32(seq.maxWidth); height = Int32(seq.maxHeight)
+        } else {
+            atoms = ["vpcC": VP9Bitstream.vpcC(VP9FrameInfo(profile: 0, keyFrame: true, showFrame: true, bitDepth: 8, colorSpace: 2, fullRange: false,
                                                             subsamplingX: true, subsamplingY: true, width: 320, height: 240)) as CFData]
+            width = 320; height = 240
+        }
         let ext = [kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atoms] as CFDictionary
-        guard CMVideoFormatDescriptionCreate(allocator: nil, codecType: codec, width: 320, height: 240, extensions: ext, formatDescriptionOut: &format) == noErr,
+        guard CMVideoFormatDescriptionCreate(allocator: nil, codecType: codec, width: width, height: height, extensions: ext, formatDescriptionOut: &format) == noErr,
               let format else { return false }
         var session: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(allocator: nil, formatDescription: format, decoderSpecification: nil, imageBufferAttributes: nil,

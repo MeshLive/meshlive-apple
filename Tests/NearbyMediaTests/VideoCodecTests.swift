@@ -85,6 +85,13 @@ final class VideoCodecTests: XCTestCase {
         XCTAssertGreaterThan(pictures, 10)
     }
 
+    func testAV1ProbeUsesTheFixtureSequenceHeader() throws {
+        // If the probe's header stopped parsing, AV1 would silently never be advertised on real AV1 hardware.
+        let probe = try XCTUnwrap(AV1Bitstream.sequenceHeader(in: VideoDecoderSupport.av1ProbeSequenceHeader))
+        let clip = try XCTUnwrap(AV1Bitstream.sequenceHeader(in: try ivfFrames("av1-640x360")[0]))
+        XCTAssertEqual(probe, clip)
+    }
+
     func testPixelConversionRoundTrip() throws {
         var picture = I420Picture(width: 64, height: 48)
         for i in 0..<picture.y.count { picture.y[i] = UInt8(i & 0xff) }
