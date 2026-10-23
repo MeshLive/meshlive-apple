@@ -1,0 +1,50 @@
+# Offline checks only: unit tests, design tokens and a simulator build. Nothing here touches Bluetooth, the
+# camera or the microphone, so a green run is not evidence that calls or streams work on phones (TESTING.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The pinned libopus and libvpx builds take most of the run; reuse them until their scripts change.
+      - name: Restore vendored codecs
+        id: vendor
+        uses: actions/cache@v4
+        with:
+          path: |
+            Vendor/Opus.xcframework
+            Vendor/VPX.xcframework
+          key: vendor-${{ runner.os }}-${{ hashFiles('Scripts/prepare-opus.sh', 'Scripts/prepare-libvpx.sh') }}
+
+      - name: Build pinned libopus and libvpx
+        if: steps.vendor.outputs.cache-hit != 'true'
+        run: |
+          bash Scripts/prepare-opus.sh
+          bash Scripts/prepare-libvpx.sh
+
+      - name: Generate the Xcode project
+        run: python3 Scripts/project.py
+
+      - name: Design tokens are up to date
+        run: python3 Scripts/tokens.py --check
+
+      - name: Unit tests
+        run: bash Scripts/test.sh
+
+      - name: Simulator build
+        run: bash Scripts/build.sh iphonesimulator
