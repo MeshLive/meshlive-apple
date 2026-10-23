@@ -16,6 +16,8 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
     var onAuthorizationChange: ((CallAlertPolicy.Authorization) -> Void)?
     /// What the ringing alert shows now, so a later type or name is re-posted silently and a ring-out becomes "Missed call".
     private var posted: CallAlertPolicy.Content?
+    private var firstPostPending = false
+    private static let firstPostDelay: TimeInterval = 0.3
 
     func configure(model: AppModel) {
         self.model = model
@@ -65,7 +67,25 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
             } else if !ringing { clear() }
             return
         }
-        // The invitation always starts as video; voice (cameraOff) and the caller's name arrive a moment later.
+        // The invitation always starts as video; voice (cameraOff) follows about 1 ms later and the banner keeps the
+        // first text, so the first post waits a beat for it. Later changes (the caller's name) re-post silently.
+        if posted == nil {
+            guard !firstPostPending else { return }
+            firstPostPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.firstPostDelay) { [weak self, weak call] in
+                guard let self else { return }
+                self.firstPostPending = false
+                let active = UIApplication.shared.applicationState == .active
+                guard let call, self.posted == nil,
+                      CallAlertPolicy.shouldPost(ringing: call.phase == .incomingRinging, appActive: active, authorization: self.authorization) else { return }
+                self.repost(for: call)
+            }
+            return
+        }
+        repost(for: call)
+    }
+
+    private func repost(for call: CallController) {
         let text = CallAlertPolicy.content(voice: call.offeredType == .voice, peerName: call.label?.title, stranger: call.label == nil)
         guard text != posted else { return }
         post(text, ringing: true, sound: posted == nil)
