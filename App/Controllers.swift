@@ -333,7 +333,8 @@ final class CallController: ObservableObject, Identifiable {
     func accept(as type: CallType) {
         MediaPermissions.request(video: type == .video, context: "incoming") { [weak self] _, _ in
             guard let self, self.phase == .incomingRinging else { return }
-            do { self.callType = type; try self.engine.accept(as: type); self.pump() } catch { self.stats = "\(error)" }
+            // The invitation starts as video, so `speaker` began on; the answered type decides (earpiece for voice).
+            do { self.callType = type; self.speaker = type == .video; try self.engine.accept(as: type); self.pump() } catch { self.stats = "\(error)" }
         }
     }
     func decline() {
