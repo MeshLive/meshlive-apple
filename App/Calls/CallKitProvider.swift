@@ -26,6 +26,8 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
     private var shown: CallKitPolicy.Update?
     private var answered = false
     private var reportPending = false
+    /// CallKit refused this call (Do Not Disturb, an error): it rings with the local alert and the app's ringer instead.
+    private weak var refused: CallController?
     /// Same beat as CallNotifier: the invitation starts as video and the voice signal follows about 1 ms later.
     private static let firstReportDelay: TimeInterval = 0.3
 
@@ -41,6 +43,7 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
             }
         }
         if reportPending, self.call === call { return true }
+        if refused === call { return false }
         let active = UIApplication.shared.applicationState == .active
         guard uuid == nil, CallKitPolicy.shouldReport(enabled: AppSettings.callKit, ringing: call.phase == .incomingRinging, appActive: active) else { return false }
         self.call = call; reportPending = true
@@ -80,8 +83,12 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
             DispatchQueue.main.async {
                 AppLog.event("callkit", ["event": "reported", "video": "\(update.hasVideo)", "named": "\(update.callerName != nil)",
                                          "error": error.map { "\(($0 as NSError).domain) \(($0 as NSError).code)" } ?? "none"])
-                // Refused (Do Not Disturb, a missing entitlement): the call still rings on the app's own screen.
-                if error != nil, self?.uuid == id { self?.forget() }
+                // Refused (Do Not Disturb, a missing entitlement): fall back to the local alert and the app's ringer.
+                guard let self, error != nil, self.uuid == id else { return }
+                let call = self.call
+                self.forget()
+                self.refused = call
+                call?.updateCallAlert()
             }
         }
     }
