@@ -38,4 +38,32 @@ public enum CallKitPolicy {
         if endedInApp { return .requestEnd }
         return .report(failed ? .failed : .remoteEnded)
     }
+
+    /// CallKit refused to show a call. Do Not Disturb, a Focus or the block list filtered it: it stays silent, as a
+    /// phone call would. Any other error: it rings with the local alert and the app's ringer instead.
+    public enum Refusal: Equatable { case silent, ringLocally }
+    public static func refusal(filteredByFocusOrBlockList: Bool) -> Refusal { filteredByFocusOrBlockList ? .silent : .ringLocally }
+
+    /// CallKit reset its provider: the call it showed cannot go on without it, so MeshLive ends it too.
+    public enum ResetAction: Equatable { case decline, end }
+    public static func resetAction(ringing: Bool) -> ResetAction { ringing ? .decline : .end }
+
+    /// Keeps the native screen's mute button and the microphone in step, both ways, without echoing a change back.
+    /// `callKitMuted` is what the native screen shows; hold-to-talk opens the microphone, so it shows unmuted meanwhile.
+    public struct MuteSync: Equatable {
+        public private(set) var callKitMuted = false
+        public init() {}
+        /// The microphone changed in the app (Mute, hold-to-talk, an audio interruption). True: ask CallKit to show it.
+        public mutating func appChanged(micMuted: Bool) -> Bool {
+            guard micMuted != callKitMuted else { return false }
+            callKitMuted = micMuted
+            return true
+        }
+        /// CallKit performed a mute action. True: apply it to the call. False: it only confirms what the app asked for.
+        public mutating func callKitAction(muted: Bool) -> Bool {
+            guard muted != callKitMuted else { return false }
+            callKitMuted = muted
+            return true
+        }
+    }
 }

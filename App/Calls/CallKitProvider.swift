@@ -26,8 +26,10 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
     private var shown: CallKitPolicy.Update?
     private var answered = false
     private var reportPending = false
-    /// CallKit refused this call (Do Not Disturb, an error): it rings with the local alert and the app's ringer instead.
+    /// CallKit refused this call: silent when a Focus or the block list filtered it, else the local alert and ringer.
     private weak var refused: CallController?
+    private var refusal: CallKitPolicy.Refusal = .ringLocally
+    private var mute = CallKitPolicy.MuteSync()
     /// Same beat as CallNotifier: the invitation starts as video and the voice signal follows about 1 ms later.
     private static let firstReportDelay: TimeInterval = 0.3
 
@@ -43,7 +45,7 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
             }
         }
         if reportPending, self.call === call { return true }
-        if refused === call { return false }
+        if refused === call { return refusal == .silent }
         let active = UIApplication.shared.applicationState == .active
         guard uuid == nil, CallKitPolicy.shouldReport(enabled: AppSettings.callKit, ringing: call.phase == .incomingRinging, appActive: active) else { return false }
         self.call = call; reportPending = true
@@ -83,11 +85,13 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
             DispatchQueue.main.async {
                 AppLog.event("callkit", ["event": "reported", "video": "\(update.hasVideo)", "named": "\(update.callerName != nil)",
                                          "error": error.map { "\(($0 as NSError).domain) \(($0 as NSError).code)" } ?? "none"])
-                // Refused (Do Not Disturb, a missing entitlement): fall back to the local alert and the app's ringer.
-                guard let self, error != nil, self.uuid == id else { return }
+                guard let self, let error = error as NSError?, self.uuid == id else { return }
+                let filtered = error.domain == CXErrorDomainIncomingCall
+                    && [CXErrorCodeIncomingCallError.filteredByDoNotDisturb.rawValue, CXErrorCodeIncomingCallError.filteredByBlockList.rawValue].contains(error.code)
                 let call = self.call
                 self.forget()
-                self.refused = call
+                self.refused = call; self.refusal = CallKitPolicy.refusal(filteredByFocusOrBlockList: filtered)
+                AppLog.event("callkit", ["event": "refused", "fallback": "\(self.refusal)"])
                 call?.updateCallAlert()
             }
         }
@@ -117,7 +121,15 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
         forget()
     }
 
-    private func forget() { uuid = nil; call = nil; shown = nil; answered = false }
+    private func forget() { uuid = nil; call = nil; shown = nil; answered = false; mute = CallKitPolicy.MuteSync() }
+
+    /// The call's microphone changed in the app (Mute, hold-to-talk, an interruption): show it on the native screen.
+    func micChanged(_ call: CallController, muted: Bool) {
+        guard let uuid, self.call === call, answered, mute.appChanged(micMuted: muted) else { return }
+        controller.request(CXTransaction(action: CXSetMutedCallAction(call: uuid, muted: muted))) { error in
+            AppLog.event("callkit", ["event": "mute_request", "muted": "\(muted)", "error": error.map { "\(($0 as NSError).code)" } ?? "none"])
+        }
+    }
 
     private func content(for call: CallController) -> CallKitPolicy.Update {
         CallKitPolicy.update(voice: call.offeredType == .voice, peerName: call.label?.title, stranger: call.label == nil)
@@ -134,8 +146,15 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
     // MARK: CXProviderDelegate
 
     func providerDidReset(_ provider: CXProvider) {
-        AppLog.event("callkit", ["event": "reset"])
-        forget()
+        // The native screen is gone, so the MeshLive call it showed ends too (its media stops with it).
+        let call = self.call
+        AppLog.event("callkit", ["event": "reset", "call": "\(call != nil)"])
+        forget(); reportPending = false
+        guard let call, call.ended == nil else { return }
+        switch CallKitPolicy.resetAction(ringing: call.phase == .incomingRinging) {
+        case .decline: call.decline()
+        case .end: call.end()
+        }
     }
 
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
@@ -161,7 +180,8 @@ final class CallKitProvider: NSObject, CXProviderDelegate {
 
     func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
         guard action.callUUID == uuid, let call else { action.fail(); return }
-        call.setMuted(action.isMuted)
+        // Our own request coming back only confirms the app's state; re-applying it would end hold-to-talk.
+        if mute.callKitAction(muted: action.isMuted) { call.setMuted(action.isMuted) }
         action.fulfill()
     }
 

@@ -38,4 +38,32 @@ final class CallKitPolicyTests: XCTestCase {
         // Hung up on the MeshLive screen: CallKit hears it as the user's own end action.
         XCTAssertEqual(CallKitPolicy.outcome(ringing: false, ended: true, answeredByCallKit: true, endedInApp: true, failed: false), .requestEnd)
     }
+
+    func testFocusAndBlockListKeepARefusedCallSilent() {
+        XCTAssertEqual(CallKitPolicy.refusal(filteredByFocusOrBlockList: true), .silent)
+        XCTAssertEqual(CallKitPolicy.refusal(filteredByFocusOrBlockList: false), .ringLocally)
+    }
+
+    func testProviderResetEndsTheMeshLiveCall() {
+        XCTAssertEqual(CallKitPolicy.resetAction(ringing: true), .decline)
+        XCTAssertEqual(CallKitPolicy.resetAction(ringing: false), .end)
+    }
+
+    func testInAppMuteAndHoldToTalkReachTheNativeScreen() {
+        var sync = CallKitPolicy.MuteSync()
+        XCTAssertTrue(sync.appChanged(micMuted: true))   // Mute in the app
+        XCTAssertFalse(sync.callKitAction(muted: true))  // CallKit performs that request: not applied back
+        XCTAssertTrue(sync.appChanged(micMuted: false))  // hold-to-talk pressed: the microphone opens
+        XCTAssertFalse(sync.callKitAction(muted: false))
+        XCTAssertTrue(sync.appChanged(micMuted: true))   // released: muted again
+        XCTAssertFalse(sync.appChanged(micMuted: true))  // no change, no request
+    }
+
+    func testNativeMuteReachesTheCallOnce() {
+        var sync = CallKitPolicy.MuteSync()
+        XCTAssertTrue(sync.callKitAction(muted: true))   // the native Mute button: applied to the call
+        XCTAssertFalse(sync.appChanged(micMuted: true))  // the call's own mute change is not sent back to CallKit
+        XCTAssertTrue(sync.callKitAction(muted: false))
+        XCTAssertFalse(sync.appChanged(micMuted: false))
+    }
 }

@@ -353,6 +353,7 @@ final class CallController: ObservableObject, Identifiable {
         if !keepTalking { muted = value; talking = false }
         audio?.captureEnabled = !value
         engine.setMuted(value); pump()
+        CallKitProvider.shared.micChanged(self, muted: value)
     }
     /// Audio interruption -> hold: mute (the peer is told) and restore the user's own mute state afterwards.
     private func audioInterrupted(_ began: Bool) {
