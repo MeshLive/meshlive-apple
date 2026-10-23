@@ -197,6 +197,7 @@ final class CallController: ObservableObject, Identifiable {
         case .offeredTypeChanged(let type):
             offeredType = type; callType = type
             if phase == .incomingRinging { phaseText = type == .voice ? "Incoming voice call" : "Incoming video call" }
+            CallNotifier.shared.update(for: self)
         case .startLocalMedia(let header, let type):
             callType = type; cameraOn = type == .video
             startMedia(header: header, video: type == .video)
@@ -217,6 +218,7 @@ final class CallController: ObservableObject, Identifiable {
                 label = updated; peerName = updated.title
             }
             self.subject = subject
+            CallNotifier.shared.update(for: self)
         case .ended(let reason, let error):
             // An error before the call was ever active stays readable longer and is repeated on the Call screen.
             if error && activeSince == nil { failedEarly = true }

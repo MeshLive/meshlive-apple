@@ -14,7 +14,8 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
     weak var model: AppModel?
     private(set) var authorization: CallAlertPolicy.Authorization = .notDetermined
     var onAuthorizationChange: ((CallAlertPolicy.Authorization) -> Void)?
-    private var posted = false
+    /// What the ringing alert shows now, so a later type or name is re-posted silently and a ring-out becomes "Missed call".
+    private var posted: CallAlertPolicy.Content?
 
     func configure(model: AppModel) {
         self.model = model
@@ -56,25 +57,35 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
         let ringing = call?.phase == .incomingRinging
         let active = UIApplication.shared.applicationState == .active
         guard let call, CallAlertPolicy.shouldPost(ringing: ringing, appActive: active, authorization: authorization) else {
-            if !ringing { clear() }
+            if call?.phase == .ended, posted != nil, !active {
+                // Rang out in the background, unanswered: leave a missed-call entry in place of the ringing alert.
+                post(CallAlertPolicy.missedContent(peerName: call?.label?.title, stranger: call?.label == nil), ringing: false, sound: false)
+                posted = nil
+                AppLog.event("call_alerts", ["event": "missed"])
+            } else if !ringing { clear() }
             return
         }
-        guard !posted else { return }
+        // The invitation always starts as video; voice (cameraOff) and the caller's name arrive a moment later.
         let text = CallAlertPolicy.content(voice: call.offeredType == .voice, peerName: call.label?.title, stranger: call.label == nil)
-        let content = UNMutableNotificationContent()
-        content.title = text.title
-        content.body = text.body
-        content.categoryIdentifier = CallAlertPolicy.categoryIdentifier
-        content.sound = .default
-        content.threadIdentifier = "calls"
-        center.add(UNNotificationRequest(identifier: Self.identifier, content: content, trigger: nil))
-        posted = true
+        guard text != posted else { return }
+        post(text, ringing: true, sound: posted == nil)
+        posted = text
         AppLog.event("call_alerts", ["event": "posted", "voice": "\(call.offeredType == .voice)"])
     }
 
+    private func post(_ text: CallAlertPolicy.Content, ringing: Bool, sound: Bool) {
+        let content = UNMutableNotificationContent()
+        content.title = text.title
+        content.body = text.body
+        if ringing { content.categoryIdentifier = CallAlertPolicy.categoryIdentifier }
+        content.sound = sound ? .default : nil
+        content.threadIdentifier = "calls"
+        center.add(UNNotificationRequest(identifier: Self.identifier, content: content, trigger: nil))
+    }
+
     func clear() {
-        guard posted else { return }
-        posted = false
+        guard posted != nil else { return }
+        posted = nil
         center.removeDeliveredNotifications(withIdentifiers: [Self.identifier])
         center.removePendingNotificationRequests(withIdentifiers: [Self.identifier])
     }
@@ -94,7 +105,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let action = response.actionIdentifier
         DispatchQueue.main.async {
-            self.posted = false
+            self.posted = nil
             AppLog.event("call_alerts", ["event": "action", "action": action])
             if let call = self.model?.call, call.phase == .incomingRinging {
                 switch action {

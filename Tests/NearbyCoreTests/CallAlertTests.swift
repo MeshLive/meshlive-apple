@@ -10,6 +10,11 @@ final class CallAlertTests: XCTestCase {
         XCTAssertEqual(CallAlertPolicy.lockedPlaceholder, "Incoming call")
     }
 
+    func testMissedCallKeepsTheNameRulesAndDropsTheType() {
+        XCTAssertEqual(CallAlertPolicy.missedContent(peerName: "Asha", stranger: false), .init(title: "Missed call", body: "Asha"))
+        XCTAssertEqual(CallAlertPolicy.missedContent(peerName: "Asha", stranger: true).body, "Open the app to see who is calling.")
+    }
+
     func testNamesAreCleanedAndBounded() {
         XCTAssertEqual(CallAlertPolicy.sanitizedName(" A\u{202E}sha\u{0007} "), "Asha")
         let long = String(repeating: "x", count: 80)
