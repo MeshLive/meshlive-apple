@@ -31,6 +31,12 @@ public enum CallAlertPolicy {
         return Content(title: title, body: name)
     }
 
+    /// Left behind when a call rang out in the background unanswered; same name rules as the ringing alert.
+    public static func missedContent(peerName: String?, stranger: Bool) -> Content {
+        guard !stranger, let name = sanitizedName(peerName) else { return Content(title: "Missed call", body: hiddenPeerText) }
+        return Content(title: "Missed call", body: name)
+    }
+
     /// Trimmed, control and format characters removed, at most 40 characters.
     public static func sanitizedName(_ raw: String?) -> String? {
         guard let raw else { return nil }

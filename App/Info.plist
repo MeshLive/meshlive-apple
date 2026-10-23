@@ -12,7 +12,7 @@
 <key>NSBluetoothAlwaysUsageDescription</key><string>Find people nearby and connect to them directly over Bluetooth for calls and live video, without the internet.</string>
 <key>NSCameraUsageDescription</key><string>Send your video in calls and live streams, and scan a contact's verification code.</string>
 <key>NSMicrophoneUsageDescription</key><string>Talk in calls, push-to-talk and live streams.</string>
-<key>UIBackgroundModes</key><array><string>audio</string><string>bluetooth-central</string><string>bluetooth-peripheral</string></array>
+<key>UIBackgroundModes</key><array><string>audio</string><string>bluetooth-central</string><string>bluetooth-peripheral</string><string>voip</string></array>
 <key>UILaunchScreen</key><dict/>
 <key>UIApplicationSceneManifest</key><dict>
 <key>UIApplicationSupportsMultipleScenes</key><false/>

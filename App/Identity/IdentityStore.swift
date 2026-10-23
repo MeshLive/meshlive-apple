@@ -192,6 +192,11 @@ struct AppSettings {
         get { d.bool(forKey: "experimentalCallAudioFec") }
         set { d.set(newValue, forKey: "experimentalCallAudioFec") }
     }
+    /// EXPERIMENTAL native call screen (off): a call that rings in the background is reported to CallKit.
+    static var callKit: Bool {
+        get { d.bool(forKey: "experimentalCallKit") }
+        set { d.set(newValue, forKey: "experimentalCallKit") }
+    }
     /// EXPERIMENTAL rotating discovery IDs (off): call-ready presence uses a 15-minute rotating ID.
     static var rotatingIds: Bool {
         get { d.bool(forKey: "experimentalRotatingIds") }

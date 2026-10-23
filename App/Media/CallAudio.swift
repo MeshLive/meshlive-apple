@@ -62,8 +62,15 @@ final class CallAudio {
     let fec: Bool
     static let fecLossPercent = 10
 
-    init(bitrate: Int = 24_000, route: Route, fec: Bool = false) {
+    /// EXPERIMENTAL CallKit: the system activates and deactivates the audio session of a call answered on the native
+    /// call screen; bring-up waits for `systemSessionActivated()` (CallKit's provider(_:didActivate:)).
+    private let systemSession: Bool
+    private var systemSessionActive: Bool
+    private var setUpDone = false
+
+    init(bitrate: Int = 24_000, route: Route, fec: Bool = false, systemSession: Bool = false, systemSessionActive: Bool = false) {
         self.bitrate = bitrate; self.route = route; self.fec = fec
+        self.systemSession = systemSession; self.systemSessionActive = systemSessionActive
         playout.fecRecovery = fec
     }
 
@@ -84,7 +91,15 @@ final class CallAudio {
         AppLog.event("audio_setup", ["capture": "\(capture)", "microphone": MediaPermissions.microphone, "opus": "\(CallAudio.opusAvailable)",
                                      "route": route == .speaker ? "speaker" : "earpiece"])
         installObservers()
+        setUpDone = true
+        guard !systemSession || systemSessionActive else { AppLog.event("audio_setup", ["waiting": "callkit_session"]); return }
         bringUp(reason: "start", attempt: 0)
+    }
+
+    func systemSessionActivated() {
+        guard systemSession, !systemSessionActive else { return }
+        systemSessionActive = true
+        if setUpDone { bringUp(reason: "callkit_session", attempt: 0) }
     }
 
     /// (Re)starts the engine. With capture wanted it tries up to 8 times, 250 ms apart (voice processing for the
@@ -149,7 +164,7 @@ final class CallAudio {
                                 options: [.allowBluetoothHFP, .allowBluetoothA2DP])
         try? session.setPreferredSampleRate(48_000)
         try? session.setPreferredIOBufferDuration(0.01)
-        try session.setActive(true)
+        if !systemSession { try session.setActive(true) }
         try? session.overrideOutputAudioPort(route == .speaker ? .speaker : .none)
         if encoder == nil || decoder == nil {
             var error: Int32 = 0
@@ -372,6 +387,6 @@ final class CallAudio {
             if let decoder { nearby_opus_decoder_destroy(decoder) }
             encoder = nil; decoder = nil; framer.reset(); playout.reset()
         }
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if !systemSession { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
     }
 }

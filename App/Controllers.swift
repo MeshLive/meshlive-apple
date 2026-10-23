@@ -98,6 +98,11 @@ final class CallController: ObservableObject, Identifiable {
     @Published var onHold = false
     private var mutedBeforeHold = false
     private let ringer = Ringer()
+    /// EXPERIMENTAL CallKit: answered on the native call screen, so CallKit activates the audio session.
+    var answeredByCallKit = false
+    private var callKitAudioActive = false
+    /// Declined or hung up on this phone (not by the peer or a timeout).
+    private(set) var endedInApp = false
     @Published var subject: String?
     /// Visible media problem (microphone/camera/audio), shown on the call screen.
     @Published var mediaProblem: String?
@@ -181,8 +186,7 @@ final class CallController: ObservableObject, Identifiable {
             label = nil; peerName = "Unverified stranger"
         case .phase(let p):
             phase = p
-            if p == .incomingRinging { ringer.start() } else { ringer.stop() }
-            CallNotifier.shared.update(for: self)
+            updateCallAlert()
             switch p {
             case .outgoingInvite: phaseText = "Calling…"
             case .outgoingRinging: phaseText = "Ringing…"
@@ -197,9 +201,12 @@ final class CallController: ObservableObject, Identifiable {
         case .offeredTypeChanged(let type):
             offeredType = type; callType = type
             if phase == .incomingRinging { phaseText = type == .voice ? "Incoming voice call" : "Incoming video call" }
+            updateCallAlert()
         case .startLocalMedia(let header, let type):
             callType = type; cameraOn = type == .video
-            startMedia(header: header, video: type == .video)
+            // Answered on the lock screen (CallKit): iOS keeps the camera off in the background; it starts when the app opens.
+            if answeredByCallKit && UIApplication.shared.applicationState == .background { enterBackground() }
+            startMedia(header: header, video: cameraOn)
         case .remoteHeader(let header): remote.configure(header: header)
         case .remoteAudio(let packet):
             remoteAudioEvents += 1
@@ -217,6 +224,7 @@ final class CallController: ObservableObject, Identifiable {
                 label = updated; peerName = updated.title
             }
             self.subject = subject
+            updateCallAlert()
         case .ended(let reason, let error):
             // An error before the call was ever active stays readable longer and is repeated on the Call screen.
             if error && activeSince == nil { failedEarly = true }
@@ -270,7 +278,8 @@ final class CallController: ObservableObject, Identifiable {
     }
 
     private func startMedia(header: StreamHeader, video: Bool) {
-        let audio = CallAudio(bitrate: 24_000, route: speaker ? .speaker : .earpiece, fec: AppSettings.callAudioFec)
+        let audio = CallAudio(bitrate: 24_000, route: speaker ? .speaker : .earpiece, fec: AppSettings.callAudioFec,
+                              systemSession: answeredByCallKit, systemSessionActive: callKitAudioActive)
         audio.clockStart = mediaClock
         audio.onPacket = { [weak self] pts, data in
             guard let self else { return }
@@ -305,23 +314,38 @@ final class CallController: ObservableObject, Identifiable {
         startLadder(header: header)
     }
 
+    /// The ringing alert outside the app: CallKit's call screen (experimental) or the local notification. CallKit rings
+    /// with the system ringtone, so the app's own ringer plays only while CallKit does not show the call.
+    func updateCallAlert() {
+        let callKit = CallKitProvider.shared.update(for: self)
+        if !callKit { CallNotifier.shared.update(for: self) }
+        if phase == .incomingRinging && !callKit { ringer.start() } else { ringer.stop() }
+    }
+
+    func callKitAudioActivated() {
+        callKitAudioActive = true
+        audio?.systemSessionActivated()
+    }
+
     // MARK: User actions
 
     /// Asks for the microphone (and camera for video) before answering, so media starts without a prompt.
     func accept(as type: CallType) {
         MediaPermissions.request(video: type == .video, context: "incoming") { [weak self] _, _ in
             guard let self, self.phase == .incomingRinging else { return }
-            do { self.callType = type; try self.engine.accept(as: type); self.pump() } catch { self.stats = "\(error)" }
+            // The invitation starts as video, so `speaker` began on; the answered type decides (earpiece for voice).
+            do { self.callType = type; self.speaker = type == .video; try self.engine.accept(as: type); self.pump() } catch { self.stats = "\(error)" }
         }
     }
     func decline() {
+        endedInApp = true
         do { try engine.decline(.rejected); pump() } catch {
             // Nothing to decline on the wire (the link is not set up, or a DEBUG fixture): close the screen.
             CallNotifier.shared.clear()
             ended = "Call declined"; phaseText = "Call declined"; finished("Call declined")
         }
     }
-    func end() { engine.end(); pump() }
+    func end() { endedInApp = true; engine.end(); pump() }
 
     func toggleMute() { setMuted(!muted) }
     /// `muted` stays true while talking by holding Mute, so the button and state line still read "muted".
@@ -329,6 +353,7 @@ final class CallController: ObservableObject, Identifiable {
         if !keepTalking { muted = value; talking = false }
         audio?.captureEnabled = !value
         engine.setMuted(value); pump()
+        CallKitProvider.shared.micChanged(self, muted: value)
     }
     /// Audio interruption -> hold: mute (the peer is told) and restore the user's own mute state afterwards.
     private func audioInterrupted(_ began: Bool) {
@@ -440,6 +465,7 @@ final class CallController: ObservableObject, Identifiable {
 
     private func cleanupMedia() {
         ringer.stop()
+        CallKitProvider.shared.callEnded(self)
         if audio != nil || camera != nil { logStats(final: true) }
         audio?.stop(); audio = nil
         camera?.stop(); camera = nil
