@@ -75,7 +75,9 @@ final class AppModel: ObservableObject {
         CallNotifier.shared.configure(model: self)
     }
     /// The app left or regained the front while a call may ring (inactive or background).
-    func appActivityChanged() { CallNotifier.shared.update(for: call) }
+    func appActivityChanged() {
+        if let call { call.updateCallAlert() } else { CallNotifier.shared.update(for: nil) }
+    }
     @Published var wiped = false
     /// EXPERIMENTAL rotating discovery IDs (Settings > Advanced).
     @Published var rotatingIds = AppSettings.rotatingIds {

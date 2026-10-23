@@ -85,6 +85,13 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
         repost(for: call)
     }
 
+    /// A call that rang on CallKit's screen (experimental) and went unanswered leaves the same missed-call entry.
+    func postMissed(for call: CallController) {
+        guard authorization == .authorized else { return }
+        post(CallAlertPolicy.missedContent(peerName: call.label?.title, stranger: call.label == nil), ringing: false, sound: false)
+        AppLog.event("call_alerts", ["event": "missed", "via": "callkit"])
+    }
+
     private func repost(for call: CallController) {
         let text = CallAlertPolicy.content(voice: call.offeredType == .voice, peerName: call.label?.title, stranger: call.label == nil)
         guard text != posted else { return }

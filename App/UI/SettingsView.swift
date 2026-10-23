@@ -245,6 +245,10 @@ struct ExperimentsView: View {
                                   info: "Experimental. Adds Opus in-band error correction to call audio, so a lost packet can be rebuilt from the next one.",
                                   isOn: Binding(get: { AppSettings.callAudioFec }, set: { AppSettings.callAudioFec = $0; model.objectWillChange.send() }))
                 CardDivider()
+                SettingsToggleRow(icon: "phone", title: "iPhone call screen",
+                                  info: "Experimental. A call that rings while MeshLive is in the background shows the iPhone's own call screen, also on the lock screen, instead of a notification. These calls also appear in the Phone app's Recents.",
+                                  isOn: Binding(get: { AppSettings.callKit }, set: { AppSettings.callKit = $0; model.objectWillChange.send() }))
+                CardDivider()
                 SettingsToggleRow(icon: "forward.end", title: "Relay: slow viewers skip to keyframes",
                                   info: "Used when Relay video for others is on. A phone you pass a stream to that cannot keep up skips stale video to the next keyframe and keeps the sound, instead of being dropped.",
                                   isOn: Binding(get: { AppSettings.relayChildMediaAge }, set: { AppSettings.relayChildMediaAge = $0; model.objectWillChange.send() }))
