@@ -24,7 +24,7 @@ jobs:
       # The pinned libopus and libvpx builds take most of the run; reuse them until their scripts change.
       - name: Restore vendored codecs
         id: vendor
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             Vendor/Opus.xcframework
