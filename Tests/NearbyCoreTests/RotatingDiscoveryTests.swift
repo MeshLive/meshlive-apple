@@ -352,6 +352,25 @@ final class RotatingStreamTests: XCTestCase {
         XCTAssertEqual(noBitViewer.phase, .closed)
     }
 
+    /// A rotating call listener (the MeshPeer tool) moves to a new ID at each boundary after a silence, and a
+    /// connection opens only the IDs pinned when it was accepted (on air, or off air for less than 60 s).
+    func testARotatingListenerRotatesPerEpochAndPinsTheAcceptedAdvert() {
+        let node = Data(repeating: 9, count: 16), key = Data(repeating: 1, count: 32)
+        let presence = RotatingCallPresence { RotatingDiscoveryIds.ownEntry(presenceKey: key, nodeId: node, epoch: $0, role: 0) }
+        let e10 = RotatingDiscoveryIds.ownEntry(presenceKey: key, nodeId: node, epoch: 10, role: 0)
+        let e11 = RotatingDiscoveryIds.ownEntry(presenceKey: key, nodeId: node, epoch: 11, role: 0)
+        XCTAssertNotEqual(e10.rdi, e11.rdi)
+        XCTAssertEqual(presence.step(epoch: 10, elapsedMs: 0), .advertise(e10))
+        XCTAssertEqual(presence.acceptedEntries(elapsedMs: 0), [e10])
+        XCTAssertEqual(presence.step(epoch: 10, elapsedMs: 500), .none, "one ID for the whole epoch")
+        XCTAssertEqual(presence.step(epoch: 11, elapsedMs: 1_000, silenceMs: { 3_000 }), .stop, "break before make")
+        XCTAssertEqual(presence.acceptedEntries(elapsedMs: 1_000), [e10], "a connection accepted just after the boundary still opens the old ID")
+        XCTAssertEqual(presence.step(epoch: 11, elapsedMs: 2_000), .none, "silent")
+        XCTAssertEqual(presence.step(epoch: 11, elapsedMs: 4_000), .advertise(e11))
+        XCTAssertEqual(presence.acceptedEntries(elapsedMs: 4_000), [e11, e10])
+        XCTAssertEqual(presence.acceptedEntries(elapsedMs: 1_000 + OpeningPins.previousGraceMs), [e11], "the old ID is not opened after 60 s")
+    }
+
     /// Phase 1b for streams is not built here (requests and forwarder offers carry the fixed prefix): with rotating
     /// IDs on, a rotating stream is neither joined nor forwarded; a fixed one, or the setting off, behaves as before.
     func testARotatingStreamIsNotJoinedOrForwardedWithTheFixedPrefixWhileRotatingIdsAreOn() {

@@ -78,6 +78,12 @@ final class Peer {
     let started = Date()
     let pins = Bmh3Pins()
     let entryKey = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+    /// Listen with --rotating: the role-0 ID rotates every epoch and a connection opens only the IDs pinned when it
+    /// was accepted, as the app does.
+    lazy var presence = RotatingCallPresence { [unowned self] epoch in
+        RotatingDiscoveryIds.ownEntry(presenceKey: self.entryKey, nodeId: self.identity.nodeId.bytes, epoch: epoch, role: 0)
+    }
+    static var elapsedMs: Int64 { Int64(ProcessInfo.processInfo.systemUptime * 1000) }
 
     init(_ options: Options) {
         self.options = options
@@ -100,21 +106,34 @@ final class Peer {
         options.bmh3 ? Bmh3CallOptions(pseudonyms: options.pseudonyms && options.rotating, selected: selected, pins: pins) : nil
     }
 
-    func currentEntry() -> OpeningEntry {
-        RotatingDiscoveryIds.ownEntry(presenceKey: entryKey, nodeId: identity.nodeId.bytes, epoch: RotatingDiscoveryIds.currentWallEpoch(), role: 0)
-    }
+    private var radioReady = false
 
     func ready() {
         log("radio ready (\(options.command))")
+        radioReady = true
         // The radio scans only when asked (the app turns it on from its model): scan and call need it.
         if options.command != "listen" { radio.setScanning(true); return }
-        var offer = DiscoveryAnnouncement(nodeIdPrefix: identity.nodeId.prefix,
+        if options.rotating { rotate(); return }
+        advertise(prefix: identity.nodeId.prefix, rotating: false)
+    }
+
+    private func advertise(prefix: Data, rotating: Bool) {
+        var offer = DiscoveryAnnouncement(nodeIdPrefix: prefix,
                                           flags: DiscoveryAnnouncement.flagAcceptingConnections | DiscoveryAnnouncement.flagPrivateCallAvailable
                                               | (options.transport == .gatt ? DiscoveryAnnouncement.flagGattTransport : 0),
                                           capabilitySummary: codecs.encode & codecs.decode, streamToken: 0, routeCost: 0)
-        if options.rotating { offer.nodeIdPrefix = currentEntry().rdi; offer.rotating = true }
+        offer.rotating = rotating
         radio.advertise(offer, name: "MeshPeer")
-        log("advertising a call offer (\(offer.rotating ? "rotating ID " + offer.nodeIdPrefix.hex : "fixed prefix"))")
+        log("advertising a call offer (\(rotating ? "rotating ID " + prefix.hex : "fixed prefix"))")
+    }
+
+    /// Rotating listener: a new ID at each epoch boundary after a 1-8 s silence (until a call is accepted).
+    private func rotate() {
+        switch presence.step(epoch: RotatingDiscoveryIds.currentWallEpoch(), elapsedMs: Self.elapsedMs) {
+        case .none: break
+        case .stop: radio.advertise(nil, name: ""); log("epoch boundary: advertising paused")
+        case .advertise(let entry): advertise(prefix: entry.rdi, rotating: true)
+        }
     }
 
     func peersChanged() {
@@ -144,7 +163,9 @@ final class Peer {
 
     func incoming(_ link: MeshLink) {
         guard options.command == "listen", engine == nil else { link.close(); return }
-        let entries: () -> [OpeningEntry] = { [weak self] in self.map { [$0.currentEntry()] } ?? [] }
+        // The IDs this connection may open are pinned now, at accept (on air, or off air for less than 60 s).
+        let pinned = presence.acceptedEntries(elapsedMs: Self.elapsedMs)
+        let entries: () -> [OpeningEntry] = { pinned }
         let call = CallEngine(role: .callee, transport: link.transport, identity: identity, requestedType: .voice, encodeMask: codecs.encode,
                               decodeMask: codecs.decode, rotating: options.rotating ? RotatingCallOptions(entries: entries) : nil, bmh3: bmh3(selected: nil))
         engine = call
@@ -165,6 +186,7 @@ final class Peer {
     }
 
     func tick() {
+        if options.command == "listen", options.rotating, engine == nil, radioReady { rotate() }
         if let activeAt, Date().timeIntervalSince(activeAt) >= options.seconds { log("hanging up"); engine?.end(); driver?.pump(); self.activeAt = nil }
         let limit = options.command == "scan" ? options.seconds : max(options.seconds * 3, 120)
         if Date().timeIntervalSince(started) > limit { log("time limit"); exit(engine == nil && options.command != "scan" ? 3 : 0) }

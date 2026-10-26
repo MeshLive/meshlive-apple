@@ -243,3 +243,41 @@ public enum RotatingStreamPolicy {
     /// Whether this phone may advertise a (fixed-prefix) forwarder offer for a stream it joined through `offer`.
     public static func mayForward(offer: DiscoveryAnnouncement, rotatingIds: Bool) -> Bool { !(offer.rotating && rotatingIds) }
 }
+
+/// A call listener's rotating presence (role 0) as the app runs it: one ID per epoch, break-before-make at each
+/// boundary (stop, a uniform 1-8 s silence, then the new ID, RV12), and the entries a connection accepted now may open
+/// (on air, or off air for less than 60 s: `OpeningPins`, evaluated at accept). Used by the MeshPeer test tool.
+public final class RotatingCallPresence {
+    public enum Step: Equatable { case none, stop, advertise(OpeningEntry) }
+    private let entryFor: (Int64) -> OpeningEntry
+    private let pins = OpeningPins()
+    private var onAir: OpeningEntry?
+    private var silentUntilMs: Int64?
+    public init(entryFor: @escaping (Int64) -> OpeningEntry) { self.entryFor = entryFor }
+
+    /// What the advertiser does now: advertise the first ID, stop at a boundary, or advertise the new ID once the
+    /// silence is over.
+    public func step(epoch: Int64, elapsedMs: Int64, silenceMs: () -> Int64 = { Int64.random(in: 1_000...8_000) }) -> Step {
+        if let until = silentUntilMs {
+            guard elapsedMs >= until else { return .none }
+            silentUntilMs = nil
+            return advertise(epoch, elapsedMs)
+        }
+        guard let current = onAir else { return advertise(epoch, elapsedMs) }
+        guard current.epoch != epoch else { return .none }
+        pins.offAir(elapsedMs: elapsedMs)
+        onAir = nil
+        silentUntilMs = elapsedMs + silenceMs()
+        return .stop
+    }
+
+    private func advertise(_ epoch: Int64, _ elapsedMs: Int64) -> Step {
+        let entry = entryFor(epoch)
+        onAir = entry
+        pins.onAdvertised(entry, elapsedMs: elapsedMs)
+        return .advertise(entry)
+    }
+
+    /// The entries a connection accepted at `elapsedMs` may open.
+    public func acceptedEntries(elapsedMs: Int64) -> [OpeningEntry] { pins.pinned(elapsedMs: elapsedMs) }
+}

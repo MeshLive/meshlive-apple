@@ -43,6 +43,10 @@ that is set up. Removing the permission later: the same Settings page.
 | Android calls the Mac with those defaults | "Find iPhones" on | `listen --android-defaults` |
 | Plain BMH2 (an older build, or those three switched off on Android) | "Find iPhones" for the Android-calls-Mac direction | no flags |
 
+With `--rotating` a listener behaves as the app: its role-0 ID changes at every epoch boundary after a 1-8 s silence
+(until a call arrives), and a connection opens only the IDs pinned when it was accepted (on air, or off air for less
+than 60 s).
+
 A DEBUG benchmark launch of the Android app reads only its extras: `test_rotating_ids`, `test_bmh3`,
 `test_bmh3_pseudonyms` and `test_ios_compact_discovery`.
 
