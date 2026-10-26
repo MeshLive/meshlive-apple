@@ -15,6 +15,9 @@ protocol MeshLink: AnyObject {
     var onWritable: (() -> Void)? { get set }
     /// Bytes accepted by `send` but not yet handed to Core Bluetooth / the stream.
     var queuedBytes: Int { get }
+    /// CoreBluetooth's per-peer identifier of the remote device (stable for this device's view of the peer while its
+    /// address does not change); nil when unknown. Used only as a local rate-limit key, never sent or logged.
+    var peerIdentifier: UUID? { get }
     #if os(macOS)
     var logFields: [String: String] { get }
     #endif
@@ -74,6 +77,7 @@ final class L2CAPLink: NSObject, PausableMeshLink, StreamDelegate {
     var onClosed: ((String) -> Void)?
     var onWritable: (() -> Void)?
     private let channel: CBL2CAPChannel
+    var peerIdentifier: UUID? { channel.peer?.identifier }
     private let writer = OrderedWriter(limit: 4 * 1024 * 1024)
     private var readBuffer = [UInt8](repeating: 0, count: 16_384)
     private var closed = false
@@ -152,6 +156,7 @@ final class GattClientLink: MeshLink {
     var onClosed: ((String) -> Void)?
     var onWritable: (() -> Void)?
     let peripheral: CBPeripheral
+    var peerIdentifier: UUID? { peripheral.identifier }
     private let write: CBCharacteristic
     private var chunker = GattChunkWriter()
     private let aligned = GattLinkSettings.alignedValues
@@ -253,6 +258,7 @@ final class GattServerLink: MeshLink {
     var onClosed: ((String) -> Void)?
     var onWritable: (() -> Void)?
     let central: CBCentral
+    var peerIdentifier: UUID? { central.identifier }
     private let manager: CBPeripheralManager
     private let notify: CBMutableCharacteristic
     private var chunker = GattChunkWriter()

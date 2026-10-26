@@ -212,6 +212,10 @@ struct AdvancedPrivacyView: View {
                                   isOn: $model.relayedCalls)
                 if model.relayedCalls {
                     CardDivider()
+                    SettingsToggleRow(icon: "person.wave.2", title: "Let phones nearby relay calls to me",
+                                      info: "Experimental. People out of range can call you through other phones. If you answer someone you have not verified, your identity is revealed to whoever holds the call, which may be a relaying phone.",
+                                      isOn: $model.relayedCallsConsent)
+                    CardDivider()
                     SettingsToggleRow(icon: "arrow.left.arrow.right", title: "Help calls nearby",
                                       info: "Experimental. While this device is idle, it can pass one call between two people nearby. It cannot hear or see the call. It stops when you use it, and pauses on low battery or in Low Power Mode.",
                                       isOn: $model.relayedCallsHelp)

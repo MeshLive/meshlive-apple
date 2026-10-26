@@ -370,6 +370,10 @@ open class MeshConnection {
         }
         // Design C first-record dispatch: once the endpoint handshake starts, a listener reads no SETUP.
         if role == .responder, record.type == .endToEndHandshake, link.acceptRelaySetup { link.acceptRelaySetup = false }
+        if phase == .endpointHandshake, role == .responder, record.type == .endToEndHandshake, !endpointHandshakeStarted {
+            endpointHandshakeStarted = true
+            if let refusal = refusesEndpointHandshake() { finish(refusal, error: false); return }
+        }
         if phase == .endpointHandshake {
             guard record.type == .endToEndHandshake, let handshake = endpointHandshake else {
                 throw ProtocolError.state("Expected an end-to-end handshake")
@@ -396,6 +400,9 @@ open class MeshConnection {
     /// True for a relay hop: no endpoint handshake of its own (the endpoints' records are copied).
     open var linkOnly: Bool { false }
     open var expectedPrefixAppliesToEndpoint: Bool { true }
+    private var endpointHandshakeStarted = false
+    /// A responder may refuse its first end-to-end handshake record (it then closes without answering); nil goes on.
+    open func refusesEndpointHandshake() -> String? { nil }
     /// Timers while the handshakes are still running (relayed-call setup deadline).
     open func tickSetup(now: TimeInterval) {}
     /// Experimental relayed calls: the initiator holds its endpoint hello until `sendDeferredEndpointHello`.

@@ -87,6 +87,20 @@ public final class ReachTable<P> {
     private var observationOrder: [String] = []
     private var pending: [(key: String, firstMs: Int64)] = []
     private var offers: [(key: String, sighting: OfferSighting<P>)] = []
+    public static var addressesPerId: Int { 3 }
+
+    /// The sighting to dial among an ID's addresses: heard twice first, then the stronger signal, then the freshest.
+    public static func best(of sightings: [OfferSighting<P>]) -> OfferSighting<P>? {
+        sightings.max { a, b in
+            let ta = a.count >= 2, tb = b.count >= 2
+            if ta != tb { return !ta }
+            if (a.rssi ?? -127) != (b.rssi ?? -127) { return (a.rssi ?? -127) < (b.rssi ?? -127) }
+            return a.seenMs < b.seenMs
+        }
+    }
+    private func sightings(_ key: String, within: Int64, now: Int64) -> [OfferSighting<P>] {
+        offers.filter { $0.key == key && now - $0.sighting.seenMs <= within }.map(\.sighting)
+    }
     private var skipUntil: [String: Int64] = [:]
     private var intake: [Int64] = []
     private var holdDown: [String: (lostCost: Int, until: Int64)] = [:]
@@ -114,12 +128,18 @@ public final class ReachTable<P> {
         let now = clock()
         let key = announcement.nodeIdPrefix.hex
         guard !isOwn(announcement.nodeIdPrefix) else { return }
+        // Review 2026-10-27: a copied advert must not take over an ID, so each address keeps its own sighting (at most
+        // `addressesPerId` per ID, the oldest dropped) and the dial picks the best (`best(of:)`).
         let previous = offers.first { $0.key == key && $0.sighting.address == address }?.sighting
-        offers.removeAll { $0.key == key }
+        offers.removeAll { $0.key == key && $0.sighting.address == address }
         var sighting = OfferSighting(peer: peer, announcement: announcement, seenMs: now, address: address, rssi: rssi)
         sighting.count = (previous?.count ?? 0) + 1
         sighting.firstSeenMs = previous?.firstSeenMs ?? now
         offers.append((key, sighting))
+        let sameId = offers.enumerated().filter { $0.element.key == key }
+        if sameId.count > Self.addressesPerId, let oldest = sameId.min(by: { $0.element.sighting.seenMs < $1.element.sighting.seenMs }) {
+            offers.remove(at: oldest.offset)
+        }
         while offers.count > config.maxOffers { offers.removeFirst() }
         if directSightings() && RelayedCalls.consents(announcement, rotating: rotating) {
             observe(target: announcement.nodeIdPrefix, relay: nil, rawCost: 0, ageMs: 0, address: address, now: now)
@@ -213,11 +233,10 @@ public final class ReachTable<P> {
     public func directOffer(_ target: Data, maxAgeMs: Int64? = nil) -> OfferSighting<P>? {
         guard directSightings() else { return nil }
         let now = clock()
-        guard let s = offers.first(where: { $0.key == target.hex })?.sighting, now - s.seenMs <= (maxAgeMs ?? config.offerFreshMs) else { return nil }
-        return s
+        return Self.best(of: sightings(target.hex, within: maxAgeMs ?? config.offerFreshMs, now: now))
     }
 
-    public func offer(_ prefix: Data) -> OfferSighting<P>? { offers.first { $0.key == prefix.hex }?.sighting }
+    public func offer(_ prefix: Data) -> OfferSighting<P>? { Self.best(of: offers.filter { $0.key == prefix.hex }.map(\.sighting)) }
 
     /// Every offer heard within `withinMs` (Design OR: a search first uses what scans heard anyway).
     public func recentOffers(withinMs: Int64) -> [OfferSighting<P>] {
@@ -228,9 +247,9 @@ public final class ReachTable<P> {
     /// The fresh connectable helper offer (FLAG_RELAY_CAPABLE) of relay `prefix`.
     public func helperOffer(_ prefix: Data, accept: (DiscoveryAnnouncement) -> Bool = { _ in true }) -> OfferSighting<P>? {
         let now = clock()
-        guard let s = offers.first(where: { $0.key == prefix.hex })?.sighting, now - s.seenMs <= config.offerFreshMs,
-              RelayedCalls.isRelayHelperOffer(s.announcement, rotating: rotating), accept(s.announcement) else { return nil }
-        return s
+        return Self.best(of: sightings(prefix.hex, within: config.offerFreshMs, now: now).filter {
+            RelayedCalls.isRelayHelperOffer($0.announcement, rotating: rotating) && accept($0.announcement)
+        })
     }
 
     /// Routes a caller can try for `target`, best first: direct, then fewest relays, then age under 20 s, then the

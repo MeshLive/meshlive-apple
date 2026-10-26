@@ -285,14 +285,27 @@ public final class RelaySetupRateLimiter {
     public var trackedParents: Int { byParent.count }
 
     /// The limiter key: a real parent's prefix, or the link address of a pseudonymous one (unknown: one shared bucket).
-    public static func key(parentPrefixHex: String, pseudonymous: Bool, remoteAddress: String?) -> String {
+    /// The per-parent key: a real parent's prefix; a pseudonymous parent's CoreBluetooth peer identifier (it mints keys for
+    /// free); nil when that is unknown, which applies only the overall cap (one stranger must not block everyone).
+    public static func key(parentPrefixHex: String, pseudonymous: Bool, peerIdentifier: UUID?) -> String? {
         guard pseudonymous else { return parentPrefixHex }
-        guard let remoteAddress, !remoteAddress.isEmpty else { return unknownAddressBucket }
-        return "addr:" + remoteAddress.uppercased()
+        return peerIdentifier.map { "peer:" + $0.uuidString }
     }
 
-    public func tryAdmit(_ parent: String, nowMs: Int64) -> Bool {
+    /// The token of an admitted request that turned out well (READY and the chain guard satisfied) is given back:
+    /// only abusive traffic pays (owner rule 2026-10-27).
+    public func refund(_ parent: String?, admittedAtMs: Int64) {
+        if let i = all.lastIndex(of: admittedAtMs) { all.remove(at: i) }
+        if let parent, var own = byParent[parent], let i = own.lastIndex(of: admittedAtMs) { own.remove(at: i); byParent[parent] = own }
+    }
+
+    /// Admits one request: the overall cap always, the per-parent cap when the parent has a key.
+    public func tryAdmit(_ parent: String?, nowMs: Int64) -> Bool {
         all.removeAll { nowMs - $0 >= windowMs }
+        guard let parent else {
+            guard all.count < overall else { return false }
+            all.append(nowMs); return true
+        }
         var own = (byParent[parent] ?? []).filter { nowMs - $0 < windowMs }
         if byParent.count > Self.maxTrackedParents {
             for (k, v) in byParent { let kept = v.filter { nowMs - $0 < windowMs }; if kept.isEmpty && k != parent { byParent[k] = nil } else { byParent[k] = kept } }

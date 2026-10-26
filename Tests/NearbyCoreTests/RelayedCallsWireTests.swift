@@ -103,8 +103,10 @@ final class RelayedCallsWireTests: XCTestCase {
         let limiter = RelaySetupRateLimiter()
         XCTAssertEqual((0..<4).map { _ in limiter.tryAdmit("a", nowMs: 0) }, [true, true, true, false])
         XCTAssertTrue(limiter.tryAdmit("a", nowMs: 60_000))
-        XCTAssertEqual(RelaySetupRateLimiter.key(parentPrefixHex: "aa", pseudonymous: true, remoteAddress: nil), RelaySetupRateLimiter.unknownAddressBucket)
-        XCTAssertEqual(RelaySetupRateLimiter.key(parentPrefixHex: "aa", pseudonymous: false, remoteAddress: "x"), "aa")
+        XCTAssertNil(RelaySetupRateLimiter.key(parentPrefixHex: "aa", pseudonymous: true, peerIdentifier: nil), "unknown: overall cap only")
+        let peer = UUID()
+        XCTAssertEqual(RelaySetupRateLimiter.key(parentPrefixHex: "aa", pseudonymous: true, peerIdentifier: peer), "peer:" + peer.uuidString)
+        XCTAssertEqual(RelaySetupRateLimiter.key(parentPrefixHex: "aa", pseudonymous: false, peerIdentifier: peer), "aa")
     }
 
     // MARK: Design OR SEEK (Android RelaySeekTest vectors)

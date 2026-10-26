@@ -14,6 +14,7 @@ final class ConnectionDriverTests: XCTestCase {
         var releases = 0
         var failOnSend = false
         var queuedBytes: Int { pending.reduce(0) { $0 + $1.count } }
+        var peerIdentifier: UUID? { nil }
         func send(_ data: Data) {
             guard !closed else { return }
             if failOnSend { close(); onClosed?("Synchronous pipe failure") }

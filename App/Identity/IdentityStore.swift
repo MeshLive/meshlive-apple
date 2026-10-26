@@ -350,6 +350,12 @@ struct AppSettings {
     static var relayedStrangerCalls: Bool { d.object(forKey: "relayedStrangerCalls") as? Bool ?? true }
     /// Amendment CP pseudonymous relay edges (Android `test_relayed_pseudonymous_edges`, on). Control arm for tests only:
     /// launch argument `-relayedPseudonymousEdges NO`; no Settings switch.
+    /// Relayed calls sub-switch "Let phones nearby relay calls to me" (Android `relayed_calls_consent`, on within the
+    /// experiment): the consent bit on this device's call offer, and whether a relayed call may ring here.
+    static var relayedCallsConsent: Bool {
+        get { d.object(forKey: "relayedCallsConsent") as? Bool ?? true }
+        set { d.set(newValue, forKey: "relayedCallsConsent") }
+    }
     /// Relayed calls sub-switch "Help calls nearby" (Android `relayed_calls_help`, preselected on within the experiment):
     /// this device may pass other people's calls on while it is idle.
     static var relayedCallsHelp: Bool {

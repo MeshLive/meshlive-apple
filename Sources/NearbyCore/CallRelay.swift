@@ -95,6 +95,8 @@ public final class CallRelayLink: MeshConnection {
     public let openingCheck: DiscoveryAnnouncement?
     /// Called once the link is authenticated and, when one was negotiated, the peer's opening checked.
     public var onReady: (() throws -> Void)?
+    /// The peer failed this link's own identity checks (prefix, opening).
+    public private(set) var identityRejected = false
 
     /// - Parameter relaySetup: Design C helper link: the hello also signs bit 4 ("understands RELAY_SETUP").
     /// - Parameter openingCheck: Design C onward link toward a rotating hop: sign bit 3 and check its `BDO1`.
@@ -113,6 +115,7 @@ public final class CallRelayLink: MeshConnection {
                 if !linkPeerPseudonymous, let peer = peerLinkNodeId {
                     guard DiscoverySelectionCheck.check(selected: openingCheck, expectedRole: RotatingDiscoveryIds.roleCallOffer, peerNodeId: peer.bytes,
                                                         openingEntries: entries, verifierWallEpoch: wallEpoch()) == .pass else {
+                        identityRejected = true
                         throw ProtocolError.authentication
                     }
                 }
@@ -140,9 +143,10 @@ public final class CallRelayLink: MeshConnection {
     public override func validateLinkPeer() throws {
         guard let id = link.peerNodeId, let caps = link.peerCapabilities else { throw ProtocolError.authentication }
         // A declared throwaway is not bound by prefix (Amendment CP); a real key is.
-        if let expectedPeerPrefix, !link.peerPseudonymous, id.prefix != expectedPeerPrefix { throw ProtocolError.authentication }
+        if let expectedPeerPrefix, !link.peerPseudonymous, id.prefix != expectedPeerPrefix { identityRejected = true; throw ProtocolError.authentication }
         // A real-key rotating hop must open the selected offer.
         if openingCheck != nil, !link.peerPseudonymous, caps.transportMask & NodeCapabilities.transportDiscoveryOpening == 0 {
+            identityRejected = true
             throw ProtocolError.authentication
         }
         try onAuthenticated?(id, caps)

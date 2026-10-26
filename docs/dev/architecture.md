@@ -80,8 +80,13 @@ Experimental and off ("Relayed calls"); the wire and rules are Android's (PROTOC
   ID gives the token, or for two relays a next helper with a regenerated `SEEK`, within search budgets. The Apple caller
   searches the same way for a contact that is not listed (rings 1, 1b near an epoch boundary, and 2 with a skip list;
   give-up at 45 s; the contact's own offer appearing first wins). Searches need no pages, so Apple helpers are found.
-- **Not built:** client puzzles (OR-PZ), the automatic-retry backoff use (the memory exists), and a remote-address key
-  for pseudonymous parents in the rate limiter (CoreBluetooth gives none, so they share one bucket).
+- **Admission** (`RelayHelperGate`, review 2026-10-27): the rotating-helper and control-arm refusals, then switches,
+  pause (Low Power Mode, heat, battery) and busy, then the SETUP rate limiter keyed by the parent's prefix, or for a
+  throwaway parent by CoreBluetooth's per-peer identifier (unknown: only the overall cap); a relay that reached READY
+  and satisfied the chain guard refunds its token. Searches are bounded by their own budgets.
+- **Consent** is its own sub-switch ("Let phones nearby relay calls to me"): without it the offer carries no consent
+  bit and a callee closes, unanswered, on the first end-to-end record from a link peer that signed the relay mark.
+- **Not built:** client puzzles (OR-PZ) and the automatic-retry backoff use (the memory exists).
 
 ## Screens and design
 

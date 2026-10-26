@@ -276,10 +276,20 @@ public final class CallEngine: MeshConnection {
     public private(set) var relaySetupFailure: RelaySetupFailure?
     /// The hop answered something invalid (not a reason code): the route is skipped like a failure.
     public private(set) var relaySetupInvalid = false
+    private var relayOpeningVerified = false
     public var relayedRouteFailed: Bool {
         relayRoute != nil && relayReadyRelays == nil && (relaySetupFailure != nil || relaySetupInvalid || phase == .closed)
     }
     public override var defersEndpointHello: Bool { relayRoute != nil }
+
+    /// Review item 6 (Android target-side consent): a callee whose relayed calls are off closes, unanswered, on the first
+    /// end-to-end handshake record from a link peer that signed the call-relay mark, so no identity leaves it.
+    public override func refusesEndpointHandshake() -> String? {
+        guard callRole == .callee, !acceptRelayedCalls,
+              (link.peerCapabilities?.transportMask ?? 0) & NodeCapabilities.transportCallRelay != 0 else { return nil }
+        relayedDecline = .declineRelayingOff
+        return "Relayed call refused (relayed calls are off)"
+    }
 
     /// Fails the relayed route: the call ends with the plain reason.
     private func failRelay(_ reason: RelaySetupFailure?, _ text: String) {
@@ -298,6 +308,10 @@ public final class CallEngine: MeshConnection {
         }
         if !throwaway && !route.rotating && peer.prefix != route.helperPrefix {
             return (.childAuthentication, "The phone that answered is not the helper that was chosen")
+        }
+        // Review item 9: a rotating route's real-key first hop must have opened the chosen helper offer (fail closed).
+        if !throwaway && route.rotating && !relayOpeningVerified {
+            return (.childAuthentication, "The phone that answered did not prove it is the helper that was chosen")
         }
         if !RelayedCalls.linkAcceptsSetup(caps) { return (.refused, RelaySetupFailure.refused.userText) }
         return nil
@@ -589,6 +603,7 @@ public final class CallEngine: MeshConnection {
                                              verifierWallEpoch: rotatingOptions?.wallEpoch()) != .pass {
                 failRelay(.childAuthentication, "The phone that answered is not the helper that was chosen"); return
             }
+            relayOpeningVerified = route.rotating && !link.peerPseudonymous
             sendRelaySetup()
             return
         }

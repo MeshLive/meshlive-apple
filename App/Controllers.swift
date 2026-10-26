@@ -103,6 +103,8 @@ final class CallController: ObservableObject, Identifiable {
     var relayRoute: RelayRoute?
     var relayConnectFailed = false
     var relayReady: Bool { engine.relayReadyRelays != nil }
+    /// The end-to-end peer was authenticated (for a stranger: after its reveal), review item 3.
+    private(set) var endToEndVerified = false
     /// Why the route failed before READY (a first hop that could not be connected or closed early counts as a timeout).
     var relayFailure: RelaySetupFailure? { engine.relaySetupFailure ?? (relayConnectFailed || engine.relayedRouteFailed ? .timeout : nil) }
     var userCancelled = false
@@ -194,7 +196,7 @@ final class CallController: ObservableObject, Identifiable {
         remote.onNeedKeyFrame = { [weak self] in self?.engine.requestKeyFrame(); self?.pump() }
         remote.onFirstPicture = { [weak self] in self?.markStage("first_frame") }
         relayed = relayHops > 0
-        engine.acceptRelayedCalls = model.relayedCalls
+        engine.acceptRelayedCalls = model.relayedCalls && model.relayedCallsConsent
         // Android connection review A3: 15 s (relayed 30 s) from hop authentication to Ringing; `-callerAnswerDeadline NO`.
         engine.callerAnswerDeadline = UserDefaults.standard.object(forKey: "callerAnswerDeadline") as? Bool ?? true
         // EXPERIMENTAL overhead trim (Android test_call_audio_coalesce, off): `-callAudioCoalesce YES`.
@@ -359,6 +361,7 @@ final class CallController: ObservableObject, Identifiable {
         case .linkAuthenticated(let id): markStage("link_auth"); AppLog.event("call_auth", ["stage": "link", "peer": id.shortLabel, "transport": transport.rawValue, "linkMs": linkMs])
         case .peerAuthenticated(let id, let fp):
             markStage("endpoint_auth")
+            endToEndVerified = true
             AppLog.event("call_auth", ["stage": "endpoint", "linkMs": linkMs, "peer": id.shortLabel, "handle": IdentityHandle.handle(prefix: id.prefix) ?? "?",
                                        "fingerprint": String(fp.hex.prefix(16)), "codec": "\(engine.selectedCodec.map { $0 == StreamProtocol.codecVP9 ? "vp9" : "av1" } ?? "none")",
                                        "peerCaps": engine.endpoint.map { String(format: "t%02x/e%02x/d%02x/max%d", $0.peerCapabilities.transportMask, $0.peerCapabilities.encodeCodecMask, $0.peerCapabilities.decodeCodecMask, $0.peerCapabilities.maxBitrateKbps) } ?? "?"])

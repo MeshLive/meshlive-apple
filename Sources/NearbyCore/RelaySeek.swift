@@ -18,6 +18,8 @@ public enum RelaySeek {
     public static let minAllowanceBudget1Ms = 9_000
     public static let minAllowanceBudget2Ms = 14_000
     public static let onwardTargetMs = 6_000
+    /// A search with less time than this left answers FAIL 4 without radio work.
+    public static let minSearchMs = 3_000
     public static let defaultScanMs = 3_000
     public static let collectAfterMatchMs = 1_000
     public static let maxTargetAddresses = 3
@@ -54,15 +56,21 @@ public struct RelaySeekPlan<P> {
     public let targets: [(peer: P, rdi: Data)]
     public let helpers: [(peer: P, rdi: Data)]
 
-    public init(offers: [OfferSighting<P>], nonce: Data, token: Data, skip: [Data], budget: Int, bearer: MeshTransport, ownRdis: [Data],
-                fanout: Int = RelaySeek.defaultFanout) {
+    public init(offers allOffers: [OfferSighting<P>], nonce: Data, token: Data, skip: [Data], budget: Int, bearer: MeshTransport, ownRdis: [Data],
+                fanout: Int = RelaySeek.defaultFanout, badAddresses: Set<String> = [], plainId: Data? = nil) {
+        let offers = allOffers.filter { !badAddresses.contains($0.address) }
         // Heard twice first, then the stronger signal (PROTOCOL OR helper rule 7).
         let strongest = offers.sorted { a, b in
             let ta = a.count >= 2, tb = b.count >= 2
             if ta != tb { return ta }
             return (a.rssi ?? -127) > (b.rssi ?? -127)
         }
-        targets = Array(strongest.filter { RelaySeek.matches($0.announcement, nonce: nonce, token: token, bearer: bearer, ownRdis: ownRdis) }
+        targets = Array(strongest.filter { o in
+            // A plain SETUP handled as a search compares the ID directly (no token).
+            if let plainId { return RelayedCalls.consents(o.announcement, rotating: true) && o.announcement.transport == bearer
+                && !ownRdis.contains(o.announcement.nodeIdPrefix) && o.announcement.nodeIdPrefix == plainId }
+            return RelaySeek.matches(o.announcement, nonce: nonce, token: token, bearer: bearer, ownRdis: ownRdis)
+        }
             .prefix(RelaySeek.maxTargetAddresses).map { ($0.peer, $0.announcement.nodeIdPrefix) })
         if budget >= 2 {
             let targetRdis = Set(targets.map(\.rdi))
@@ -73,6 +81,16 @@ public struct RelaySeekPlan<P> {
             }.prefix(fanout).map { ($0.peer, $0.announcement.nodeIdPrefix) })
         } else { helpers = [] }
     }
+}
+
+/// Advertiser addresses whose link failed the opening of the sought ID: not dialled again by this helper in that epoch
+/// (Android RelaySeekBadAddresses; a copied advert costs one dial per epoch).
+public final class RelaySeekBadAddresses {
+    private var epoch: Int64 = .min
+    private var addresses = Set<String>()
+    public init() {}
+    public func record(_ address: String, epoch: Int64) { if epoch != self.epoch { self.epoch = epoch; addresses = [] }; addresses.insert(address) }
+    public func current(epoch: Int64) -> Set<String> { epoch == self.epoch ? addresses : [] }
 }
 
 /// A helper's search budgets over a rolling 10 minutes (Android RelaySeekBudgets): duty at most 60 s, on-demand scanning
@@ -109,6 +127,16 @@ public final class RelaySeekBudgets {
         if handshakeLog.count >= handshakes { return "handshakes" }
         return nil
     }
+    /// When the budgets first ran out (helpers withdraw their flag after 60 s of exhaustion), or nil.
+    public private(set) var exhaustedSince: Int64?
+    /// The listener signs RELAY_SEEK only while a budget-1 search still fits (9 s of duty left) and nothing ran out.
+    public func signing(now: Int64) -> Bool {
+        let ok = !exhausted(now: now) && remainingDutyMs(now: now) >= Int64(RelaySeek.minAllowanceBudget1Ms)
+        if ok { exhaustedSince = nil } else if exhaustedSince == nil { exhaustedSince = now }
+        return ok
+    }
+    /// After 60 s of exhaustion the helper flag is withdrawn until recovery.
+    public func withdrawHelperFlag(now: Int64) -> Bool { !signing(now: now) && now - (exhaustedSince ?? now) >= 60_000 }
     public func chargeDial(now: Int64) { dialLog.append(now) }
     public func chargeHandshake(now: Int64) { handshakeLog.append(now) }
     /// The search ended: charge its duty and scan time unless it reached READY.

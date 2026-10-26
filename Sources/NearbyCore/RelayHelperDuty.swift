@@ -26,6 +26,66 @@ public struct RelayChainGuard {
     public var satisfied: Bool { handshakeSeen && answerSeen }
 }
 
+/// A helper listener's decision on its first-record SETUP or SEEK (PROTOCOL setup rule 2, Amendment CP, Design OR), in
+/// order: the rotating-helper and control-arm refusals, the cheap switch, pause and busy checks, then the rate limiter
+/// (SETUP only; a SEEK is bounded by the search budgets), then the route. Pure apart from the limiter and budgets.
+public enum RelayHelperGate {
+    public struct Facts {
+        public var isSeek = false
+        /// SETUP message 4 (a role-0 RDI target) or a SEEK.
+        public var rotatingRequest = false
+        public var featureOn = true, helpAllowed = true, onDemand = false
+        public var paused: String?
+        public var busy = false
+        /// This helper uses rotating IDs (its own offer is version 5).
+        public var rotatingHelper = false
+        public var pseudonymousEdges = true
+        public var pseudonymousParent = false
+        public var parentPrefixHex = ""
+        public var parentPeerIdentifier: UUID?
+        public var parentIsSelf = false, parentIsTarget = false, targetIsSelf = false
+        public var budget = 1, maxRelays = RelayedCalls.defaultMaxRelays
+        public init() {}
+    }
+
+    public enum Decision: Equatable {
+        case refuse(RelaySetupFailure, reason: String)
+        /// Go on with the table route (SETUP); `limiterKey` and `admittedAtMs` let a good outcome refund the token.
+        case setup(limiterKey: String?, admittedAtMs: Int64)
+        /// A search: a SEEK, or (on-demand mode) a plain rotating SETUP whose target the table does not hold.
+        case search(allowanceMs: Int)
+    }
+
+    public static func decide(_ f: Facts, remainingMs: Int, limiter: RelaySetupRateLimiter, budgets: RelaySeekBudgets, nowMs: Int64,
+                              routeAvailable: () -> Bool) -> Decision {
+        // Amendment CP: a rotating helper answers a fixed-prefix SETUP (message 1) with FAIL 5.
+        if !f.isSeek && f.rotatingHelper && !f.rotatingRequest && f.pseudonymousEdges { return .refuse(.refused, reason: "rotating_helper") }
+        // Control arm parity: without pseudonymous edges a throwaway parent is never served.
+        if f.pseudonymousParent && !f.pseudonymousEdges { return .refuse(.refused, reason: "throwaway_parent") }
+        if !f.featureOn || !f.helpAllowed { return .refuse(.refused, reason: "off") }
+        if let pause = f.paused { return .refuse(.refused, reason: pause) }
+        if f.isSeek && !f.onDemand { return .refuse(.refused, reason: "searches_off") }
+        if f.busy { return .refuse(.busy, reason: "busy") }
+        if !f.isSeek && f.targetIsSelf { return .refuse(.noRoute, reason: "no_route") }
+        if f.parentIsSelf || f.parentIsTarget { return .refuse(.loop, reason: "loop") }
+        let cap = f.isSeek ? min(RelaySeek.maxBudget, f.maxRelays) : f.maxRelays
+        if f.budget < 1 || f.budget > cap { return .refuse(.refused, reason: "budget") }
+        if f.isSeek {
+            if let r = budgets.refusal(budget: f.budget, now: nowMs) { return .refuse(.refused, reason: "budget_" + r) }
+            let allowance = min(Int64(remainingMs), budgets.remainingDutyMs(now: nowMs))
+            return .search(allowanceMs: Int(allowance))
+        }
+        let key = RelaySetupRateLimiter.key(parentPrefixHex: f.parentPrefixHex, pseudonymous: f.pseudonymousParent, peerIdentifier: f.parentPeerIdentifier)
+        if !limiter.tryAdmit(key, nowMs: nowMs) { return .refuse(.refused, reason: "rate") }
+        if routeAvailable() { return .setup(limiterKey: key, admittedAtMs: nowMs) }
+        // On-demand mode: a plain rotating SETUP with no table route is handled as a search for its single RDI.
+        if f.onDemand && f.rotatingRequest && budgets.refusal(budget: min(f.budget, RelaySeek.maxBudget), now: nowMs) == nil {
+            return .search(allowanceMs: Int(min(Int64(remainingMs), budgets.remainingDutyMs(now: nowMs))))
+        }
+        return .refuse(.noRoute, reason: "no_route")
+    }
+}
+
 public final class RelayHelperDuty {
     public enum State: Equatable { case connectingNext, waitingForNext, relaying, closed(String) }
 
@@ -92,10 +152,16 @@ public final class RelayHelperDuty {
     /// - Parameters:
     ///   - parent: the authenticated parent link (adopted from the call listener) whose first record was the SETUP.
     ///   - now: when the SETUP was accepted; every later wait counts from it.
-    public init(identity: SigningIdentity, transport: MeshTransport, parent: CallRelayLink, request: Request, now: TimeInterval) {
+    /// Amendment CP edges: a failed target dial is FAIL 4 (the pair is skipped briefly), not "no route", which would drop a
+    /// working table entry; the control arm keeps FAIL 1.
+    public let pseudonymousEdges: Bool
+    /// Design OR: one deadline from the allowance (the request's time, shortened to the duty time left).
+    public init(identity: SigningIdentity, transport: MeshTransport, parent: CallRelayLink, request: Request, now: TimeInterval,
+                allowanceMs: Int? = nil, pseudonymousEdges: Bool = true) {
         self.identity = identity; self.transport = transport; self.parent = parent; self.request = request
+        self.pseudonymousEdges = pseudonymousEdges
         acceptedAt = now
-        deadline = now + TimeInterval(request.remainingMs) / 1000
+        deadline = now + TimeInterval(min(request.remainingMs, allowanceMs ?? request.remainingMs)) / 1000
         parent.onClosed = { [unowned self] reason, _ in close("Parent: \(reason)") }
         parent.acceptRelaySetup = false   // a second type-12 record is a violation (the opener rejects it)
     }
@@ -117,9 +183,13 @@ public final class RelayHelperDuty {
                                  openingCheck: opening, wallEpoch: wallEpoch)
         if !request.rotating { link.expectedPeerPrefix = expected }
         link.onAuthenticated = { [unowned self] id, caps in
+            childIdentityProblem = true   // cleared below when every check passed
             guard caps.supports(transport: transport.capabilityBit) else { throw ProtocolError.incompatible("Next hop did not authenticate the bearer") }
             if id == identity.nodeId { throw ProtocolError.state("The relay cannot be its own child") }
             if next.hopPrefix != nil, !RelayedCalls.linkAcceptsSetup(caps) { throw ProtocolError.state("Next relay did not authenticate as a relayed-call helper") }
+            // Review 2026-10-27: on a search the target must prove the sought ID; an unbound throwaway could be a copy.
+            if next.hopPrefix == nil, request.seek != nil, self.child?.linkPeerPseudonymous == true { throw ProtocolError.state("A searched target answered with a throwaway") }
+            childIdentityProblem = false
         }
         link.onReady = { [unowned self] in try childReady() }
         link.onClosed = { [unowned self] reason, _ in childClosed(reason) }
@@ -132,7 +202,8 @@ public final class RelayHelperDuty {
     /// The app could not open a link to the next hop.
     public func childConnectFailed(_ reason: String) {
         guard readyRelays == nil else { return }
-        attemptFailed(next?.hopPrefix == nil ? .noRoute : .timeout, "Next hop: \(reason)")
+        childIdentityProblem = false
+        attemptFailed(next?.hopPrefix == nil && !pseudonymousEdges ? .noRoute : .timeout, "Next hop: \(reason)")
     }
 
     /// A search found nothing to try (or ran out of candidates): FAIL with `reason`.
@@ -140,6 +211,12 @@ public final class RelayHelperDuty {
 
     /// Time left before the one deadline, in ms.
     public func remainingMs(now: TimeInterval) -> Int { max(0, Int(((deadline - now) * 1000).rounded())) }
+
+    /// The current next hop failed an identity or capability check (typed, review item 10).
+    private var childIdentityProblem = false
+    /// The address of the current next hop failed the sought ID (a search records it as a copied advert).
+    public var lastChildIdentityFailure: Bool { childIdentityProblem }
+    public var chainGuardSatisfied: Bool { guardState?.satisfied ?? false }
 
     private func childReady() throws {
         guard let child, let next else { return }
@@ -214,8 +291,8 @@ public final class RelayHelperDuty {
         guard readyRelays == nil else { close("Child: \(reason)"); return }
         // An identity or capability problem of the next hop is FAIL 3; a link that died while connecting is a timeout
         // (Android RelayIdentityPolicy.failureBeforeReady with pseudonymous edges: never "no route" for a working pair).
-        let identityProblem = reason == ProtocolError.authentication.description || reason.contains("did not authenticate")
-            || reason.contains("own child") || reason.contains("next relay")
+        let identityProblem = childIdentityProblem || child?.identityRejected == true
+        childIdentityProblem = identityProblem
         attemptFailed(identityProblem ? .childAuthentication : .timeout, "Next hop: \(reason)")
     }
 
