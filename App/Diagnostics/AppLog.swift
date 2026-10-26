@@ -22,7 +22,7 @@ enum AppLog {
     static func start() {
         guard !DesktopPreview.enabled else { return }
         queue.sync {
-            guard handle == nil else { return }
+            guard handle == nil, !fileLoggingStopped else { return }
             let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("logs", isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let stamp = formatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
@@ -68,6 +68,12 @@ enum AppLog {
         return Int((Date().timeIntervalSince1970 - (Double(started.tv_sec) + Double(started.tv_usec) / 1_000_000)) * 1000)
     }
     #endif
+
+    /// The emergency wipe: close the log file and write no more lines to disk in this run.
+    static func stopFileLogging() {
+        queue.sync { try? handle?.close(); handle = nil; fileURL = nil; fileLoggingStopped = true }
+    }
+    private static var fileLoggingStopped = false
 
     /// `BENCHMARK <name>: k=v | k=v` (values sanitized to one line).
     static func event(_ name: String, _ fields: KeyValuePairs<String, String> = [:]) {

@@ -41,6 +41,8 @@ final class PresenceVault {
             return try Data(contentsOf: Self.url)
         }
         func write(_ data: Data) throws {
+            // A rotation or revocation after an emergency wipe must not recreate the guard file in this run.
+            if EmergencyWipe.happened { throw CocoaError(.fileWriteNoPermission) }
             var dir = Self.url.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             BackupExclusion.apply(&dir)

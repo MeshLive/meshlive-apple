@@ -36,6 +36,8 @@ enum KeychainItem {
     }
     static func write(_ account: String, _ data: Data, accessible: CFString = kSecAttrAccessibleWhenUnlockedThisDeviceOnly) throws {
         if DesktopPreview.enabled { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)) }
+        // Nothing new reaches the Keychain after an emergency wipe in this run (late writers).
+        if EmergencyWipe.happened { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)) }
         #if os(macOS) && DEBUG
         if ephemeral { memory[account] = data; return }
         #endif
@@ -135,7 +137,7 @@ enum VerifiedContactsStore {
         } catch { return .unreadable("\(error)") }
     }
     static func save(_ contacts: [VerifiedContact]) throws {
-        if DesktopPreview.enabled { return }
+        if DesktopPreview.enabled || EmergencyWipe.happened { return }
         var keyData = try KeychainItem.read("contacts-key")
         if keyData == nil { let k = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }; try KeychainItem.write("contacts-key", k); keyData = k }
         let plain = try JSONEncoder().encode(contacts)
@@ -156,22 +158,31 @@ enum BackupExclusion {
     }
 }
 
-/// BMH3 pins (Android `hidden-identity-pins.txt`): next to the verified contacts, excluded from backup, readable after
-/// the first unlock (an incoming call can arrive while the phone is locked), deleted by the emergency wipe.
+/// BMH3 pins (Android `hidden-identity-pins`): next to the verified contacts, sealed at rest (`SealedRecords`, review
+/// 2026-10-27: the pins name peers by ID prefix), excluded from backup, readable after the first unlock (an incoming
+/// call can arrive while the phone is locked), deleted by the emergency wipe. The plain-text file of earlier builds
+/// moves into the sealed one once.
 final class Bmh3PinFile: Bmh3PinStorage {
-    static var url: URL { VerifiedContactsStore.url.deletingLastPathComponent().appendingPathComponent("hidden-identity-pins.txt") }
-    func read() -> String? { try? String(contentsOf: Self.url, encoding: .utf8) }
-    func write(_ value: String) {
-        var dir = Self.url.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        BackupExclusion.apply(&dir)
-        try? Data(value.utf8).write(to: Self.url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    static let fileName = "hidden-identity-pins.bin"
+    private static let purpose = "MeshLive/HiddenIdentityPins/1"
+    static var url: URL { SealedRecords.directory.appendingPathComponent(fileName) }
+    static var legacyURL: URL { SealedRecords.directory.appendingPathComponent("hidden-identity-pins.txt") }
+    func read() -> String? {
+        if let legacy = try? Data(contentsOf: Self.legacyURL) {
+            if SealedRecords.write(legacy, name: Self.fileName, purpose: Self.purpose) { try? FileManager.default.removeItem(at: Self.legacyURL) }
+            else { return String(data: legacy, encoding: .utf8) }
+        }
+        return SealedRecords.read(Self.fileName, purpose: Self.purpose).flatMap { String(data: $0, encoding: .utf8) }
     }
+    func write(_ value: String) { SealedRecords.write(Data(value.utf8), name: Self.fileName, purpose: Self.purpose) }
 }
 
 /// Emergency wipe (Android EmergencyWipe semantics, adapted to iOS): marker first, keys first, then
 /// data, a second sweep, and the marker last. A remaining marker resumes the wipe on the next launch.
 enum EmergencyWipe {
+    /// Set when a wipe starts and kept for the rest of this run: late writers (a call that finishes, a pin, a vault
+    /// rotation, the log) must not bring data back after the wipe (review 2026-10-27).
+    private(set) static var happened = false
     static var markerURL: URL {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("emergency-wipe-pending")
     }
@@ -184,6 +195,8 @@ enum EmergencyWipe {
     @discardableResult
     static func run() -> Bool {
         if DesktopPreview.enabled { return false }
+        happened = true
+        AppLog.stopFileLogging()
         try? Data().write(to: markerURL, options: .atomic)
         var deletions = KeychainItem.deleteAll()
         sweep()
@@ -193,7 +206,7 @@ enum EmergencyWipe {
         let fm = FileManager.default
         // The directory holding the contacts, the vault guard (and its temporary files) and the pins: gone or empty.
         let identityDir = VerifiedContactsStore.url.deletingLastPathComponent()
-        let filesLeft = [VerifiedContactsStore.url, PresenceVault.guardURL, Bmh3PinFile.url].filter { fm.fileExists(atPath: $0.path) }.count
+        let filesLeft = [VerifiedContactsStore.url, PresenceVault.guardURL, Bmh3PinFile.url, Bmh3PinFile.legacyURL].filter { fm.fileExists(atPath: $0.path) }.count
             + ((try? fm.contentsOfDirectory(atPath: identityDir.path))?.count ?? 0)
         let complete = WipeVerification.complete(deletions: deletions, verifications: KeychainItem.verifyAllDeleted(), filesLeft: filesLeft)
         if complete { try? FileManager.default.removeItem(at: markerURL) }
