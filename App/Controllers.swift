@@ -618,8 +618,9 @@ final class WatchController: ObservableObject {
             self?.audioInboundGuard?.onBytes(bytes, now: ConnectionDriver.now)
         }
         let routeKey = self.routeKey
-        engine.isParentBlocked = { [weak model = self.model] node in
-            model?.streamRoutePenalties.isPenalized(routeKey, authenticatedNode: node, now: ConnectionDriver.now) ?? false
+        engine.isParentBlocked = { [weak model = self.model] _ in
+            // The route only, as Android: no node is ever penalised, even one seen over an authenticated link.
+            model?.streamRoutePenalties.isPenalized(routeKey, authenticatedNode: nil, now: ConnectionDriver.now) ?? false
         }
         if offer.rotating {
             // Android rotid_downgrade: this viewer's request carries its fixed prefix while it waits for the source.
@@ -696,7 +697,7 @@ final class WatchController: ObservableObject {
         case .routeWithdrawn: state = "This way to the stream is full. Try another one nearby."
         case .ended(let reason, _):
             if engine?.audioMarkerMismatch != nil {
-                model?.penalizeStreamRoute(routeKey, authenticatedNode: engine?.peerLinkNodeId)
+                model?.penalizeStreamRoute(routeKey)
             }
             finish(reason)
         }

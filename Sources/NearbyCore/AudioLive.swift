@@ -387,6 +387,14 @@ public final class StreamRoutePenalties {
     private var nodes: [(key: NodeId, until: TimeInterval)] = []
     public init() {}
 
+    /// What a viewer records when the offer's audio-only marker disagreed with the authenticated header: the
+    /// advertising route only, never the node behind it, even over an authenticated link (PROTOCOL "Penalties are
+    /// scoped to the attempted route", Design QV review R1). The marker is in the unauthenticated advert, so a phone
+    /// that re-advertises an honest source's stream with a false marker must not get that source refused.
+    public func onMarkerMismatch(_ route: Route, now: TimeInterval) {
+        onMismatch(route, authenticatedNode: nil, now: now)
+    }
+
     /// Supply a node only when the mismatching header arrived over its authenticated link.
     public func onMismatch(_ route: Route, authenticatedNode: NodeId?, now: TimeInterval) {
         prune(now)

@@ -679,8 +679,8 @@ final class AppModel: ObservableObject {
     func streamRouteKey(_ id: UUID, _ offer: DiscoveryAnnouncement) -> StreamRoutePenalties.Route {
         StreamRoutePenalties.Route(address: id.uuidString, prefixHex: offer.nodeIdPrefix.hex, routeToken: offer.streamToken)
     }
-    func penalizeStreamRoute(_ route: StreamRoutePenalties.Route, authenticatedNode: NodeId?) {
-        streamRoutePenalties.onMismatch(route, authenticatedNode: authenticatedNode, now: ConnectionDriver.now)
+    func penalizeStreamRoute(_ route: StreamRoutePenalties.Route) {
+        streamRoutePenalties.onMarkerMismatch(route, now: ConnectionDriver.now)
         rebuildLists()
     }
 
