@@ -28,6 +28,12 @@ extension MeshLink {
 }
 #endif
 
+/// GATT lost-chunk fail-fast (Android ChunkGapPolicy, `test_gatt_gap_fast_fail`, on): a gap held 1 s or behind 128
+/// later chunks ends the link with its reason. Control arm for tests only: launch argument `-gattGapFastFail NO`.
+enum GattLinkSettings {
+    static var gapFastFail: Bool { UserDefaults.standard.object(forKey: "gattGapFastFail") as? Bool ?? true }
+}
+
 /// A link whose reads can stop while the engine holds input (call relay backpressure). An LE credit-based channel
 /// then stops granting credits, which slows the sender; a GATT peer cannot be slowed (the engine bounds what it holds).
 protocol PausableMeshLink: MeshLink {
@@ -122,7 +128,8 @@ final class GattClientLink: MeshLink {
     let peripheral: CBPeripheral
     private let write: CBCharacteristic
     private var chunker = GattChunkWriter()
-    private var reader = GattChunkReader()
+    private var reader = GattChunkReader(failFast: GattLinkSettings.gapFastFail)
+    private var gapCheckScheduled = false
     private var pending: [Data] = []
     private var pendingBytes = 0
     private var closed = false
@@ -163,7 +170,21 @@ final class GattClientLink: MeshLink {
         inputValues += 1; lastInputAt = ProcessInfo.processInfo.systemUptime
         #endif
         do { let bytes = try reader.accept(value); if !bytes.isEmpty { onBytes?(bytes) } }
-        catch { fail("GATT input: \(error)") }
+        catch { fail("GATT input: \(error)"); return }
+        scheduleGapCheck()
+    }
+
+    /// ChunkGapPolicy: a gap that nothing else fills ends the stream when its 1 s passes, not 8 s later.
+    private func scheduleGapCheck() {
+        guard let opened = reader.gapOpenedAt, !gapCheckScheduled else { return }
+        gapCheckScheduled = true
+        let wait = max(0, opened + ChunkGapPolicy.gapSeconds - ProcessInfo.processInfo.systemUptime) + 0.01
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self, !self.closed else { return }
+            self.gapCheckScheduled = false
+            do { try self.reader.check(now: ProcessInfo.processInfo.systemUptime) } catch { self.fail("GATT input: \(error)"); return }
+            self.scheduleGapCheck()
+        }
     }
 
     func fail(_ reason: String) { guard !closed else { return }; shutdown(); onClosed?(reason) }
@@ -182,7 +203,8 @@ final class GattServerLink: MeshLink {
     private let manager: CBPeripheralManager
     private let notify: CBMutableCharacteristic
     private var chunker = GattChunkWriter()
-    private var reader = GattChunkReader()
+    private var reader = GattChunkReader(failFast: GattLinkSettings.gapFastFail)
+    private var gapCheckScheduled = false
     private var pending: [Data] = []
     private var pendingBytes = 0
     private var closed = false
@@ -222,7 +244,21 @@ final class GattServerLink: MeshLink {
         inputValues += 1; lastInputAt = ProcessInfo.processInfo.systemUptime
         #endif
         do { let bytes = try reader.accept(value); if !bytes.isEmpty { onBytes?(bytes) } }
-        catch { fail("GATT input: \(error)") }
+        catch { fail("GATT input: \(error)"); return }
+        scheduleGapCheck()
+    }
+
+    /// ChunkGapPolicy: a gap that nothing else fills ends the stream when its 1 s passes, not 8 s later.
+    private func scheduleGapCheck() {
+        guard let opened = reader.gapOpenedAt, !gapCheckScheduled else { return }
+        gapCheckScheduled = true
+        let wait = max(0, opened + ChunkGapPolicy.gapSeconds - ProcessInfo.processInfo.systemUptime) + 0.01
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self, !self.closed else { return }
+            self.gapCheckScheduled = false
+            do { try self.reader.check(now: ProcessInfo.processInfo.systemUptime) } catch { self.fail("GATT input: \(error)"); return }
+            self.scheduleGapCheck()
+        }
     }
 
     func fail(_ reason: String) { guard !closed else { return }; shutdown(); onClosed?(reason) }
