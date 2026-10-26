@@ -884,6 +884,7 @@ final class AppModel: ObservableObject {
     /// candidate (at most 3 helpers within 60 s of the tap). Returns true when another route was dialled.
     private func relayedOutcome(_ controller: CallController) -> Bool {
         guard let route = controller.relayRoute else { return false }
+        if route.seek != nil { return seekOutcome(controller, route: route) }
         let table = route.rotating ? radio.reachRotating : radio.reachFixed
         if controller.relayReady {
             table?.markUsed(relay: route.helperPrefix, target: route.target)
@@ -1124,6 +1125,7 @@ final class AppModel: ObservableObject {
     func waitForContact(_ contact: VerifiedContact, type: CallType) {
         let wait = ContactDialWait(contact: contact, type: type, deadline: ProcessInfo.processInfo.systemUptime + Self.relayedContactWait)
         contactDialWait = wait
+        startContactSeek(contact, type: type)
         AppLog.event("call_invite", ["state": "waiting", "reason": "contact_not_listed", "timeoutMs": "\(Int(Self.relayedContactWait * 1000))"])
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.relayedContactWait) { [weak self] in
             guard let self, self.contactDialWait == wait else { return }
@@ -1133,10 +1135,142 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func cancelContactDialWait() { contactDialWait = nil }
+    func cancelContactDialWait() {
+        contactDialWait = nil
+        if seekAttempt != nil { seekAttempt = nil; AppLog.event("relayed_seek", ["role": "caller", "result": "cancelled"]) }
+    }
+
+    // MARK: Design OR searches (caller)
+
+    let relaySeekMemory = RelaySeekCallerMemory()
+    /// One search for a contact (PROTOCOL OR caller rules 1-7): ring requests through helpers this device hears, ending at
+    /// READY, the contact's own offer, or 45 s.
+    final class SeekAttempt {
+        let contact: VerifiedContact, type: CallType, rings: RelaySeekRings, epoch: Int64, tappedAt: TimeInterval
+        var current: RelaySeekRings.Request?
+        init(contact: VerifiedContact, type: CallType, rings: RelaySeekRings, epoch: Int64, tappedAt: TimeInterval) {
+            self.contact = contact; self.type = type; self.rings = rings; self.epoch = epoch; self.tappedAt = tappedAt
+        }
+    }
+    private(set) var seekAttempt: SeekAttempt?
+
+    /// Starts a search for `contact` when searches are on and it is possible: the contact's lease window, at least one
+    /// version 5 helper heard in the last 10 s, rotating IDs and hidden identities on.
+    private func startContactSeek(_ contact: VerifiedContact, type: CallType) {
+        guard relayedCalls, AppSettings.relayedOnDemand, rotatingIds, hiddenIdentities, seekAttempt == nil, call == nil,
+              let table = radio.reachRotating else { return }
+        let reason: String?
+        defer { if let reason { AppLog.event("relayed_seek", ["role": "caller", "result": "not_started", "reason": reason]) } }
+        guard let window = rotating.vault.recognition.seekWindow(prefixHex: contact.nodePrefixHex) else { reason = "no_lease"; return }
+        let recentOffers = table.recentOffers(withinMs: RelaySeekFirstHops.freshMs)
+        let recognition = rotating.vault.recognition
+        let isContact: (Data) -> Bool = { rdi in
+            let hits = recognition.lookup(rdi)
+            return hits.count == 1 && contact.fingerprintHex.hasPrefix(hits[0].contact.hex)
+        }
+        let directEpoch = recentOffers.filter { MeshRadio.reachClockMs - $0.seenMs <= RelaySeek.opportunisticCacheMs }
+            .compactMap { o in recognition.lookup(o.announcement.nodeIdPrefix).first { contact.fingerprintHex.hasPrefix($0.contact.hex) }?.epoch }.first
+        let epochMs = RotatingDiscoveryIds.epochSeconds * 1_000
+        let sinceBoundary = Int64(Date().timeIntervalSince1970 * 1000) % epochMs
+        let selectors = RelaySeekSelectors.selectors(window: window, directEpoch: directEpoch, msUntilBoundary: epochMs - sinceBoundary,
+                                                     msSinceBoundary: sinceBoundary)
+        guard !selectors.isEmpty else { reason = "no_selector"; return }
+        let epoch = rotating.currentEpoch()
+        let hops = RelaySeekFirstHops.choose(offers: recentOffers, bearer: transport, now: MeshRadio.reachClockMs, isContact: isContact,
+                                             reachedBy: relaySeekMemory.reachedBy(contact: contact.nodePrefixHex, epoch: epoch))
+        guard !hops.isEmpty else { reason = "no_helpers"; return }
+        reason = nil
+        let rings = RelaySeekRings(attemptEndMs: MeshRadio.reachClockMs + Int64(Self.relayedContactWait * 1000), selectors: selectors,
+                                   firstHops: hops, maxRelays: RelayedCalls.defaultMaxRelays)
+        let attempt = SeekAttempt(contact: contact, type: type, rings: rings, epoch: epoch, tappedAt: ProcessInfo.processInfo.systemUptime)
+        seekAttempt = attempt
+        AppLog.event("relayed_seek", ["role": "caller", "result": "started", "hops": "\(hops.count)", "selectors": "\(selectors.count)",
+                                      "max_requests": "\(rings.maxRequests)"])
+        // Past the give-up time plus a margin the attempt is over whatever happened.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.relayedContactWait + 5) { [weak self, weak attempt] in
+            guard let self, let attempt, self.seekAttempt === attempt else { return }
+            self.finishSeek(found: false)
+        }
+        dialNextSeek()
+    }
+
+    /// The next ring request, dialled through the relayed path; "Can't find" when the rings are done.
+    private func dialNextSeek() {
+        guard let attempt = seekAttempt, let identity, let table = radio.reachRotating else { return }
+        while let request = attempt.rings.next(now: MeshRadio.reachClockMs) {
+            guard let hop = table.recentOffers(withinMs: RelaySeekFirstHops.freshMs).filter({ $0.announcement.nodeIdPrefix == request.hop })
+                    .max(by: { $0.seenMs < $1.seenMs }) else {
+                attempt.rings.record(request, outcome: .stale, physicalDials: 0)
+                AppLog.event("relayed_seek", ["role": "caller", "result": "stale", "ring": "\(request.ring)", "budget": "\(request.budget)"])
+                continue
+            }
+            if relaySeekMemory.recentlyNoRoute(hop: request.hop, selector: request.selector.rdi, budget: request.budget, now: MeshRadio.reachClockMs) {
+                attempt.rings.record(request, outcome: .noRoute, physicalDials: 0)
+                continue
+            }
+            attempt.current = request
+            let nonce = RelaySeek.newNonce()
+            let route = RelayRoute(target: request.selector.rdi, helperPrefix: request.hop, relays: request.budget, rotating: true,
+                                   seek: .init(nonce: nonce, token: RelaySeek.token(nonce: nonce, rdi: request.selector.rdi), skip: request.skip))
+            let contact = attempt.contact
+            let person = PersonRow(id: UUID(), label: PeerLabel(prefix: Data(hex: contact.nodePrefixHex) ?? request.selector.rdi, contactName: contact.displayName),
+                                   prefixHex: contact.nodePrefixHex, transport: hop.announcement.transport ?? transport, relays: request.budget,
+                                   isIPhone: false, relayRoute: route, hopRowId: hop.peer)
+            AppLog.event("relayed_seek", ["role": "caller", "result": "sent", "ring": "\(request.ring)", "budget": "\(request.budget)",
+                                          "selector": "\(request.selector.kind)"])
+            call = nil
+            placeRelayedCall(to: person, type: attempt.type, tappedAt: attempt.tappedAt, identity: identity)
+            return
+        }
+        finishSeek(found: false)
+    }
+
+    private func seekOutcome(_ controller: CallController, route: RelayRoute) -> Bool {
+        guard let attempt = seekAttempt, let request = attempt.current else { return false }
+        let outcome: RelaySeekRings.Outcome
+        if controller.relayReady { outcome = .ready }
+        else if controller.relaySeekRefusedLocally { outcome = .noSeek }
+        else if controller.relayFailure == .childAuthentication { outcome = .bindingFailed }
+        else { outcome = RelaySeekRings.outcome(for: controller.relayFailure) }
+        attempt.rings.record(request, outcome: outcome, physicalDials: 1)
+        attempt.current = nil
+        if outcome == .ready {
+            relaySeekMemory.rememberReached(contact: attempt.contact.nodePrefixHex, epoch: attempt.epoch, hop: request.hop)
+            finishSeek(found: true)
+            return false
+        }
+        if outcome == .noRoute {
+            relaySeekMemory.rememberNoRoute(hop: request.hop, selector: request.selector.rdi, budget: request.budget, now: MeshRadio.reachClockMs)
+        }
+        AppLog.event("relayed_seek", ["role": "caller", "result": "failed", "ring": "\(request.ring)", "budget": "\(request.budget)",
+                                      "reason": controller.relayFailure?.label ?? "\(outcome)"])
+        guard !controller.userCancelled else { finishSeek(found: false); return false }
+        dialNextSeek()
+        return seekAttempt != nil && call != nil && call !== controller
+    }
+
+    private func finishSeek(found: Bool) {
+        guard let attempt = seekAttempt else { return }
+        seekAttempt = nil
+        if found { relaySeekMemory.reset(contact: attempt.contact.nodePrefixHex) }
+        AppLog.event("relayed_seek", ["role": "caller", "result": found ? "finished_found" : "cant_find", "requests": "\(attempt.rings.requests)",
+                                      "dials": "\(attempt.rings.dials)"])
+    }
 
     private func resumeContactDialWait() {
-        guard let wait = contactDialWait, call == nil, let person = nearbyPerson(for: wait.contact) else { return }
+        // Design OR caller rule 2: the contact's own offer appearing before READY ends the search and calls directly.
+        if let attempt = seekAttempt, let direct = people.first(where: { $0.relayRoute == nil && $0.prefixHex == attempt.contact.nodePrefixHex }),
+           let current = call, current.relayRoute?.seek != nil, !current.relayReady {
+            AppLog.event("relayed_seek", ["role": "caller", "result": "direct"])
+            seekAttempt = nil
+            current.userCancelled = true
+            current.end()
+            call = nil
+            contactDialWait = nil
+            startCall(to: direct, type: attempt.type)
+            return
+        }
+        guard let wait = contactDialWait, call == nil, seekAttempt == nil, let person = nearbyPerson(for: wait.contact) else { return }
         contactDialWait = nil
         AppLog.event("call_invite", ["state": "resumed", "relayed": "\(person.relayRoute != nil)"])
         startCall(to: person, type: wait.type)

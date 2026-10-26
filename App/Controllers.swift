@@ -106,6 +106,8 @@ final class CallController: ObservableObject, Identifiable {
     /// Why the route failed before READY (a first hop that could not be connected or closed early counts as a timeout).
     var relayFailure: RelaySetupFailure? { engine.relaySetupFailure ?? (relayConnectFailed || engine.relayedRouteFailed ? .timeout : nil) }
     var userCancelled = false
+    /// A search was not sent because the first hop did not sign RELAY_SEEK.
+    var relaySeekRefusedLocally: Bool { engine.closeReason?.contains("does not search") == true }
 
     /// Design C: this listener's link is taken over by a relay duty. The engine already stopped silently; the driver
     /// stops without closing the link, timers stop, and nothing is shown or remembered. Returns the link.

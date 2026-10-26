@@ -37,6 +37,9 @@ public struct OfferSighting<P> {
     public let seenMs: Int64
     public let address: String
     public let rssi: Int?
+    /// Sightings of this offer from this address (Design OR orders addresses heard twice first).
+    public var count: Int = 1
+    public var firstSeenMs: Int64 = 0
 }
 
 /// A usable way to reach `target`: directly (`nextHop` nil) or through the first relay `nextHop`.
@@ -111,8 +114,12 @@ public final class ReachTable<P> {
         let now = clock()
         let key = announcement.nodeIdPrefix.hex
         guard !isOwn(announcement.nodeIdPrefix) else { return }
+        let previous = offers.first { $0.key == key && $0.sighting.address == address }?.sighting
         offers.removeAll { $0.key == key }
-        offers.append((key, OfferSighting(peer: peer, announcement: announcement, seenMs: now, address: address, rssi: rssi)))
+        var sighting = OfferSighting(peer: peer, announcement: announcement, seenMs: now, address: address, rssi: rssi)
+        sighting.count = (previous?.count ?? 0) + 1
+        sighting.firstSeenMs = previous?.firstSeenMs ?? now
+        offers.append((key, sighting))
         while offers.count > config.maxOffers { offers.removeFirst() }
         if directSightings() && RelayedCalls.consents(announcement, rotating: rotating) {
             observe(target: announcement.nodeIdPrefix, relay: nil, rawCost: 0, ageMs: 0, address: address, now: now)

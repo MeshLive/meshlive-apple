@@ -56,7 +56,12 @@ public struct RelaySeekPlan<P> {
 
     public init(offers: [OfferSighting<P>], nonce: Data, token: Data, skip: [Data], budget: Int, bearer: MeshTransport, ownRdis: [Data],
                 fanout: Int = RelaySeek.defaultFanout) {
-        let strongest = offers.sorted { ($0.rssi ?? -127) > ($1.rssi ?? -127) }
+        // Heard twice first, then the stronger signal (PROTOCOL OR helper rule 7).
+        let strongest = offers.sorted { a, b in
+            let ta = a.count >= 2, tb = b.count >= 2
+            if ta != tb { return ta }
+            return (a.rssi ?? -127) > (b.rssi ?? -127)
+        }
         targets = Array(strongest.filter { RelaySeek.matches($0.announcement, nonce: nonce, token: token, bearer: bearer, ownRdis: ownRdis) }
             .prefix(RelaySeek.maxTargetAddresses).map { ($0.peer, $0.announcement.nodeIdPrefix) })
         if budget >= 2 {

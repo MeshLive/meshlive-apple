@@ -121,6 +121,8 @@ public final class RecognitionTable {
     public static let staleAfter: TimeInterval = 14 * 24 * 3600
     public static let recognisedRoles: [UInt8] = [RotatingDiscoveryIds.roleCallOffer, RotatingDiscoveryIds.roleStreamOffer]
     private var table: [Data: [Hit]] = [:]
+    /// Design OR: each contact's search window (node ID -> centre, staleness, role-0 IDs by epoch).
+    private var windows: [Data: RelaySeekSelectors.Window] = [:]
     private let lock = NSLock()
     public init() {}
 
@@ -128,19 +130,32 @@ public final class RecognitionTable {
 
     public func rebuild(_ contacts: [ContactPresence], myEpoch: Int64, now: TimeInterval) {
         var next: [Data: [Hit]] = [:]
+        var nextWindows: [Data: RelaySeekSelectors.Window] = [:]
         for contact in contacts {
-            let radius = now - contact.receivedAt > Self.staleAfter ? Self.wideRadius : Self.narrowRadius
+            let stale = now - contact.receivedAt > Self.staleAfter
+            let radius = stale ? Self.wideRadius : Self.narrowRadius
             let centre = myEpoch + contact.skewEpochs
+            var callIds: [Int64: Data] = [:]
             for epoch in (centre - radius)...(centre + radius) where epoch >= 0 {
                 guard let lease = contact.leasesByDay[PresenceLeases.dayOf(epoch)] else { continue }
                 for role in Self.recognisedRoles {
                     let salt = RotatingDiscoveryIds.salt(key: lease, epoch: epoch, role: role)
                     let rdi = RotatingDiscoveryIds.rdi(nodeId: contact.nodeId, epoch: epoch, role: role, salt: salt)
                     next[rdi, default: []].append(Hit(contact: contact.nodeId, epoch: epoch, role: role))
+                    if role == RotatingDiscoveryIds.roleCallOffer { callIds[epoch] = rdi }
                 }
             }
+            nextWindows[contact.nodeId] = RelaySeekSelectors.Window(centreEpoch: centre, stale: stale, ids: callIds)
         }
-        lock.lock(); table = next; lock.unlock()
+        lock.lock(); table = next; windows = nextWindows; lock.unlock()
+    }
+
+    /// Design OR: the search window of the one contact whose node ID starts with `prefixHex`; nil without IDs.
+    public func seekWindow(prefixHex: String) -> RelaySeekSelectors.Window? {
+        lock.lock(); defer { lock.unlock() }
+        let hits = windows.filter { $0.key.hex.hasPrefix(prefixHex) }
+        guard hits.count == 1, let w = hits.first?.value, !w.ids.isEmpty else { return nil }
+        return w
     }
 
     /// Every contact whose ID equals `sixBytes`.
