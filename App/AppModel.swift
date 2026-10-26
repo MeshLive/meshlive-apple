@@ -780,7 +780,8 @@ final class AppModel: ObservableObject {
     /// After a revocation the advertised rotating ID must come from the new generation at once: until the next
     /// boundary the old one is still a valid ID for the revoked contacts to recognise.
     private func presenceRevoked(from before: UInt32) {
-        guard rotating.vault.generation != before else { return }
+        // A revocation while the vault cannot be read changes no stored generation but drops the in-memory keys.
+        guard rotating.vault.generation != before || !rotating.vault.persistent else { return }
         presenceGeneration = rotating.vault.generation
         refreshAdvertising()
     }
