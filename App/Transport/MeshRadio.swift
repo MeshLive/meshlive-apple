@@ -400,7 +400,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         attempts[key]?.fail("Replaced", stage: "stopped")
         AppLog.event("connect", ["stage": "start", "transport": transport.rawValue, "prefix": entry.announcement.prefixHex,
                                  "ageMs": "\(Int((ProcessInfo.processInfo.systemUptime - entry.lastSeen) * 1000))", "retried": "\(retried)"])
-        let attempt = OutgoingAttempt(peripheral: peripheral, transport: transport, handle: handle) { [weak self] result in
+        let attempt = OutgoingAttempt(peripheral: peripheral, transport: transport, handle: handle, retried: retried) { [weak self] result in
             guard let self else { return }
             if case .failure(let error) = result, !retried, let radioError = error as? RadioError, radioError.stage != "stopped" {
                 self.rediscover(rowId: rowId, after: ProcessInfo.processInfo.systemUptime, failure: radioError, handle: handle) { found in
@@ -480,6 +480,22 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
                                          "cachedServices": "\(peripheral.services?.count ?? 0)"].merging(attempt.timing()) { a, _ in a })
         #endif
         peripheral.discoverServices([CBUUID(string: service)])
+        // Service discovery normally answers in about 0.5 s; on Mac calls it twice hung for 12 and 15 s and the
+        // retry then took 2.3 s. A first attempt still discovering after `servicesStallSeconds` is cut and goes
+        // straight to the existing rediscover-and-retry (`-servicesStallSeconds 0` is the control arm).
+        let stall = MeshRadio.servicesStallSeconds
+        if stall > 0, !attempt.retried {
+            let key = peripheral.identifier
+            attempt.stallTimer = Timer.scheduledTimer(withTimeInterval: stall, repeats: false) { [weak self] _ in
+                guard let self, let pending = self.attempts[key], pending === attempt, pending.stage == "services" else { return }
+                self.failAttempt(key, "Service discovery stalled", stage: "services_stall")
+            }
+        }
+    }
+
+    /// The first attempt's service-discovery deadline (seconds); 0 waits for the 15 s connect timeout as before.
+    static var servicesStallSeconds: TimeInterval {
+        UserDefaults.standard.object(forKey: "servicesStallSeconds") as? Double ?? 4
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -603,6 +619,8 @@ final class ConnectHandle {
     private(set) var cancelled = false
     var onCancel: (() -> Void)?
     func cancel() { guard !cancelled else { return }; cancelled = true; onCancel?(); onCancel = nil }
+    /// Each stage the connect enters (services, characteristics, psm_read, l2cap_open, subscribe), for call timing.
+    var onStage: ((String) -> Void)?
 }
 
 final class OutgoingAttempt {
@@ -612,8 +630,11 @@ final class OutgoingAttempt {
     let completion: (Result<MeshLink, Error>) -> Void
     var write: CBCharacteristic?
     var timer: Timer?
+    var stallTimer: Timer?
+    /// A second attempt after a rediscover (no stall cut: it keeps the full timeout).
+    let retried: Bool
     /// Where the attempt is: connect, services, characteristics, psm_read, l2cap_open, subscribe.
-    var stage = "connect"
+    var stage = "connect" { didSet { handle?.onStage?(stage) } }
     private let startedAt = ProcessInfo.processInfo.systemUptime
     private var lastStepAt = ProcessInfo.processInfo.systemUptime
     /// Log fields: `ms` since the attempt started and `stepMs` since the previous logged step.
@@ -623,12 +644,13 @@ final class OutgoingAttempt {
         return ["ms": "\(Int(((now - startedAt) * 1000).rounded()))", "stepMs": "\(Int(((now - lastStepAt) * 1000).rounded()))"]
     }
     private var done = false
-    init(peripheral: CBPeripheral, transport: MeshTransport, handle: ConnectHandle? = nil, completion: @escaping (Result<MeshLink, Error>) -> Void) {
-        self.peripheral = peripheral; self.transport = transport; self.handle = handle; self.completion = completion
+    init(peripheral: CBPeripheral, transport: MeshTransport, handle: ConnectHandle? = nil, retried: Bool = false,
+         completion: @escaping (Result<MeshLink, Error>) -> Void) {
+        self.peripheral = peripheral; self.transport = transport; self.handle = handle; self.retried = retried; self.completion = completion
     }
     func fail(_ reason: String, stage: String? = nil) {
-        guard !done else { return }; done = true; timer?.invalidate()
+        guard !done else { return }; done = true; timer?.invalidate(); stallTimer?.invalidate()
         completion(.failure(RadioError.connect(stage: stage ?? self.stage, reason: reason)))
     }
-    func succeeded() { done = true; timer?.invalidate() }
+    func succeeded() { done = true; timer?.invalidate(); stallTimer?.invalidate() }
 }

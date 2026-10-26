@@ -23,6 +23,8 @@ final class RemoteVideo {
     var onNeedKeyFrame: (() -> Void)?
     private(set) var decoderName = ""
     var decodedFrames = 0
+    /// The first decoded picture of this call (main thread), for call setup timing.
+    var onFirstPicture: (() -> Void)?
     #if os(macOS)
     private(set) var payloadBytes = 0
     #endif
@@ -38,6 +40,7 @@ final class RemoteVideo {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.decodedFrames += 1
+                    if self.decodedFrames == 1 { self.onFirstPicture?() }
                     let size = (CVPixelBufferGetWidth(pixels), CVPixelBufferGetHeight(pixels))
                     if size != self.lastDecodedSize {
                         // Android's resolution ladder changes the size in-band at a keyframe; the header is the maximum.
@@ -167,6 +170,7 @@ final class CallController: ObservableObject, Identifiable {
         engine.onMediaSubmitted = { [weak self] bytes, audio, at in self?.desktopDelivery.submitted(payloadBytes: bytes, audio: audio, at: at) }
         #endif
         remote.onNeedKeyFrame = { [weak self] in self?.engine.requestKeyFrame(); self?.pump() }
+        remote.onFirstPicture = { [weak self] in self?.markStage("first_frame") }
         relayed = relayHops > 0
         engine.acceptRelayedCalls = model.relayedCalls
         // EXPERIMENTAL overhead trim (Android test_call_audio_coalesce, off): `-callAudioCoalesce YES`.
@@ -185,6 +189,8 @@ final class CallController: ObservableObject, Identifiable {
         driver.onFinished = { [weak self] reason in self?.finished(reason) }
         self.driver = driver
         linkAttachedAt = ProcessInfo.processInfo.systemUptime
+        if timeline == nil { startTimeline(origin: linkAttachedAt ?? 0) }   // callee: from the incoming link
+        markStage("link_attached")
         driver.start()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshStats() }
     }
@@ -247,6 +253,7 @@ final class CallController: ObservableObject, Identifiable {
         case .remoteHeader(let header): remote.configure(header: header)
         case .remoteAudio(let packet):
             remoteAudioEvents += 1
+            if remoteAudioEvents == 1 { markStage("first_audio_rx") }
             if let audio { audio.receive(presentationTimeUs: packet.presentationTimeUs, opus: packet.payload) } else { remoteAudioWithoutPlayer += 1 }
         case .remoteVideo(let packet): remoteVideoEvents += 1; remote.decode(packet)
         case .remoteRotation(let degrees): remote.sink.rotation = degrees
@@ -287,19 +294,57 @@ final class CallController: ObservableObject, Identifiable {
     private let mediaClock = ProcessInfo.processInfo.systemUptime
     /// When the Bluetooth link was attached: `linkMs` on call_auth and call_phase times the handshake and setup.
     private var linkAttachedAt: TimeInterval?
+    /// Setup stages from the tap (caller) or the incoming link (callee) to the first media; `call_stage` per stage and
+    /// one `call_setup_timeline` summary at the first remote picture (video) or audio (voice), or at the end.
+    private(set) var timeline: CallSetupTimeline?
+    private var timelineLogged = false
+
+    func startTimeline(origin: TimeInterval) {
+        guard timeline == nil else { return }
+        timeline = CallSetupTimeline(origin: origin)
+        markStage(role == .caller ? "tap" : "incoming_link", at: origin)
+    }
+
+    func markStage(_ name: String, at: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard timeline != nil, !timelineLogged, let step = timeline?.mark(name, at: at) else { return }
+        AppLog.event("call_stage", ["role": role == .caller ? "caller" : "callee", "stage": name, "ms": "\(step.ms)", "stepMs": "\(step.stepMs)"])
+        let done = callType == .video ? "first_frame" : "first_audio_rx"
+        if name == done { logTimeline(complete: true) }
+    }
+
+    private func logTimeline(complete: Bool) {
+        guard let timeline, !timelineLogged else { return }
+        timelineLogged = true
+        let largest = timeline.largestStep
+        AppLog.event("call_setup_timeline", ["role": role == .caller ? "caller" : "callee", "type": callType.rawValue, "complete": "\(complete)",
+                                             "totalMs": "\(timeline.totalMs)", "largestStep": largest?.name ?? "-",
+                                             "largestStepMs": "\(largest?.ms ?? 0)", "transport": transport.rawValue,
+                                             "relayed": "\(relayed)", "stages": timeline.summary])
+    }
+
     private var linkMs: String { linkAttachedAt.map { "\(Int(((ProcessInfo.processInfo.systemUptime - $0) * 1000).rounded()))" } ?? "-" }
 
     private var lastStatsLog: TimeInterval = 0
     private func log(_ event: CallEngine.Event) {
         switch event {
-        case .linkAuthenticated(let id): AppLog.event("call_auth", ["stage": "link", "peer": id.shortLabel, "transport": transport.rawValue, "linkMs": linkMs])
+        case .linkAuthenticated(let id): markStage("link_auth"); AppLog.event("call_auth", ["stage": "link", "peer": id.shortLabel, "transport": transport.rawValue, "linkMs": linkMs])
         case .peerAuthenticated(let id, let fp):
+            markStage("endpoint_auth")
             AppLog.event("call_auth", ["stage": "endpoint", "linkMs": linkMs, "peer": id.shortLabel, "handle": IdentityHandle.handle(prefix: id.prefix) ?? "?",
                                        "fingerprint": String(fp.hex.prefix(16)), "codec": "\(engine.selectedCodec.map { $0 == StreamProtocol.codecVP9 ? "vp9" : "av1" } ?? "none")",
                                        "peerCaps": engine.endpoint.map { String(format: "t%02x/e%02x/d%02x/max%d", $0.peerCapabilities.transportMask, $0.peerCapabilities.encodeCodecMask, $0.peerCapabilities.decodeCodecMask, $0.peerCapabilities.maxBitrateKbps) } ?? "?"])
         case .peerStranger:
+            markStage("endpoint_auth")
             AppLog.event("bmh3", ["event": "peer", "layer": "endpoint", "pseudonymous": "true", "linkBmh3": "\(engine.linkUsedBmh3)"])
-        case .phase(let p): AppLog.event("call_phase", ["role": role == .caller ? "caller" : "callee", "phase": "\(p)", "callId": engine.state?.callId.uuidString ?? "-", "linkMs": linkMs])
+        case .phase(let p):
+            switch p {
+            case .outgoingInvite: markStage("invite")
+            case .outgoingRinging, .incomingRinging: markStage("ringing")
+            case .negotiatingMedia: markStage("accepted")
+            case .active: markStage("active")
+            default: break
+            }
+            AppLog.event("call_phase", ["role": role == .caller ? "caller" : "callee", "phase": "\(p)", "callId": engine.state?.callId.uuidString ?? "-", "linkMs": linkMs])
         case .incomingCall(let t), .offeredTypeChanged(let t): AppLog.event("call_offer", ["type": t.rawValue])
         case .startLocalMedia(let h, let t): AppLog.event("call_media_start", ["type": t.rawValue, "codec": "\(h.codecId)", "size": "\(h.width)x\(h.height)", "fps": "\(h.fps)"])
         case .remoteHeader(let h): AppLog.event("call_remote_header", ["codec": "\(h.codecId)", "size": "\(h.width)x\(h.height)", "fps": "\(h.fps)", "rotation": "\(h.rotationDegrees)", "audio": "\(h.hasAudio)"])
@@ -343,6 +388,7 @@ final class CallController: ObservableObject, Identifiable {
         audio.onPacket = { [weak self] pts, data in
             guard let self else { return }
             self.audioFromEncoder += 1
+            if self.audioFromEncoder == 1 { self.markStage("first_audio_tx") }
             self.engine.sendAudio(presentationTimeUs: pts, opus: data); self.pump()
         }
         audio.onFailure = { [weak self] message in self?.stats = message; self?.mediaProblem = message; AppLog.event("call_error", ["stage": "audio", "message": message]) }
@@ -585,6 +631,7 @@ final class CallController: ObservableObject, Identifiable {
         model?.desktopCallLinkFinished(self)
         #endif
         var delay: TimeInterval = 2
+        logTimeline(complete: false)
         if let declined = engine.relayedDecline { AppLog.event("relayed_call", ["event": "declined", "reason": declined.rawValue]) }
         if ended == nil, closedBeforeRinging {
             AppLog.event("call_end", ["reason": reason, "error": "true", "stage": "closed_before_ringing", "shown": "false"])

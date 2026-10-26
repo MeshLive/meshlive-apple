@@ -37,4 +37,17 @@ final class CoreUtilityTests: XCTestCase {
         XCTAssertEqual(mailbox.offerLatest(6), true); XCTAssertEqual(mailbox.offerLatest(7), false)
         XCTAssertEqual(mailbox.takeAll(), [7])
     }
+
+    /// A call's setup stages: a repeated stage keeps its first time, and the largest step names the slowest wait.
+    func testCallSetupTimelineNamesTheSlowestStage() {
+        var t = CallSetupTimeline(origin: 100)
+        XCTAssertEqual(t.mark("tap", at: 100)?.ms, 0)
+        XCTAssertEqual(t.mark("services", at: 100.4)?.stepMs, 400)
+        XCTAssertEqual(t.mark("link_auth", at: 101.9)?.stepMs, 1_500)
+        XCTAssertNil(t.mark("services", at: 102), "a retry's stage keeps the first time")
+        t.mark("first_frame", at: 102.2)
+        XCTAssertEqual(t.summary, "tap:0 services:400 link_auth:1900 first_frame:2200")
+        XCTAssertEqual(t.largestStep?.name, "link_auth"); XCTAssertEqual(t.largestStep?.ms, 1_500)
+        XCTAssertEqual(t.totalMs, 2_200)
+    }
 }

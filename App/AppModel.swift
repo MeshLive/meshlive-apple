@@ -663,14 +663,15 @@ final class AppModel: ObservableObject {
     func startCall(to person: PersonRow, type: CallType) {
         guard call == nil, !placingCall, identity != nil else { return }
         placingCall = true; callNotice = nil
+        let tappedAt = ProcessInfo.processInfo.systemUptime
         MediaPermissions.request(video: type == .video, context: "outgoing") { [weak self] _, _ in
             guard let self else { return }
             self.placingCall = false
-            self.placeCall(to: person, type: type)
+            self.placeCall(to: person, type: type, tappedAt: tappedAt)
         }
     }
 
-    private func placeCall(to person: PersonRow, type: CallType) {
+    private func placeCall(to person: PersonRow, type: CallType, tappedAt: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard call == nil, let identity else { return }
         let retry = CallRetry(personId: person.id, prefixHex: person.prefixHex, video: type == .video, name: person.label.title)
         lastOutgoing = retry
@@ -691,8 +692,11 @@ final class AppModel: ObservableObject {
                                         rotating: outgoingRotatingOptions(selected: peer.announcement),
                                         bmh3: bmh3Options(selected: peer.announcement))
         call = controller
+        controller.startTimeline(origin: tappedAt)
+        controller.markStage("permissions")
         refreshAdvertising()
         controller.phaseText = "Calling…"
+        controller.markStage("connect")
         controller.connectHandle = radio.connect(to: person.id, transport: person.transport) { [weak self, weak controller] result in
             // The call ended while the link was connecting (the user cancelled, stage "stopped"): a late link is
             // closed at once and never handed on, and nothing is reported as "Couldn't reach".
@@ -705,10 +709,12 @@ final class AppModel: ObservableObject {
             case .success(let link): controller.attach(link)
             case .failure(let error):
                 let stage = (error as? RadioError)?.stage ?? "connect"
+                controller.markStage("connect_failed")
                 controller.failed("Couldn't reach \(person.label.title) \u{2013} they may have moved away.", stage: stage, detail: "\(error)")
             }
             self?.refreshAdvertising()
         }
+        controller.connectHandle?.onStage = { [weak controller] stage in controller?.markStage(stage) }
     }
 
     /// Records the finished call in the local history (outgoing / incoming / missed).
