@@ -48,4 +48,13 @@ final class StreamJoinRetryTests: XCTestCase {
                                           streamToken: try! StreamRouteToken.forAdvertiser(logical: logical + 1, prefix: source), routeCost: 0)
         XCTAssertFalse(LogicalStreamTarget(direct).matches(other))
     }
+
+    func testAJoinKeepsWaitingOnlyAfterAnUnauthenticatedLinkWithTimeLeft() {
+        XCTAssertTrue(StreamJoinWait.keepWaiting(enabled: true, hopAuthenticated: false, joined: false, stoppedByUser: false, ended: false, secondsLeft: 3))
+        XCTAssertFalse(StreamJoinWait.keepWaiting(enabled: true, hopAuthenticated: true, joined: false, stoppedByUser: false, ended: false, secondsLeft: 3))
+        XCTAssertFalse(StreamJoinWait.keepWaiting(enabled: true, hopAuthenticated: false, joined: false, stoppedByUser: false, ended: false, secondsLeft: 0))
+        XCTAssertFalse(StreamJoinWait.keepWaiting(enabled: true, hopAuthenticated: false, joined: false, stoppedByUser: true, ended: false, secondsLeft: 3))
+        XCTAssertFalse(StreamJoinWait.keepWaiting(enabled: false, hopAuthenticated: false, joined: false, stoppedByUser: false, ended: false, secondsLeft: 3),
+                       "control arm")
+    }
 }

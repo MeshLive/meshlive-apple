@@ -764,17 +764,50 @@ final class WatchController: ObservableObject {
         forwardingEnabled = model.relayForOthers && offer.streamToken != 0
         // DEBUG -NearbyWatchTimeout N shortens the wait for UI tests of a failed join.
         let wait = RootView.debugArgument("-NearbyWatchTimeout").flatMap(Double.init) ?? 45
-        timeout = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+        joinDeadline = ProcessInfo.processInfo.systemUptime + wait
+        armJoinTimeout(after: wait)
+        remote.onNeedKeyFrame = { [weak self] in self?.engine?.requestKeyFrame(); self?.driver?.pump() }
+    }
+
+    /// When the join gives up waiting for the source (a link already in setup at that moment runs on).
+    private var joinDeadline: TimeInterval = 0
+    /// The current link finished its hop handshake (Android review B9).
+    private var hopAuthenticated = false
+    /// The source ended the stream (its terminal record may still be on the way to a child, review S3).
+    private var upstreamEnded = false
+
+    private func armJoinTimeout(after seconds: TimeInterval) {
+        timeout?.invalidate()
+        timeout = Timer.scheduledTimer(withTimeInterval: max(0, seconds), repeats: false) { [weak self] _ in
             guard let self, self.awaitingSource else { return }
             self.finish("Could not join. Move closer and try again. The broadcaster's phone needs \"Find iPhones\" turned on.")
         }
-        remote.onNeedKeyFrame = { [weak self] in self?.engine?.requestKeyFrame(); self?.driver?.pump() }
+    }
+
+    /// Android review B9: a connection that failed before its hop handshake (a stranger, a stale dial, noise) no longer
+    /// ends the join: it is dropped and the viewer waits again within the same deadline. `-watchKeepWaiting NO` is the
+    /// control arm.
+    private func linkFinished(_ reason: String) {
+        let keepWaiting = UserDefaults.standard.object(forKey: "watchKeepWaiting") as? Bool ?? true
+        let left = joinDeadline - ProcessInfo.processInfo.systemUptime
+        if StreamJoinWait.keepWaiting(enabled: keepWaiting, hopAuthenticated: hopAuthenticated, joined: joined, stoppedByUser: stoppedByUser,
+                                      ended: ended != nil, secondsLeft: left) {
+            AppLog.event("watch_link", ["event": "dropped", "reason": reason, "waitLeftMs": "\(Int(left * 1000))"])
+            engine = nil; driver = nil; statsTimer?.invalidate(); statsTimer = nil
+            awaitingSource = true
+            state = "Waiting for the broadcaster…"
+            armJoinTimeout(after: left)
+            model?.refreshAdvertising()
+            return
+        }
+        finish(reason)
     }
 
     func attach(_ link: MeshLink) {
         AppLog.event("watch_link", ["transport": link.transport.rawValue, "expected": transport.rawValue])
         guard awaitingSource, link.transport == transport else { link.close(); return }
         awaitingSource = false
+        hopAuthenticated = false
         state = "Authenticating…"
         // Signing maxChildren 1 makes the source send BMV1 envelopes this phone can pass on (exactly 1: more is BGK1).
         let engine = StreamViewerEngine(transport: transport, identity: identity, decodeMask: VideoDecoderSupport.decodeMask,
@@ -799,7 +832,7 @@ final class WatchController: ObservableObject {
         engine.onEvent = { [weak self] in self?.handle($0) }
         self.engine = engine
         let driver = ConnectionDriver(engine: engine, link: link)
-        driver.onFinished = { [weak self] reason in self?.finish(reason) }
+        driver.onFinished = { [weak self] reason in self?.linkFinished(reason) }
         self.driver = driver
         driver.start()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -824,7 +857,7 @@ final class WatchController: ObservableObject {
         default: break
         }
         switch event {
-        case .linkAuthenticated: break
+        case .linkAuthenticated: hopAuthenticated = true
         case .sourceAuthenticated(let adjacent, _, let fp):
             adjacentNodeId = adjacent
             sourceFingerprint = fp; model?.noteAuthenticated(fp); state = isRadio ? "Waiting for sound…" : "Waiting for video…"
@@ -854,7 +887,7 @@ final class WatchController: ObservableObject {
             audioInboundGuard?.onPausedChanged(paused, now: ConnectionDriver.now)
             switch s {
             case .paused: state = "Paused by the broadcaster"
-            case .ended: state = "The broadcast ended"
+            case .ended: state = "The broadcast ended"; upstreamEnded = true
             case .liveMuted: state = "Muted"
             case .liveCameraOff: state = "Camera off"
             case .liveMutedCameraOff: state = "Muted, camera off"
@@ -869,7 +902,8 @@ final class WatchController: ObservableObject {
             if engine?.audioMarkerMismatch != nil {
                 model?.penalizeStreamRoute(routeKey)
             }
-            finish(reason)
+            // Before the hop handshake the link's own finish decides whether the join keeps waiting (review B9).
+            if hopAuthenticated || joined { finish(reason) }
         }
     }
 
@@ -1047,7 +1081,14 @@ final class WatchController: ObservableObject {
 
     private func finish(_ reason: String) {
         guard ended == nil else { return }
-        healthTimer?.invalidate(); forwarder?.driver.cancel(); forwardOffer = nil
+        healthTimer?.invalidate(); forwardOffer = nil
+        if let f = forwarder {
+            // Android review S3: after an upstream loss nothing more will come, so the child link closes at once; after the
+            // source ended the stream, the child first gets the forwarded terminal record (the link driver closes once it
+            // drained, at most 2.5 s later). `-forwarderGracefulEnd NO` closes at once in both cases (the earlier rule).
+            let graceful = upstreamEnded && (UserDefaults.standard.object(forKey: "forwarderGracefulEnd") as? Bool ?? true)
+            if graceful { f.engine.finish("The broadcast ended", error: false); f.driver.pump() } else { f.driver.cancel() }
+        }
         ended = reason; state = reason; awaitingSource = false
         timeout?.invalidate(); statsTimer?.invalidate()
         audio?.stop(); audio = nil; remote.stop()
