@@ -492,9 +492,12 @@ final class AppModel: ObservableObject {
                         : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex)),
                       prefixHex: p.prefixHex, transport: p.announcement.transport ?? .gatt, relays: Int(p.announcement.routeCost), isIPhone: p.isIPhone)
         }
-        // A malformed audio-only marker is ignored (Android StreamOfferKind.MALFORMED).
+        // A malformed audio-only marker is ignored (Android StreamOfferKind.MALFORMED); with the audio-live switch off,
+        // audio-only offers are not listed and the marker means nothing, as on Android.
+        let audioLive = AppSettings.audioLive
         streams = peers.filter {
-            $0.announcement.isStreamOffer && !$0.announcement.usesClassic && $0.announcement.streamOfferKind != .malformed
+            $0.announcement.isStreamOffer && !$0.announcement.usesClassic
+                && ($0.announcement.streamOfferKind == .video || ($0.announcement.streamOfferKind == .audioOnly) == audioLive)
                 && !streamRoutePenalties.isPenalized(streamRouteKey($0.id, $0.announcement), now: ConnectionDriver.now)
         }.map { p in
             #if os(macOS)
@@ -712,7 +715,7 @@ final class AppModel: ObservableObject {
     // MARK: Going live
 
     func goLive(audioOnly: Bool = false, preset: UInt8 = AudioLive.presetVoice) {
-        guard live == nil, let identity else { return }
+        guard live == nil, let identity, !audioOnly || AppSettings.audioLive else { return }
         live = LiveController(model: self, identity: identity, transport: transport,
                               labels: peerLabelsEnabled, title: liveTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : liveTitle,
                               audioOnly: audioOnly, preset: preset)

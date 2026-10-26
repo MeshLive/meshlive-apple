@@ -205,6 +205,10 @@ struct AppSettings {
     static var onTimeSeedRaise: Bool { d.object(forKey: "onTimeSeedRaise") as? Bool ?? true }
     /// Viewer on-time reports (Android test_on_time_reports, on); control arm `-onTimeReports NO`.
     static var onTimeReports: Bool { d.object(forKey: "onTimeReports") as? Bool ?? true }
+    /// Audio-only live streams (Android `audio_live`, on for everyone since 2026-10-17 with no Settings row). Off, Go
+    /// live offers no audio-only stream, audio-only offers are not listed and a `BTL1` header is refused as unsupported.
+    /// Control arm for tests only: launch argument `-audioLive NO`.
+    static var audioLive: Bool { d.object(forKey: "audioLive") as? Bool ?? true }
     /// Advanced "Relay: slow viewers skip to keyframes" (Android relay_child_media_age, default ON).
     static var relayChildMediaAge: Bool {
         get { d.object(forKey: "relayChildMediaAge") as? Bool ?? true }

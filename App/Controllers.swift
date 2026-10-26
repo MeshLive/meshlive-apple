@@ -612,7 +612,8 @@ final class WatchController: ObservableObject {
         let engine = StreamViewerEngine(transport: transport, identity: identity, decodeMask: VideoDecoderSupport.decodeMask,
                                         expectedAdjacentPrefix: offer.nodeIdPrefix, maxChildren: forwardingEnabled ? 1 : 0,
                                         labels: model?.peerLabelsEnabled ?? false,
-                                        rotatingOffer: offer.rotating ? offer : nil, expectAudioOnly: isRadio)
+                                        rotatingOffer: offer.rotating ? offer : nil, expectAudioOnly: isRadio,
+                                        allowAudioOnly: AppSettings.audioLive)
         engine.onTimeReports = AppSettings.onTimeReports
         engine.onAudioLivePayload = { [weak self] bytes in
             self?.audioInboundGuard?.onBytes(bytes, now: ConnectionDriver.now)

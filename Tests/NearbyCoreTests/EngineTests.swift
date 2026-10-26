@@ -398,7 +398,7 @@ final class AudioLiveEngineTests: XCTestCase {
             let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
             let transport: MeshTransport = gatt ? .gatt : .l2cap
             let source = StreamSourceEngine(transport: transport, identity: sourceId, header: header, expectedViewerPrefix: viewerId.nodeId.prefix, audioLive: signer)
-            let viewer = StreamViewerEngine(transport: transport, identity: viewerId, decodeMask: 0, expectedAdjacentPrefix: sourceId.nodeId.prefix, expectAudioOnly: true)
+            let viewer = StreamViewerEngine(transport: transport, identity: viewerId, decodeMask: 0, expectedAdjacentPrefix: sourceId.nodeId.prefix, expectAudioOnly: true, allowAudioOnly: true)
             var events: [StreamViewerEngine.Event] = []; viewer.onEvent = { events.append($0) }
             let pipe = Pipe(source, viewer, gatt: gatt)
             try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
@@ -425,10 +425,20 @@ final class AudioLiveEngineTests: XCTestCase {
 
     func testMarkerMismatchAndForgeryFailClosed() throws {
         let sourceId = SoftwareSigningIdentity(), viewerId = SoftwareSigningIdentity()
-        do { // radio stream, unmarked offer
+        do { // audio-live switch off: a BTL1 header is an unsupported header, not a marker mismatch (Android allowAudioOnly)
             let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
             let source = StreamSourceEngine(transport: .l2cap, identity: sourceId, header: header, expectedViewerPrefix: nil, audioLive: signer)
             let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: NodeCapabilities.codecVP9, expectedAdjacentPrefix: nil)
+            let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
+            XCTAssertEqual(viewer.phase, .closed)
+            XCTAssertNil(viewer.audioLiveHeader)
+            XCTAssertNil(viewer.audioMarkerMismatch, "no route penalty: this phone simply does not take audio-only streams")
+            XCTAssertEqual(viewer.closeReason?.contains("Unsupported stream header"), true, viewer.closeReason ?? "")
+        }
+        do { // radio stream, unmarked offer
+            let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
+            let source = StreamSourceEngine(transport: .l2cap, identity: sourceId, header: header, expectedViewerPrefix: nil, audioLive: signer)
+            let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: NodeCapabilities.codecVP9, expectedAdjacentPrefix: nil, allowAudioOnly: true)
             let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
             XCTAssertEqual(viewer.phase, .closed)
             XCTAssertNil(viewer.audioLiveHeader)
@@ -436,7 +446,7 @@ final class AudioLiveEngineTests: XCTestCase {
         }
         do { // video stream, offer marked audio only
             let source = StreamSourceEngine(transport: .l2cap, identity: sourceId, header: header, expectedViewerPrefix: nil)
-            let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: NodeCapabilities.codecVP9, expectedAdjacentPrefix: nil, expectAudioOnly: true)
+            let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: NodeCapabilities.codecVP9, expectedAdjacentPrefix: nil, expectAudioOnly: true, allowAudioOnly: true)
             let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
             XCTAssertEqual(viewer.phase, .closed)
             XCTAssertNil(viewer.header)
@@ -446,7 +456,7 @@ final class AudioLiveEngineTests: XCTestCase {
             let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
             let forger = try AudioLiveSigner(identity: sourceId, streamId: signer.streamId, preset: AudioLive.presetVoice)
             let source = StreamSourceEngine(transport: .l2cap, identity: sourceId, header: header, expectedViewerPrefix: nil, audioLive: signer)
-            let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: 0, expectedAdjacentPrefix: nil, expectAudioOnly: true)
+            let viewer = StreamViewerEngine(transport: .l2cap, identity: viewerId, decodeMask: 0, expectedAdjacentPrefix: nil, expectAudioOnly: true, allowAudioOnly: true)
             let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
             source.sendSignedAudio(try record(signer, at: 0)); try pipe.pump()
             XCTAssertEqual(viewer.audioPackets, 10)
@@ -480,7 +490,7 @@ final class AudioLiveRecordLimitTests: XCTestCase {
         let source = StreamSourceEngine(transport: transport, identity: sourceId, header: header,
                                         expectedViewerPrefix: viewerId.nodeId.prefix, audioLive: signer)
         let viewer = StreamViewerEngine(transport: transport, identity: viewerId, decodeMask: 0,
-                                        expectedAdjacentPrefix: sourceId.nodeId.prefix, expectAudioOnly: true)
+                                        expectedAdjacentPrefix: sourceId.nodeId.prefix, expectAudioOnly: true, allowAudioOnly: true)
         try source.start(now: 0); try viewer.start(now: 0)
         // Link hellos, then endpoint hellos; leave the stream header queued at the source.
         for _ in 0..<2 {
@@ -537,7 +547,7 @@ final class StreamRoutePenaltyEngineTests: XCTestCase {
         let signer = try AudioLiveSigner(identity: parent, streamId: UUID(), preset: AudioLive.presetVoice)
         let header = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
         let source = StreamSourceEngine(transport: .gatt, identity: parent, header: header, expectedViewerPrefix: nil, audioLive: signer)
-        let viewer = StreamViewerEngine(transport: .gatt, identity: child, decodeMask: 0, expectedAdjacentPrefix: parent.nodeId.prefix, expectAudioOnly: true)
+        let viewer = StreamViewerEngine(transport: .gatt, identity: child, decodeMask: 0, expectedAdjacentPrefix: parent.nodeId.prefix, expectAudioOnly: true, allowAudioOnly: true)
         var checked: NodeId?
         viewer.isParentBlocked = { checked = $0; return true }
         let pipe = Pipe(source, viewer, gatt: true)
@@ -559,7 +569,7 @@ final class AudioLiveRelayEngineTests: XCTestCase {
             let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
             let placeholder = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
             let source = StreamSourceEngine(transport: t, identity: sourceId, header: placeholder, expectedViewerPrefix: relayId.nodeId.prefix, audioLive: signer)
-            let relay = StreamViewerEngine(transport: t, identity: relayId, decodeMask: 0, expectedAdjacentPrefix: sourceId.nodeId.prefix, maxChildren: 1, expectAudioOnly: true)
+            let relay = StreamViewerEngine(transport: t, identity: relayId, decodeMask: 0, expectedAdjacentPrefix: sourceId.nodeId.prefix, maxChildren: 1, expectAudioOnly: true, allowAudioOnly: true)
             let core = StreamForwardingCore(localNodeId: relayId.nodeId, upstreamPeerNodeId: sourceId.nodeId, streamId: signer.streamId, sourceNodeId: sourceId.nodeId, audioOnly: true)
             var hop: StreamForwarderEngine?
             var originals: [MeshEnvelope] = [], copies: [MeshEnvelope] = []
@@ -577,7 +587,7 @@ final class AudioLiveRelayEngineTests: XCTestCase {
             try parentPipe.pump()
             let grant = ForwardedStreamGrant(sourceNodeId: sourceId.nodeId, streamId: signer.streamId, key: try XCTUnwrap(relay.mediaOpenKey))
             let forwarder = StreamForwarderEngine(transport: t, identity: relayId, grant: grant, codecId: 0, expectedChildPrefix: childId.nodeId.prefix, audioOnly: true)
-            let child = StreamViewerEngine(transport: t, identity: childId, decodeMask: 0, expectedAdjacentPrefix: relayId.nodeId.prefix, expectedMediaSource: sourceId.nodeId, expectAudioOnly: true)
+            let child = StreamViewerEngine(transport: t, identity: childId, decodeMask: 0, expectedAdjacentPrefix: relayId.nodeId.prefix, expectedMediaSource: sourceId.nodeId, expectAudioOnly: true, allowAudioOnly: true)
             hop = forwarder
             forwarder.onEvent = {
                 if case .childAuthenticated(let id, _) = $0 { for e in (try? core.addChild(id)) ?? [] { forwarder.forward(e) } }
@@ -634,7 +644,7 @@ final class AudioLiveRelayEngineTests: XCTestCase {
         let grant = ForwardedStreamGrant(sourceNodeId: s.nodeId, streamId: UUID(), key: Data(repeating: 9, count: 32))
         let hop = StreamForwarderEngine(transport: .l2cap, identity: p, grant: grant, codecId: 0, expectedChildPrefix: c.nodeId.prefix, audioOnly: true)
         hop.audioAgeBound = ageBound
-        let child = StreamViewerEngine(transport: .l2cap, identity: c, decodeMask: 0, expectedAdjacentPrefix: p.nodeId.prefix, expectAudioOnly: true)
+        let child = StreamViewerEngine(transport: .l2cap, identity: c, decodeMask: 0, expectedAdjacentPrefix: p.nodeId.prefix, expectAudioOnly: true, allowAudioOnly: true)
         let pipe = Pipe(hop, child)
         try hop.start(now: 0); try child.start(now: 0); try pipe.pump()
         XCTAssertTrue(hop.ready)

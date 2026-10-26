@@ -67,6 +67,9 @@ public final class StreamViewerEngine: MeshConnection {
     /// Checked only after the link authenticates; unauthenticated prefixes never identify a banned node.
     public var isParentBlocked: ((NodeId) -> Bool)?
     public let expectAudioOnly: Bool
+    /// The audio-live switch (Android `allowAudioOnly`, `audio_live`): off, a `BTL1` header fails as an unsupported
+    /// header exactly as on a build without audio-only streams.
+    public let allowAudioOnly: Bool
     /// The verified `BTL1` header and the per-stream guard of an audio-only stream.
     public var onAudioLivePayload: ((Int) -> Void)?
     public private(set) var audioLiveHeader: AudioLiveHeader?
@@ -75,8 +78,9 @@ public final class StreamViewerEngine: MeshConnection {
     public init(transport: MeshTransport, identity: SigningIdentity, decodeMask: UInt8, expectedAdjacentPrefix: Data?,
                 expectedMediaSource: NodeId? = nil, maxChildren: UInt8 = 0, labels: Bool = false,
                 rotatingOffer: DiscoveryAnnouncement? = nil, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch,
-                expectAudioOnly: Bool = false) {
+                expectAudioOnly: Bool = false, allowAudioOnly: Bool = false) {
         self.expectAudioOnly = expectAudioOnly
+        self.allowAudioOnly = allowAudioOnly
         var caps = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: 0, decodeCodecMask: decodeMask & NodeCapabilities.codecMask,
                                     maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: maxChildren)
         self.expectedMediaSource = expectedMediaSource
@@ -215,6 +219,7 @@ public final class StreamViewerEngine: MeshConnection {
         guard let header else {
             guard content.type == .streamHeader else { throw ProtocolError.state("Expected an end-to-end stream header") }
             if AudioLive.isAudioLiveHeader(content.payload) {
+                guard allowAudioOnly else { throw ProtocolError.incompatible("Unsupported stream header") }
                 try acceptAudioLiveHeader(content.payload)
                 return
             }
