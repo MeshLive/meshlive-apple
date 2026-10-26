@@ -265,18 +265,14 @@ struct SettingsRowLabel: View {
     var body: some View {
         HStack(spacing: 14) {
             Image(systemName: icon).font(.system(size: 17)).foregroundStyle(Palette.dimInk).frame(width: 26).accessibilityHidden(true)
-            let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 8))
-            layout {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
+            VStack(alignment: .leading, spacing: 3) {
+                // Android (2026-10-21): the value sits at the right when title and value fit on one line, and wraps
+                // under the title otherwise, instead of squeezing both into narrow columns.
+                if typeSize.isAccessibilitySize { stacked } else { ViewThatFits(in: .horizontal) { inline; stacked } }
+                if let subtitle {
+                    Text(subtitle).font(.footnote).foregroundStyle(Palette.dimInk).multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
-                    if let subtitle {
-                        Text(subtitle).font(.footnote).foregroundStyle(Palette.dimInk).multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                 }
-                if !typeSize.isAccessibilitySize { Spacer(minLength: 8) }
-                if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).fixedSize(horizontal: false, vertical: true) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if chevron { Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.dimInk).accessibilityHidden(true) }
@@ -284,6 +280,23 @@ struct SettingsRowLabel: View {
         .padding(.horizontal, 16).padding(.vertical, 15).frame(minHeight: 56)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+    private var titleText: some View {
+        Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
+    }
+    private var inline: some View {
+        HStack(spacing: 8) {
+            titleText.lineLimit(1)
+            Spacer(minLength: 8)
+            if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).lineLimit(1) }
+        }
+    }
+    private var stacked: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            titleText.fixedSize(horizontal: false, vertical: true)
+            if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).fixedSize(horizontal: false, vertical: true) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -312,10 +312,18 @@ struct AboutView: View {
         }
     }
     private func infoRow(_ title: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink)
-            Spacer(minLength: 12)
-            Text(value).font(.body).foregroundStyle(Palette.dimInk).multilineTextAlignment(.trailing)
+        // The value wraps under the title when both do not fit on one line (Android 2026-10-21).
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).lineLimit(1)
+                Spacer(minLength: 12)
+                Text(value).font(.body).foregroundStyle(Palette.dimInk).lineLimit(1)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).fixedSize(horizontal: false, vertical: true)
+                Text(value).font(.body).foregroundStyle(Palette.dimInk).fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 16).padding(.vertical, 14)
         .accessibilityElement(children: .ignore)
