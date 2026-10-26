@@ -185,8 +185,11 @@ public final class Bmh3RevealSession {
     /// The caller may reveal itself only after the callee's reveal was verified (and the caller ran the binding).
     public var callerMayReveal: Bool { isCaller && ownPseudonymous && peerPseudonymous && revealed != nil && !ownRevealSent && !failed }
 
-    /// True while a reveal from the peer is required before the call may proceed (the callee's, seen by a caller).
-    public var peerRevealRequired: Bool { isCaller && peerPseudonymous && revealed == nil }
+    /// True while a reveal from the peer is required before the call may proceed: the callee's, seen by a caller, and
+    /// (review 2026-10-27, Android CallerRevealGate) the caller's, seen by a callee that is itself pseudonymous. Such a
+    /// caller always reveals right after it verified the callee's reveal, ahead of its stream header in the same ordered
+    /// queue; without this rule a caller could stay a throwaway for a whole answered call.
+    public var peerRevealRequired: Bool { peerPseudonymous && revealed == nil && (isCaller || ownPseudonymous) }
 
     /// Builds this phone's encoded reveal record; throws when the rules do not allow it or it was already sent.
     public func sendOwn(real: SigningIdentity, entries: [OpeningEntry]) throws -> Data {
@@ -221,5 +224,20 @@ public final class Bmh3RevealSession {
             failed = true
             throw error
         }
+    }
+}
+
+/// Review 2026-10-27 (Android CallerRevealGate): the callee of a pseudonym-pseudonym call revealed itself at Accept
+/// but never required the caller's reveal. It now refuses the caller's media until that reveal verified (the call
+/// ends) and hangs up when it has not arrived `deadline` after Accept.
+public enum CallerRevealGate {
+    /// One ECDSA verification and one signature plus a round trip on the caller's side; the same 10 s bound as the
+    /// hop handshake deadline, not a measured limit.
+    public static let deadline: TimeInterval = 10
+    public static let message = "The caller did not confirm its identity. The call was ended."
+
+    /// True when the call must end now: the reveal is still pending `deadline` after `acceptedAt`.
+    public static func expired(revealPending: Bool, acceptedAt: TimeInterval, now: TimeInterval) -> Bool {
+        revealPending && now - acceptedAt >= deadline
     }
 }

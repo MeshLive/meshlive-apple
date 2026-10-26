@@ -138,6 +138,10 @@ public final class CallEngine: MeshConnection {
     public static let heartbeatInterval: TimeInterval = 1
     public static let silentLinkTimeout: TimeInterval = 8
     public static let ringTimeout: TimeInterval = 60
+    /// A link that finished both handshakes must carry the call's Invite within this time (review 2026-10-27, Android
+    /// HOP_AUTH_MS bound): otherwise a peer could hold an authenticated link open with heartbeats and never ring.
+    public static let inviteTimeout: TimeInterval = 10
+    public static let inviteTimeoutReason = "No call arrived after the secure setup"
 
     public let callRole: PrivateCallRole
     public let negotiation: VoiceCallNegotiation
@@ -235,6 +239,16 @@ public final class CallEngine: MeshConnection {
     private var calleeEntries: [OpeningEntry] = []
     /// The peer's real identity after a verified reveal.
     public private(set) var revealedPeer: Bmh3Reveal.Verified?
+    /// Callee that revealed itself to a pseudonymous caller: the caller's reveal is required (CallerRevealGate).
+    private var callerRevealDeadlineArmed = false
+    private var callerRevealDeadlineStart: TimeInterval?
+    /// Test seam: a caller that never reveals itself (a misbehaving peer).
+    var testingWithholdOwnReveal = false
+    /// Test seam: a caller that opens the link but never sends its Invite.
+    var testingWithholdInvite = false
+    /// When the secure setup finished (the first open tick), for the Invite deadline.
+    private var openSince: TimeInterval?
+    private var callerRevealPending: Bool { callRole == .callee && endpoint?.reveal?.peerRevealRequired == true }
     /// True while the peer is a stranger behind a throwaway key.
     public var peerIsStranger: Bool { endpoint?.peerPseudonymous == true && revealedPeer == nil }
     /// The key this phone signs labels with (a pseudonym in a stranger session).
@@ -272,7 +286,7 @@ public final class CallEngine: MeshConnection {
                 awaitingReveal = false
                 revealedPeer = verified
                 onEvent?(.peerAuthenticated(verified.nodeId, verified.fingerprint))
-                if session.callerMayReveal {
+                if session.callerMayReveal && !testingWithholdOwnReveal {
                     enqueue(.content(.discoveryExchange, 0, try session.sendOwn(real: identity, entries: [])), .control)
                 }
                 releaseHeldCallerLabels()
@@ -396,7 +410,7 @@ public final class CallEngine: MeshConnection {
                     else { enqueue(.content(.labels, 0, container), .control) }
                 }
             }
-            for signal in negotiation.inviteSignals() { try sendSignal(signal) }
+            if !testingWithholdInvite { for signal in negotiation.inviteSignals() { try sendSignal(signal) } }
         }
     }
 
@@ -447,6 +461,8 @@ public final class CallEngine: MeshConnection {
         case .privateCallSignal:
             try handleSignal(try PrivateCallSignalMessage(decoding: content.payload))
         case .streamHeader:
+            // CallerRevealGate: a pseudonymous caller reveals itself before its header; media before that ends the call.
+            if callerRevealPending { throw ProtocolError.authentication }
             try reassembler.requireIdle("A call stream header")
             let header = try StreamHeader(decoding: content.payload)
             guard endpointCapabilities.decodeCodecMask & StreamProtocol.capabilityMask(codecId: header.codecId) != 0 else {
@@ -459,12 +475,14 @@ public final class CallEngine: MeshConnection {
             onEvent?(.remoteHeader(header))
             if state?.phase == .negotiatingMedia { try transition(.mediaReady) }
         case .mediaPacket:
+            if callerRevealPending { throw ProtocolError.authentication }
             guard remoteHeader != nil else { throw ProtocolError.state("Peer sent media before its call header") }
             let packet = try MediaPacket(decoding: content.payload, authenticatedFlags: content.flags)
             if packet.flags & StreamProtocol.flagDisplayRotation == 0 { countReceived(packet.payload.count) }
             if !packet.isAudio { try reassembler.requireIdle("A whole call video packet") }
             try deliver(packet)
         case .videoFragment:
+            if callerRevealPending { throw ProtocolError.authentication }
             guard fragmentsEnabled, remoteHeader != nil else { throw ProtocolError.state("Unexpected call video fragment") }
             countReceived(content.payload.count - CallVideoFragments.headerBytes)
             if let whole = try reassembler.accept(flags: content.flags, fragment: content.payload) {
@@ -593,6 +611,7 @@ public final class CallEngine: MeshConnection {
         // entries) goes before the name and the Accept in the same ordered queue.
         if let reveal = endpoint?.reveal, reveal.ownPseudonymous, reveal.peerPseudonymous {
             enqueue(.content(.discoveryExchange, 0, try reveal.sendOwn(real: identity, entries: calleeEntries)), .control)
+            callerRevealDeadlineArmed = reveal.peerRevealRequired
         }
         // R1: the callee's name travels immediately before Accept (never on decline, cancel or no answer).
         if let labels = pendingAcceptLabels { pendingAcceptLabels = nil; enqueue(.content(.labels, 0, labels), .control) }
@@ -694,6 +713,23 @@ public final class CallEngine: MeshConnection {
 
     public override func tickOpen(now: TimeInterval) {
         if now - lastReceiveAt > CallEngine.silentLinkTimeout { finishLost("Call peer stopped responding"); return }
+        if state == nil {
+            let since = openSince ?? now
+            openSince = since
+            if now - since >= CallEngine.inviteTimeout { fail(CallEngine.inviteTimeoutReason); return }
+        }
+        if callerRevealDeadlineArmed {
+            // Counted from the first tick after Accept (ticks run several times a second).
+            let start = callerRevealDeadlineStart ?? now
+            callerRevealDeadlineStart = start
+            if !callerRevealPending {
+                callerRevealDeadlineArmed = false
+            } else if CallerRevealGate.expired(revealPending: true, acceptedAt: start, now: now) {
+                callerRevealDeadlineArmed = false
+                endForLocalMediaFailure(CallerRevealGate.message)
+                return
+            }
+        }
         if let phase = state?.phase, now - ringingSince > CallEngine.ringTimeout {
             if phase == .outgoingInvite || phase == .outgoingRinging { try? cancel(); return }
             if phase == .incomingRinging { try? decline(.rejected); return }

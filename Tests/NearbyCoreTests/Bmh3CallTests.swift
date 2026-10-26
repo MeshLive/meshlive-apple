@@ -95,6 +95,51 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertFalse(caller.peerIsStranger || callee.peerIsStranger)
     }
 
+    /// Review 2026-10-27 (Android CallerRevealGate): a callee that revealed itself requires the caller's reveal; the
+    /// caller's media before it ends the call, and without it the callee hangs up 10 s after Accept.
+    func testAnAnsweredStrangerCallEndsWhenTheCallerNeverRevealsItself() throws {
+        let callerId = SoftwareSigningIdentity(), calleeId = SoftwareSigningIdentity()
+        let (caller, callee, box) = rotatingCall(callerId: callerId, calleeId: calleeId, callerPseudonyms: true, calleePseudonyms: true)
+        caller.testingWithholdOwnReveal = true
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging)
+        try callee.accept(as: .voice)
+        XCTAssertTrue(callee.endpoint?.reveal?.peerRevealRequired == true, "the callee now waits for the caller's reveal")
+        pump(caller, callee)
+        XCTAssertEqual(callee.phase, .closed, "the caller's header arrived without its reveal")
+        XCTAssertNotEqual(callee.state?.phase, .active)
+        XCTAssertEqual(authenticated(box.callee), [], "the callee never learned who called")
+    }
+
+    /// Review 2026-10-27 (Android HOP_AUTH_MS): an authenticated link that never carries an Invite is closed after
+    /// 10 s, although heartbeats keep it alive.
+    func testACalleeClosesALinkThatNeverCarriesAnInvite() throws {
+        let (caller, callee, _) = rotatingCall(callerPseudonyms: nil, calleePseudonyms: nil)
+        caller.testingWithholdInvite = true
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.phase, .open, "\(callee.closeReason ?? "")")
+        func step(_ t: TimeInterval) {
+            caller.tick(now: t); callee.tick(now: t)
+            for _ in 0..<20 {
+                var moved = false
+                while let d = caller.nextOutgoing(now: t) { callee.receive(d, now: t); moved = true }
+                while let d = callee.nextOutgoing(now: t) { caller.receive(d, now: t); moved = true }
+                if !moved { break }
+            }
+        }
+        for t in stride(from: 1.0, through: 10.5, by: 0.5) { step(t) }
+        XCTAssertEqual(callee.phase, .open, "heartbeats keep the link alive until the deadline")
+        step(11.0)
+        XCTAssertEqual(callee.phase, .closed)
+        XCTAssertEqual(callee.closeReason, CallEngine.inviteTimeoutReason)
+    }
+
+    func testTheCallerRevealDeadline() {
+        XCTAssertFalse(CallerRevealGate.expired(revealPending: true, acceptedAt: 1, now: 1 + CallerRevealGate.deadline - 0.01))
+        XCTAssertTrue(CallerRevealGate.expired(revealPending: true, acceptedAt: 1, now: 1 + CallerRevealGate.deadline))
+        XCTAssertFalse(CallerRevealGate.expired(revealPending: false, acceptedAt: 1, now: 100), "a verified reveal ends the wait")
+    }
+
     func testAPseudonymCalleeDeclinesWithoutRevealingAnything() throws {
         let calleeId = SoftwareSigningIdentity()
         let (caller, callee, box) = rotatingCall(calleeId: calleeId, callerPseudonyms: true, calleePseudonyms: true)
