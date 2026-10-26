@@ -167,6 +167,7 @@ final class CallController: ObservableObject, Identifiable {
         let driver = ConnectionDriver(engine: engine, link: link)
         driver.onFinished = { [weak self] reason in self?.finished(reason) }
         self.driver = driver
+        linkAttachedAt = ProcessInfo.processInfo.systemUptime
         driver.start()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshStats() }
     }
@@ -262,18 +263,21 @@ final class CallController: ObservableObject, Identifiable {
     }
 
     private let mediaClock = ProcessInfo.processInfo.systemUptime
+    /// When the Bluetooth link was attached: `linkMs` on call_auth and call_phase times the handshake and setup.
+    private var linkAttachedAt: TimeInterval?
+    private var linkMs: String { linkAttachedAt.map { "\(Int(((ProcessInfo.processInfo.systemUptime - $0) * 1000).rounded()))" } ?? "-" }
 
     private var lastStatsLog: TimeInterval = 0
     private func log(_ event: CallEngine.Event) {
         switch event {
-        case .linkAuthenticated(let id): AppLog.event("call_auth", ["stage": "link", "peer": id.shortLabel, "transport": transport.rawValue])
+        case .linkAuthenticated(let id): AppLog.event("call_auth", ["stage": "link", "peer": id.shortLabel, "transport": transport.rawValue, "linkMs": linkMs])
         case .peerAuthenticated(let id, let fp):
-            AppLog.event("call_auth", ["stage": "endpoint", "peer": id.shortLabel, "handle": IdentityHandle.handle(prefix: id.prefix) ?? "?",
+            AppLog.event("call_auth", ["stage": "endpoint", "linkMs": linkMs, "peer": id.shortLabel, "handle": IdentityHandle.handle(prefix: id.prefix) ?? "?",
                                        "fingerprint": String(fp.hex.prefix(16)), "codec": "\(engine.selectedCodec.map { $0 == StreamProtocol.codecVP9 ? "vp9" : "av1" } ?? "none")",
                                        "peerCaps": engine.endpoint.map { String(format: "t%02x/e%02x/d%02x/max%d", $0.peerCapabilities.transportMask, $0.peerCapabilities.encodeCodecMask, $0.peerCapabilities.decodeCodecMask, $0.peerCapabilities.maxBitrateKbps) } ?? "?"])
         case .peerStranger:
             AppLog.event("bmh3", ["event": "peer", "layer": "endpoint", "pseudonymous": "true", "linkBmh3": "\(engine.linkUsedBmh3)"])
-        case .phase(let p): AppLog.event("call_phase", ["role": role == .caller ? "caller" : "callee", "phase": "\(p)", "callId": engine.state?.callId.uuidString ?? "-"])
+        case .phase(let p): AppLog.event("call_phase", ["role": role == .caller ? "caller" : "callee", "phase": "\(p)", "callId": engine.state?.callId.uuidString ?? "-", "linkMs": linkMs])
         case .incomingCall(let t), .offeredTypeChanged(let t): AppLog.event("call_offer", ["type": t.rawValue])
         case .startLocalMedia(let h, let t): AppLog.event("call_media_start", ["type": t.rawValue, "codec": "\(h.codecId)", "size": "\(h.width)x\(h.height)", "fps": "\(h.fps)"])
         case .remoteHeader(let h): AppLog.event("call_remote_header", ["codec": "\(h.codecId)", "size": "\(h.width)x\(h.height)", "fps": "\(h.fps)", "rotation": "\(h.rotationDegrees)", "audio": "\(h.hasAudio)"])

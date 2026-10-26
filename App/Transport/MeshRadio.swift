@@ -390,7 +390,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
             #if os(macOS)
             if let pending = self?.attempts[key] {
                 AppLog.event("connect_details", ["phase": "timeout", "setupStage": pending.stage,
-                                                 "delegateAttached": "\(pending.peripheral.delegate === self)"])
+                                                 "delegateAttached": "\(pending.peripheral.delegate === self)"].merging(pending.timing()) { a, _ in a })
             }
             #endif
             self?.failAttempt(key, "Connection timed out", stage: "timeout")
@@ -421,7 +421,8 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     private func failAttempt(_ id: UUID, _ reason: String, stage: String? = nil) {
         guard let attempt = attempts.removeValue(forKey: id) else { return }
         let failedStage = stage ?? attempt.stage
-        AppLog.event("connect", ["stage": "failed", "failedStage": failedStage, "transport": attempt.transport.rawValue, "reason": reason])
+        AppLog.event("connect", ["stage": "failed", "failedStage": failedStage, "transport": attempt.transport.rawValue, "reason": reason]
+                        .merging(attempt.timing()) { a, _ in a })
         attempt.fail(reason, stage: failedStage)
         central.cancelPeripheralConnection(attempt.peripheral)
     }
@@ -429,21 +430,23 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     private func succeed(_ id: UUID, link: MeshLink) {
         guard let attempt = attempts.removeValue(forKey: id) else { link.close(); return }
         AppLog.event("connect", ["stage": "link_open", "transport": attempt.transport.rawValue, "link": link.label,
-                                 "maxWrite": "\(attempt.peripheral.maximumWriteValueLength(for: .withoutResponse))"])
+                                 "maxWrite": "\(attempt.peripheral.maximumWriteValueLength(for: .withoutResponse))"]
+                        .merging(attempt.timing()) { a, _ in a })
         attempt.succeeded()
         attempt.completion(.success(link))
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         guard let attempt = attempts[peripheral.identifier] else { central.cancelPeripheralConnection(peripheral); return }
-        AppLog.event("connect", ["stage": "connected", "transport": attempt.transport.rawValue])
+        AppLog.event("connect", ["stage": "connected", "transport": attempt.transport.rawValue,
+                                 "maxWrite": "\(peripheral.maximumWriteValueLength(for: .withoutResponse))"].merging(attempt.timing()) { a, _ in a })
         attempt.stage = "services"
         let service = attempt.transport == .l2cap ? MeshUUIDs.controlService : MeshUUIDs.gattDataService
         #if os(macOS)
         AppLog.event("connect_details", ["phase": "services_request", "delegateAttached": "\(peripheral.delegate === self)",
                                          "samePeripheralInstance": "\(peripheral === attempt.peripheral)",
                                          "peripheralState": "\(peripheral.state.rawValue)",
-                                         "cachedServices": "\(peripheral.services?.count ?? 0)"])
+                                         "cachedServices": "\(peripheral.services?.count ?? 0)"].merging(attempt.timing()) { a, _ in a })
         #endif
         peripheral.discoverServices([CBUUID(string: service)])
     }
@@ -462,7 +465,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         #if os(macOS)
         AppLog.event("connect_details", ["phase": "services_callback", "attemptActive": "\(attempts[peripheral.identifier] != nil)",
                                          "services": (peripheral.services ?? []).map { $0.uuid.uuidString }.joined(separator: ","),
-                                         "error": error?.localizedDescription ?? "none"])
+                                         "error": error?.localizedDescription ?? "none"].merging(attempts[peripheral.identifier]?.timing() ?? [:]) { a, _ in a })
         #endif
         guard let attempt = attempts[peripheral.identifier] else { return }
         let serviceId = CBUUID(string: attempt.transport == .l2cap ? MeshUUIDs.controlService : MeshUUIDs.gattDataService)
@@ -479,7 +482,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         #if os(macOS)
         AppLog.event("connect_details", ["phase": "characteristics_callback", "attemptActive": "\(attempts[peripheral.identifier] != nil)",
                                          "characteristics": "\(service.characteristics?.count ?? 0)",
-                                         "error": error?.localizedDescription ?? "none"])
+                                         "error": error?.localizedDescription ?? "none"].merging(attempts[peripheral.identifier]?.timing() ?? [:]) { a, _ in a })
         #endif
         guard let attempt = attempts[peripheral.identifier] else { return }
         let characteristics = service.characteristics ?? []
@@ -503,7 +506,8 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         #if os(macOS)
         AppLog.event("connect_details", ["phase": "subscribe_callback", "attemptActive": "\(attempts[peripheral.identifier] != nil)",
-                                         "notifying": "\(characteristic.isNotifying)", "error": error?.localizedDescription ?? "none"])
+                                         "notifying": "\(characteristic.isNotifying)", "error": error?.localizedDescription ?? "none"]
+                            .merging(attempts[peripheral.identifier]?.timing() ?? [:]) { a, _ in a })
         #endif
         guard let attempt = attempts[peripheral.identifier], characteristic.uuid == CBUUID(string: MeshUUIDs.gattNotify) else { return }
         guard error == nil, characteristic.isNotifying, let write = attempt.write else {
@@ -538,7 +542,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         guard error == nil, let value = characteristic.value, let psm = try? MeshUUIDs.decodePSM(value) else {
             failAttempt(peripheral.identifier, "Could not read the peer's L2CAP PSM"); return
         }
-        AppLog.event("connect", ["stage": "psm_read", "psm": "\(psm)"])
+        AppLog.event("connect", ["stage": "psm_read", "psm": "\(psm)"].merging(attempts[peripheral.identifier]?.timing() ?? [:]) { a, _ in a })
         attempts[peripheral.identifier]?.stage = "l2cap_open"
         peripheral.openL2CAPChannel(CBL2CAPPSM(psm))
     }
@@ -569,6 +573,14 @@ final class OutgoingAttempt {
     var timer: Timer?
     /// Where the attempt is: connect, services, characteristics, psm_read, l2cap_open, subscribe.
     var stage = "connect"
+    private let startedAt = ProcessInfo.processInfo.systemUptime
+    private var lastStepAt = ProcessInfo.processInfo.systemUptime
+    /// Log fields: `ms` since the attempt started and `stepMs` since the previous logged step.
+    func timing() -> [String: String] {
+        let now = ProcessInfo.processInfo.systemUptime
+        defer { lastStepAt = now }
+        return ["ms": "\(Int(((now - startedAt) * 1000).rounded()))", "stepMs": "\(Int(((now - lastStepAt) * 1000).rounded()))"]
+    }
     private var done = false
     init(peripheral: CBPeripheral, transport: MeshTransport, completion: @escaping (Result<MeshLink, Error>) -> Void) {
         self.peripheral = peripheral; self.transport = transport; self.completion = completion
