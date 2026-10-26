@@ -97,6 +97,14 @@ struct DesktopRootView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("desktopKeepRunningWithWindowClosed") private var keepRunning = false
     @State private var recent = false
+    /// README screenshots (DEBUG `-NearbyFixture readme`) leave out the preview footer.
+    private var readmeFixture: Bool {
+        #if DEBUG
+        model.debugReadme
+        #else
+        false
+        #endif
+    }
     @State private var goLiveChoice: (audioOnly: Bool, preset: UInt8)?
 
     private func sidebarItem(_ title: String, icon: String, tab: MainTab, id: String) -> some View {
@@ -138,7 +146,7 @@ struct DesktopRootView: View {
                     .tint(Palette.chip)
                     .background(Palette.ground)
                     .safeAreaInset(edge: .bottom) {
-                        if DesktopPreview.enabled {
+                        if DesktopPreview.enabled && !readmeFixture {
                             Text("Preview · Bluetooth and media are off")
                                 .font(.caption).foregroundStyle(Palette.dimInk)
                                 .fixedSize(horizontal: false, vertical: true)

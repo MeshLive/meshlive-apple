@@ -30,6 +30,20 @@ final class DesktopScreensTests: XCTestCase {
         app.terminate()
     }
 
+    /// The README's Mac row: the invented `readme` fixture (generated names, made-up stream titles) on Calls and Live.
+    /// The attachments `readme-calls` and `readme-live` are the published screenshots.
+    func testReadmeFixtureCallsAndLive() {
+        var app = launch(["-NearbyFixture", "readme", "-NearbyScreen", "people"])
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'artsy cascade'")).firstMatch.waitForExistence(timeout: 10))
+        shot(app, "readme-calls")
+        app.terminate()
+        app = launch(["-NearbyFixture", "readme"])
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Village meeting'")).firstMatch.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Preview · Bluetooth and media are off"].exists)
+        shot(app, "readme-live")
+        app.terminate()
+    }
+
     func testGeneratedNearbyNamesAndOwnNameUseTheBundledAndroidLists() {
         let app = launch(["-NearbyFixture", "nearby-names", "-NearbyScreen", "people"])
         let first = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "mild bream")).firstMatch

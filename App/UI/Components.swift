@@ -479,13 +479,14 @@ struct RadioStatus {
     /// The action opens Bluetooth settings (Mac) rather than the app's settings.
     var opensBluetooth = false
     init(model: AppModel) {
+        #if DEBUG
+        // README fixture first, so README screenshots taken under -NearbyPreview show the ordinary ready state.
+        if model.debugReadme { (title, detail, ok, action) = ("Bluetooth on \u{00B7} Reachable for calls", "Keep MeshLive open to be reached", true, nil); return }
+        #endif
         if DesktopPreview.enabled {
             (title, detail, ok, action) = ("Preview", "Sample people and streams. Bluetooth and media are off.", false, nil)
             return
         }
-        #if DEBUG
-        if model.debugReadme { (title, detail, ok, action) = ("Bluetooth on \u{00B7} Reachable for calls", "Keep MeshLive open to be reached", true, nil); return }
-        #endif
         if model.bluetoothRestartNeeded {
             // iOS has no public link to Bluetooth settings; the Mac opens its Bluetooth pane.
             (title, detail, ok, action) = (BluetoothGuidance.restartTitle, BluetoothGuidance.restartText(mac: AppPlatform.isMac), false,

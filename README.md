@@ -32,11 +32,9 @@ No internet, no SIM, no account.
 <img src="docs/screenshots/iphone/03-golive.png" width="180" alt="Go live: video, or audio only" />
 <img src="docs/screenshots/iphone/04-settings.png" width="180" alt="Settings" />
 
-<!-- Mac row (added with the Mac screenshots):
 <br/>
 <img src="docs/screenshots/mac/01-calls.png" width="370" alt="Mac: calls" />
 <img src="docs/screenshots/mac/02-live.png" width="370" alt="Mac: live nearby" />
--->
 
 </div>
 
