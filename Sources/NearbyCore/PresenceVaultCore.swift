@@ -77,15 +77,14 @@ public final class PresenceVaultCore {
             return false
         }
         guard let stored else {
+            // Nothing stored: a new vault above the floor, written at its first change (a delivered or stored lease),
+            // so a phone that never uses the experiment writes nothing.
             var created = PresenceVaultState()
-            created.generation = max(floor.value, 0) &+ 1
+            created.generation = floor.value &+ 1
             created.dayKeys = DayKeyWindow.fresh(epoch: epochSource(), newKey: newKey)
-            floor.raise(to: created.generation)
-            if save(created) {
-                state = created; ephemeral = [:]
-                finishFreshInstall()
-            }
-            return state != nil
+            state = created; ephemeral = [:]
+            finishFreshInstall()
+            return true
         }
         guard let loaded = try? JSONDecoder().decode(PresenceVaultState.self, from: stored) else {
             corrupt = true
@@ -138,6 +137,7 @@ public final class PresenceVaultCore {
         change(&next)
         guard save(next) else { return false }
         state = next
+        floor.raise(to: next.generation)
         return true
     }
 

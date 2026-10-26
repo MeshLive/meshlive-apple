@@ -153,7 +153,19 @@ final class PresenceVaultCoreTests: XCTestCase {
         XCTAssertEqual(stored.data, Data("not a vault".utf8), "never overwritten implicitly")
         XCTAssertTrue(mine.resetKey())
         XCTAssertTrue(mine.persistent)
-        XCTAssertNotNil(stored.state)
+        XCTAssertNil(stored.data, "the damaged vault is gone")
+        XCTAssertNotNil(mine.deliverLease(to: try node(1), epoch: epoch, verified: true))
+        XCTAssertNotNil(stored.state, "the new vault is stored at its first change")
+    }
+
+    func testANewVaultIsWrittenOnlyWhenItChanges() throws {
+        let stored = Storage()
+        let mine = vault(stored)
+        XCTAssertTrue(mine.persistent)
+        _ = mine.entry(nodeId: try node(1), epoch: epoch, role: 0)
+        XCTAssertNil(stored.data, "a phone that never uses the experiment stores nothing")
+        XCTAssertNotNil(mine.deliverLease(to: try node(2), epoch: epoch, verified: true))
+        XCTAssertNotNil(stored.data)
     }
 
     func testAFreshInstallDropsContactsOnceTheVaultCanBeRead() throws {
