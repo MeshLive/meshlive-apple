@@ -351,4 +351,18 @@ final class RotatingStreamTests: XCTestCase {
         let (_, noBitViewer) = try run(sourceId: sourceId, entryOwner: sourceId, sourceEntries: false)
         XCTAssertEqual(noBitViewer.phase, .closed)
     }
+
+    /// Phase 1b for streams is not built here (requests and forwarder offers carry the fixed prefix): with rotating
+    /// IDs on, a rotating stream is neither joined nor forwarded; a fixed one, or the setting off, behaves as before.
+    func testARotatingStreamIsNotJoinedOrForwardedWithTheFixedPrefixWhileRotatingIdsAreOn() {
+        var offer = DiscoveryAnnouncement(nodeIdPrefix: Data([1, 2, 3, 4, 5, 6]), flags: DiscoveryAnnouncement.flagStreamAvailable,
+                                          capabilitySummary: NodeCapabilities.codecVP9, streamToken: 0x8000_1234, routeCost: 0)
+        XCTAssertNil(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: true))
+        XCTAssertTrue(RotatingStreamPolicy.mayForward(offer: offer, rotatingIds: true))
+        offer.rotating = true
+        XCTAssertEqual(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: true), RotatingStreamPolicy.joinRefusal)
+        XCTAssertFalse(RotatingStreamPolicy.mayForward(offer: offer, rotatingIds: true))
+        XCTAssertNil(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: false), "the fixed prefix is already public")
+        XCTAssertTrue(RotatingStreamPolicy.mayForward(offer: offer, rotatingIds: false))
+    }
 }

@@ -225,3 +225,21 @@ public final class StrangerTarpit {
     }
     public func forgive(epoch e: Int64) { if e == epoch && probes > 0 { probes -= 1 } }
 }
+
+/// Rotating discovery IDs phase 1b for streams (rotating viewer requests and forwarder offers, PROTOCOL Phase 1b items
+/// 1-7) is not built on Apple platforms: this phone's viewer request and forwarder offer always carry its fixed prefix
+/// (compact v1). While this phone runs rotating IDs it therefore neither joins nor forwards a stream whose offer
+/// rotates (announcement version 5): Android mirrors such an offer with a rotating request, and a fixed-prefix one
+/// would broadcast exactly the ID the setting hides. With the setting off the fixed prefix is public anyway, so a Mac
+/// with Android compatibility still joins (and may forward) a rotating stream with its fixed identity.
+public enum RotatingStreamPolicy {
+    public static let joinRefusal = "This stream uses private discovery. This app cannot join it yet without showing your phone's fixed ID, so it is not joined while Rotating discovery IDs is on."
+
+    /// Why this phone does not join `offer`, or nil when it may.
+    public static func joinRefusal(offer: DiscoveryAnnouncement, rotatingIds: Bool) -> String? {
+        offer.rotating && rotatingIds ? joinRefusal : nil
+    }
+
+    /// Whether this phone may advertise a (fixed-prefix) forwarder offer for a stream it joined through `offer`.
+    public static func mayForward(offer: DiscoveryAnnouncement, rotatingIds: Bool) -> Bool { !(offer.rotating && rotatingIds) }
+}

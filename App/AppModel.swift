@@ -687,6 +687,11 @@ final class AppModel: ObservableObject {
     func startWatching(_ row: StreamRow) {
         guard watch == nil, let identity else { return }
         let key = streamRouteKey(row.id, row.announcement)
+        if let refusal = RotatingStreamPolicy.joinRefusal(offer: row.announcement, rotatingIds: rotatingIds) {
+            AppLog.event("rotating_ids", ["event": "join_refused", "role": "viewer"])
+            streamNotice = refusal
+            return
+        }
         guard !streamRoutePenalties.isPenalized(key, now: ConnectionDriver.now) else {
             streamNotice = "That route to the stream is temporarily unavailable. Try another one nearby."
             return

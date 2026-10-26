@@ -713,6 +713,9 @@ final class WatchController: ObservableObject {
             AppLog.event("relay_admission", ["started": "false", "reason": "no mesh stream (source sent direct records)"]); return
         }
         if isRadio, model.audioRelayMemory.blockedFor(transport, now: ConnectionDriver.now) > 0 { return }
+        guard RotatingStreamPolicy.mayForward(offer: offer, rotatingIds: model.rotatingIds) else {
+            AppLog.event("relay_admission", ["started": "false", "reason": "rotating offer: a fixed-prefix forwarder offer would show this phone's ID"]); return
+        }
         let learned = AppSettings.relayLearned
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let decision = RelayAdmission.evaluate(learned: learned, advertisedKbps: Int(offer.streamBitrateKbps), fps: header?.fps ?? 0, nowMs: nowMs, audioPreset: audioPreset)
