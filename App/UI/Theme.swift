@@ -120,11 +120,9 @@ struct PeerLabel: Equatable {
     static func nearbyPhone(seed: Data) -> PeerLabel {
         PeerLabel(title: "Nearby phone", handle: "", hue: Double(seed.last ?? 0) / 255)
     }
-    #if os(macOS)
     static func generated(_ name: String, seed: Data) -> PeerLabel {
         PeerLabel(title: name, handle: "", hue: Double(seed.last ?? 0) / 255)
     }
-    #endif
     /// A rotating advert recognised through a contact's presence lease: their own label, "seen nearby, unconfirmed".
     static func recognized(contactName: String, seed: Data) -> PeerLabel {
         PeerLabel(title: "\(contactName), seen nearby, unconfirmed", handle: "", hue: Double(seed.last ?? 0) / 255)

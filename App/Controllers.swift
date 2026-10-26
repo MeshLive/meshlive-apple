@@ -207,11 +207,9 @@ final class CallController: ObservableObject, Identifiable {
             // BMH3 pseudonyms: a throwaway key; the real identity (and the call history entry) only after its reveal.
             fingerprint = nil; verification = .unverified
             label = nil; peerName = "Unverified stranger"
-            #if os(macOS)
             if model?.desktopGeneratedNames == true, let name = DesktopNearbyNames.shared?.name(forStranger: engine) {
                 peerName = name.text
             }
-            #endif
         case .phase(let p):
             phase = p
             if p == .incomingRinging { ringer.start() } else { ringer.stop() }

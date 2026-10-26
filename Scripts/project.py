@@ -25,6 +25,8 @@ if v1:
 else:
     app_dirs = [root / "App", root / "Sources/NearbyMedia", root / "Sources/CNearbyVPX"]
     sources = sorted(p.relative_to(root).as_posix() for d in app_dirs for p in d.rglob("*") if p.suffix in (".swift", ".c"))
+    # Generated nearby names (Android names-v2 lists) are shared by the iPhone and the Mac.
+    sources.append("Desktop/Support/DesktopNearbyNames.swift")
 coresources = sorted(p.relative_to(root).as_posix() for p in (root / "Sources/NearbyCore").glob("*.swift"))
 buildfiles, corefiles, children, resources = [], [], [], []
 assets = ["App/Assets.xcassets"] if (root / "App/Assets.xcassets").exists() and not v1 else []
@@ -51,6 +53,11 @@ if vpx.exists() and not v1:
 group = obj("group", f'isa = PBXGroup; children = ({",".join(children+[product,coreproduct])}); sourceTree = "<group>";')
 srcphase = obj("sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(buildfiles)}); runOnlyForDeploymentPostprocessing = 0;')
 linkphase = obj("frameworks", f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({",".join(frameworks)}); runOnlyForDeploymentPostprocessing = 0;')
+if not v1:
+    namesref = obj("names-ref", 'isa = PBXFileReference; lastKnownFileType = folder; path = Desktop/Support/Names; sourceTree = SOURCE_ROOT;')
+    children.append(namesref); resources.append(obj("names-build", f'isa = PBXBuildFile; fileRef = {namesref};'))
+    objects.remove(next(o for o in objects if o.startswith(uid("group"))))
+    group = obj("group", f'isa = PBXGroup; children = ({",".join(children+[product,coreproduct])}); sourceTree = "<group>";')
 resphase = obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(resources)}); runOnlyForDeploymentPostprocessing = 0;')
 configs = []
 coreconfigs = []
@@ -116,7 +123,7 @@ if not v1 and (root / "UITests").exists():
 # Native macOS app: separate SDK/static-library targets, sharing the protocol sources.
 mactargets = []
 if not v1:
-    macsources = sorted(p.relative_to(root).as_posix() for p in (root / "Desktop").rglob("*.swift")) + sources
+    macsources = sorted(set(p.relative_to(root).as_posix() for p in (root / "Desktop").rglob("*.swift")) | set(sources))
     macbuild, macchildren = [], []
     for path in macsources + ["Desktop/Info.plist", "Desktop/MeshLive.entitlements"]:
         kind = {".swift": "sourcecode.swift", ".c": "sourcecode.c.c"}.get(Path(path).suffix, "text.plist.xml")

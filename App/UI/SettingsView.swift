@@ -154,12 +154,10 @@ struct PrivacyView: View {
                 SettingsToggleRow(icon: "textformat", title: "Names and titles",
                                   info: "Experimental. Sends your name, encrypted and signed with your ID, to the people you call or answer, and shows your live titles to phones nearby. Only phones that also turned this on see them.",
                                   isOn: $model.peerLabelsEnabled)
-                #if os(macOS)
                 CardDivider()
                 SettingsToggleRow(icon: "person.crop.circle", title: "Generated nearby names",
-                                  info: "Experimental. Shows the same changing two-word names as Android for rotating nearby IDs. These names help pick a device; they do not verify its identity. Turn on Rotating discovery IDs in Advanced privacy for this Mac to appear by a changing name too.",
+                                  info: AppPlatform.isMac ? "Experimental. Shows the same changing two-word names as Android for rotating nearby IDs. These names help pick a device; they do not verify its identity. Turn on Rotating discovery IDs in Advanced privacy for this Mac to appear by a changing name too." : "Experimental. Shows the same changing two-word names as Android for rotating nearby IDs. These names help pick a phone; they do not verify its identity. Turn on Rotating discovery IDs in Advanced privacy for this iPhone to appear by a changing name too.",
                                   identifier: "desktop-generated-names", isOn: $model.desktopGeneratedNames)
-                #endif
             }
             Card {
                 SettingsLinkRow(icon: "lock.shield", title: "Advanced privacy") { AdvancedPrivacyView() }

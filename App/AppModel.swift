@@ -88,6 +88,12 @@ final class AppModel: ObservableObject {
     /// The app left or regained the front while a call may ring (inactive or background).
     func appActivityChanged() { CallNotifier.shared.update(for: call) }
     @Published var wiped = false
+    /// Experimental generated nearby names (Android names-v2) on iPhone and Mac.
+    @Published var desktopGeneratedNames = AppSettings.desktopGeneratedNames {
+        didSet { AppSettings.desktopGeneratedNames = desktopGeneratedNames; rebuildLists(); refreshAdvertising() }
+    }
+    /// The generated name of this device's own advertised rotating ID (what people nearby see), or nil.
+    @Published private(set) var desktopAdvertisedName: String?
     /// BluetoothGuidance: Bluetooth is allowed and on but stuck; the status card says to turn it off and on.
     @Published var bluetoothRestartNeeded = false
     func checkBluetoothGuidance() {
@@ -103,13 +109,8 @@ final class AppModel: ObservableObject {
     }
     /// "You appear as ..." (OwnNearbyName): what people nearby who have not added you see for this device now, or nil.
     var ownNearbyLine: String? {
-        #if os(macOS)
-        let generatedOn = desktopGeneratedNames, generated = desktopAdvertisedName
-        #else
-        let generatedOn = false, generated: String? = nil   // the iPhone has no generated names yet
-        #endif
-        return OwnNearbyName.shown(reachableForCalls: availableForCalls, rotatingOn: rotatingIds,
-                                   generatedNamesOn: generatedOn, generatedName: generated).map(OwnNearbyName.line)
+        OwnNearbyName.shown(reachableForCalls: availableForCalls, rotatingOn: rotatingIds,
+                            generatedNamesOn: desktopGeneratedNames, generatedName: desktopAdvertisedName).map(OwnNearbyName.line)
     }
     /// EXPERIMENTAL rotating discovery IDs (Settings > Advanced).
     @Published var rotatingIds = AppSettings.rotatingIds {
@@ -135,10 +136,6 @@ final class AppModel: ObservableObject {
     @Published var desktopCallDeliveryFeedback = AppSettings.desktopCallDeliveryFeedback {
         didSet { AppSettings.desktopCallDeliveryFeedback = desktopCallDeliveryFeedback }
     }
-    @Published var desktopGeneratedNames = AppSettings.desktopGeneratedNames {
-        didSet { AppSettings.desktopGeneratedNames = desktopGeneratedNames; rebuildLists(); refreshAdvertising() }
-    }
-    @Published private(set) var desktopAdvertisedName: String?
     @Published var desktopAndroidCompatibility = AppSettings.desktopAndroidCompatibility {
         didSet {
             AppSettings.desktopAndroidCompatibility = desktopAndroidCompatibility
@@ -187,11 +184,9 @@ final class AppModel: ObservableObject {
         if hits.count == 1, let contact = contacts.first(where: { $0.fingerprintHex.hasPrefix(hits[0].contact.hex) }) {
             return PeerLabel.recognized(contactName: contact.displayName, seed: announcement.nodeIdPrefix)
         }
-        #if os(macOS)
         if desktopGeneratedNames, let name = generatedName ?? DesktopNearbyNames.shared?.name(for: announcement)?.text {
             return PeerLabel.generated(name, seed: announcement.nodeIdPrefix)
         }
-        #endif
         return PeerLabel.nearbyPhone(seed: announcement.nodeIdPrefix)
     }
 
@@ -532,10 +527,8 @@ final class AppModel: ObservableObject {
             return (ca ?? a.prefixHex, a.announcement.streamToken) < (cb ?? b.prefixHex, b.announcement.streamToken)
         }
         let callPeers = peers.filter { $0.announcement.isPrivateCallOffer && !$0.announcement.usesClassic }
-        #if os(macOS)
         let generatedCalls = desktopGeneratedNames ? DesktopNearbyNames.shared?.labels(for: callPeers.map(\.announcement)) ?? [:] : [:]
         let generatedStreams = desktopGeneratedNames ? DesktopNearbyNames.shared?.labels(for: peers.filter { $0.announcement.isStreamOffer }.map(\.announcement)) ?? [:] : [:]
-        #endif
         people = callPeers.map { p in
             // Pre-connect the prefix is an unauthenticated hint: a verified contact's local name may label the row,
             // but the row never claims "verified" (Android shows no badge here either).
@@ -622,6 +615,7 @@ final class AppModel: ObservableObject {
         #else
         if boundarySilenceUntil != nil, announcement?.rotating == true || announcement?.isPrivateCallOffer == true { return }
         if rotatingIds && announcement?.rotating != true { rotating.pins.offAir(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) }
+        desktopAdvertisedName = desktopGeneratedNames ? announcement.flatMap { DesktopNearbyNames.shared?.name(for: $0)?.text } : nil
         radio.advertise(announcement, name: displayName)
         #endif
     }

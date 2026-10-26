@@ -295,15 +295,16 @@ struct AppSettings {
         get { d.bool(forKey: "experimentalDesktopAndroidCompatibility") }
         set { d.set(newValue, forKey: "experimentalDesktopAndroidCompatibility") }
     }
-    static var desktopGeneratedNames: Bool {
-        get { d.bool(forKey: "experimentalDesktopGeneratedNames") }
-        set { d.set(newValue, forKey: "experimentalDesktopGeneratedNames") }
-    }
     static var desktopCallDeliveryFeedback: Bool {
         get { d.bool(forKey: "experimentalDesktopCallDeliveryFeedback") }
         set { d.set(newValue, forKey: "experimentalDesktopCallDeliveryFeedback") }
     }
     #endif
+    /// Experimental generated nearby names (Android names-v2), iPhone and Mac (the key keeps its Mac name).
+    static var desktopGeneratedNames: Bool {
+        get { d.bool(forKey: "experimentalDesktopGeneratedNames") }
+        set { d.set(newValue, forKey: "experimentalDesktopGeneratedNames") }
+    }
     static var displayName: String {
         get { d.string(forKey: "displayName") ?? "" }
         set { d.set(newValue, forKey: "displayName") }
