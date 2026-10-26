@@ -407,6 +407,10 @@ final class CallController: ObservableObject, Identifiable {
         engine.setCameraEnabled(cameraOn)
         if cameraOn {
             if camera == nil, let header = engine.localHeader { startCamera(header: header) } else { camera?.requestKeyFrame() }
+        } else if !UserDefaults.standard.bool(forKey: "NearbyKeepCameraWhenOff") {
+            // Camera off releases the capture device, so the camera light goes out; turning it on
+            // starts a fresh camera (and keyframe) through the path above. Control: -NearbyKeepCameraWhenOff 1.
+            camera?.stop(); camera = nil
         }
         pump()
     }
