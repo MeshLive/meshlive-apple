@@ -24,6 +24,7 @@ struct DesktopLifecycleSettings: View {
                               info: "Off by default. When on, MeshLive keeps Bluetooth, calls and live streams running with all windows closed while this Mac is awake. Use Window > Show MeshLive to return, or MeshLive > Quit to stop. Sleep can interrupt connections.",
                               identifier: "desktop-keep-running", isOn: $keepRunning)
         }
+        DesktopReachabilitySettingsRows()
     }
 }
 

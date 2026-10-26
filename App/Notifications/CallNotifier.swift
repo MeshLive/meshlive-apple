@@ -72,6 +72,9 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
         content.categoryIdentifier = CallAlertPolicy.categoryIdentifier
         content.sound = .default
         content.threadIdentifier = "calls"
+        #if os(macOS)
+        DesktopCallAlertLevel.apply(to: content) // Time Sensitive only with Apple's entitlement (Desktop/DesktopRingPanel.swift)
+        #endif
         center.add(UNNotificationRequest(identifier: Self.identifier, content: content, trigger: nil))
         posted = true
         AppLog.event("call_alerts", ["event": "posted", "voice": "\(call.offeredType == .voice)"])

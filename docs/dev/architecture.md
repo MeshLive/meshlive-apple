@@ -78,7 +78,10 @@ Cmd-Shift-V picks Video call.
   `DesktopConnectionTimer` in the common run-loop modes so menus, mouse tracking and modal panels cannot pause
   heartbeats.
 - **Lifecycle:** discovery and media keep running when the app is deactivated (there is no iOS-style background
-  path). Keep running with windows closed is optional and off by default. Quit ends local media and closes links;
+  path). Keep running with windows closed is optional and off by default. A menu bar item (on, can be hidden)
+  shows Reachable, Not reachable, In call or Live with Open MeshLive, Reachable for calls and Quit; Start at login,
+  App Nap activities and a background ring window are optional and off (see [switches](switches.md)). Quit ends
+  local media and closes links;
   sleep can interrupt them.
 - **Media:** Opus is built for macOS arm64 separately from the iOS XCFramework; VP9 uses
   `Vendor/VPX-macos.xcframework`. The camera picker accepts built-in and external cameras (not Continuity Camera),

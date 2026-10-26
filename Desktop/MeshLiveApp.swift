@@ -27,7 +27,10 @@ struct MeshLiveDesktopApp: App {
     @NSApplicationDelegateAdaptor(DesktopAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
     @StateObject private var navigation = DesktopNavigation()
+    @StateObject private var reachability = DesktopReachabilityMonitor()
     @State private var settingsPath: [DesktopDetailRoute] = []
+    /// Settings › Desktop › Show in menu bar (on by default; README explains why this one switch defaults on).
+    @AppStorage(DesktopReachabilitySettings.menuBarKey, store: DesktopPreview.preferences) private var showMenuBar = true
 
     init() {
         // This app has no document-opening command line. Keep DEBUG argument values out of AppKit file-open handling.
@@ -42,7 +45,11 @@ struct MeshLiveDesktopApp: App {
                 .defaultAppStorage(DesktopPreview.preferences)
                 .frame(minWidth: 800, minHeight: 560)
                 .preferredColorScheme(.dark)
-                .onAppear { appDelegate.model = model }
+                .onAppear {
+                    appDelegate.model = model
+                    reachability.openMain = { navigation.openMain?() }
+                    reachability.attach(model)
+                }
         }
         .defaultSize(width: 1000, height: 700)
         .windowResizability(.contentMinSize)
@@ -72,6 +79,12 @@ struct MeshLiveDesktopApp: App {
                 .defaultAppStorage(DesktopPreview.preferences)
                 .frame(minWidth: 600, idealWidth: 680, minHeight: 550, idealHeight: 700)
                 .preferredColorScheme(.dark)
+        }
+        MenuBarExtra(isInserted: $showMenuBar) {
+            DesktopMenuBarMenu(monitor: reachability, navigation: navigation)
+                .environmentObject(model)
+        } label: {
+            DesktopMenuBarLabel(state: reachability.state)
         }
     }
 }

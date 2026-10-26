@@ -380,4 +380,84 @@ final class DesktopScreensTests: XCTestCase {
         shot(app, "sidebar-from-nested-settings")
         app.terminate()
     }
+
+    private func switchValue(_ element: XCUIElement) -> Bool? { (element.value as? NSNumber)?.boolValue }
+
+    /// Each reachability switch flips, survives a relaunch and flips back (preview preferences only; Start at login
+    /// uses the preview stand-in, never the real Login Items). Unit tests cover the off-by-default values.
+    func testReachabilitySwitchesToggleAndPersistAcrossRelaunch() {
+        for key in ["desktop-menu-bar", "desktop-start-at-login", "desktop-ring-window-setting", "desktop-activity-media",
+                    "desktop-no-app-nap", "desktop-keep-awake"] {
+            var app = launch(["-NearbyScreen", "settings"])
+            var toggle = app.descendants(matching: .any).matching(identifier: key).firstMatch
+            XCTAssertTrue(reveal(toggle, in: app), key)
+            guard let before = switchValue(toggle) else { XCTFail(key + " has no value"); app.terminate(); continue }
+            toggle.click()
+            XCTAssertEqual(switchValue(toggle), !before, key)
+            if key == "desktop-keep-awake" { shot(app, "reachability-settings") }
+            app.terminate()
+            app = launch(["-NearbyScreen", "settings"])
+            toggle = app.descendants(matching: .any).matching(identifier: key).firstMatch
+            XCTAssertTrue(reveal(toggle, in: app), key)
+            XCTAssertEqual(switchValue(toggle), !before, key + " after relaunch")
+            toggle.click()
+            XCTAssertEqual(switchValue(toggle), before, key)
+            app.terminate()
+        }
+    }
+
+    func testMenuBarItemOffersOpenReachableAndQuit() {
+        let app = launch(["-desktopKeepRunningWithWindowClosed", "YES", "-desktopShowMenuBar", "YES"])
+        XCTAssertTrue(app.buttons["Go live"].waitForExistence(timeout: 10))
+        let item = app.statusItems.firstMatch
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        app.staticTexts["Live nearby"].click()
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertFalse(app.windows.firstMatch.exists)
+        item.click()
+        let menu = item.descendants(matching: .menuItem)
+        XCTAssertTrue(menu["Open MeshLive"].waitForExistence(timeout: 5))
+        XCTAssertTrue(menu["Reachable for calls"].exists)
+        XCTAssertTrue(menu["Quit MeshLive"].exists)
+        // The preview has no radio and counts as ready: the state follows Allow calls, flipped here and restored.
+        let reachable = menu["Reachable"].exists
+        XCTAssertTrue(reachable || menu["Not reachable"].exists)
+        XCTAssertEqual(item.title, reachable ? "MeshLive, Reachable" : "MeshLive, Not reachable")
+        menu["Reachable for calls"].click()
+        let flipped = reachable ? "MeshLive, Not reachable" : "MeshLive, Reachable"
+        wait(for: [expectation(for: NSPredicate(format: "title == %@", flipped), evaluatedWith: item)], timeout: 5)
+        item.click()
+        XCTAssertTrue(menu["Reachable for calls"].waitForExistence(timeout: 5))
+        menu["Reachable for calls"].click()
+        wait(for: [expectation(for: NSPredicate(format: "title == %@", reachable ? "MeshLive, Reachable" : "MeshLive, Not reachable"),
+                               evaluatedWith: item)], timeout: 5)
+        item.click()
+        XCTAssertTrue(menu["Open MeshLive"].waitForExistence(timeout: 5))
+        menu["Open MeshLive"].click()
+        XCTAssertTrue(app.buttons["Go live"].waitForExistence(timeout: 5))
+        item.click()
+        XCTAssertTrue(menu["Quit MeshLive"].waitForExistence(timeout: 5))
+        menu["Quit MeshLive"].click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+    }
+
+    /// Experimental ring window: hidden while MeshLive is frontmost (the call screen shows the call), shown while
+    /// another app is in front, and gone again when MeshLive comes forward. No real call, ringer or notification runs.
+    func testRingWindowAppearsOnlyBehindAnotherApp() {
+        let app = launch(["-NearbyScreen", "call-incoming-voice", "-experimentalDesktopRingWindow", "YES"])
+        XCTAssertTrue(app.buttons["Accept"].waitForExistence(timeout: 10))
+        let ring = app.descendants(matching: .any).matching(identifier: "desktop-ring-view").firstMatch
+        XCTAssertFalse(ring.exists)
+        XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
+        XCTAssertTrue(ring.waitForExistence(timeout: 5))
+        XCTAssertTrue(ring.buttons["Decline"].exists)
+        XCTAssertTrue(ring.buttons["Accept"].exists)
+        XCTAssertTrue(ring.staticTexts["Incoming voice call"].exists)
+        let attachment = XCTAttachment(screenshot: ring.screenshot())
+        attachment.name = "ring-window"; attachment.lifetime = .keepAlways; add(attachment)
+        app.activate()
+        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: ring)
+        wait(for: [gone], timeout: 5)
+        app.terminate()
+    }
 }

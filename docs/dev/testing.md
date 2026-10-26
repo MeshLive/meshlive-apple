@@ -203,6 +203,35 @@ termination, failure or transport closure. Quit and wipe stop the coordinator fi
 restart scanning. Streams, viewer requests, advertising and the iOS runtime are unchanged. Six coordinator tests
 cover these flows.
 
+### Reachability behind other apps
+
+The native app has a `MenuBarExtra` (Reachable, Not reachable, In call or Live, with Open MeshLive, a Reachable
+for calls switch and Quit), Start at login through `SMAppService.mainApp`, ProcessInfo activities for calls,
+live streams and reachability, and a ring window for calls that ring while another app is in front. Only the
+menu bar item is on by default; the other switches are off and listed in [switches](switches.md).
+Incoming-call notifications use the Time Sensitive level only when the signed app carries Apple's entitlement;
+ad-hoc builds keep Active.
+
+`DesktopReachabilityTests` checks the menu state (Live wins over a call, Allow calls and Bluetooth readiness
+decide Reachable), that the default settings hold no activity, the activity options for ringing, voice and
+video calls, live and live audio, watching and listening and relayed calls (never `.latencyCritical`; display
+sleep blocked only with video on screen), App Nap prevention without idle-sleep prevention while reachable
+unless Keep Mac awake is on, the holder's begin-before-end swap and release on stop, and that the ring window
+appears only when enabled, ringing and not frontmost. `DesktopLoginItemTests` uses an injected service: never
+registers on its own, no repeated register/unregister calls, approval pending stays on and is reported,
+failures leave the switch off with the reason.
+
+Native UI checks with DEBUG `-NearbyPreview` (preview preferences, no radio, media, Login Items or real
+calls): every reachability switch flips, persists across relaunch and is restored; the status item's menu
+offers Open MeshLive (reopens a closed window), Reachable for calls (the status title follows it) and Quit;
+the ring window is absent while MeshLive is frontmost, appears with Decline and Accept while Finder is
+frontmost, and disappears when MeshLive returns.
+
+Not verified: a real incoming call ringing behind another app, the notification permission prompt and Time
+Sensitive delivery, Start at login across a real logout/login with the ad-hoc build (macOS may require
+approval in Login Items), and whether the activities change call or reachability survival behind other apps,
+during idle sleep or on battery. These need a person at the Mac and a nearby phone.
+
 ### Hardware results (Release app, Mac with Android phones over GATT)
 
 These are short manual checks on one Mac, not a scored test suite.
