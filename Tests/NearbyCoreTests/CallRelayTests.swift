@@ -148,6 +148,48 @@ final class CallRelayTests: XCTestCase {
         XCTAssertEqual(c.callee.receivedAudioPackets, 1)
     }
 
+    /// Android's blocking copy loop: the relay stops parsing one hop's records while the other hop is behind, then
+    /// resumes once it drains, delivering everything in order; the held input is bounded.
+    func testARelayAppliesBackpressureAndResumesInOrder() throws {
+        let c = try chain(relays: 1)
+        try c.callee.accept(as: .voice); pump(c.pairs)
+        XCTAssertEqual(c.caller.state?.phase, .active)
+        let hop = c.hops[0], parent = try XCTUnwrap(hop.parent)
+        var resumable = 0
+        hop.onIngressResumable = { resumable += 1 }
+        let count = 40
+        for i in 0..<count { c.caller.sendAudio(presentationTimeUs: Int64(i) * 20_000, opus: Data([0xfc]) + Data(repeating: UInt8(i), count: 8_000)) }
+        // The callee's hop is stalled: only the caller -> relay direction moves.
+        _ = move(c.caller, parent, now: 0)
+        XCTAssertTrue(parent.ingressHeld, "the relay stopped parsing the caller's records")
+        XCTAssertTrue(hop.child.isBehind)
+        XCTAssertLessThan(hop.child.orderedBytes, CallRelayLink.highWaterBytes + 9_000, "at most one record beyond the high-water mark")
+        XCTAssertEqual(parent.phase, .open)
+        for _ in 0..<100 where parent.ingressHeld {
+            _ = move(hop.child, c.callee, now: 0)
+            XCTAssertGreaterThan(resumable, 0, "draining below the low-water mark asks the app to resume")
+            resumable = 0
+            hop.resumeIngress(now: 0)
+        }
+        pump(c.pairs)
+        XCTAssertFalse(parent.ingressHeld)
+        let times = c.calleeEvents().compactMap { event -> Int64? in if case .remoteAudio(let p) = event { return p.presentationTimeUs }; return nil }
+        XCTAssertEqual(times, (0..<count).map { Int64($0) * 20_000 }, "every record arrives, in order")
+    }
+
+    func testARelayHopThatNeverDrainsEndsTheRelayInsteadOfBufferingWithoutLimit() throws {
+        let c = try chain(relays: 1)
+        try c.callee.accept(as: .voice); pump(c.pairs)
+        let hop = c.hops[0], parent = try XCTUnwrap(hop.parent)
+        for i in 0..<100 {
+            c.caller.sendAudio(presentationTimeUs: Int64(i) * 20_000, opus: Data([0xfc]) + Data(repeating: UInt8(i), count: 8_000))
+            _ = move(c.caller, parent, now: 0)
+        }
+        XCTAssertEqual(parent.phase, .closed)
+        XCTAssertLessThanOrEqual(hop.child.orderedBytes, CallRelayLink.highWaterBytes + 9_000)
+        if case .closed = hop.state {} else { XCTFail("the relay closes: \(hop.state)") }
+    }
+
     func testWrongChildEndsTheHop() throws {
         let impostor = CallEngine(role: .callee, transport: .gatt, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9)
         try impostor.start(now: 0)

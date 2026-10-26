@@ -28,8 +28,14 @@ extension MeshLink {
 }
 #endif
 
+/// A link whose reads can stop while the engine holds input (call relay backpressure). An LE credit-based channel
+/// then stops granting credits, which slows the sender; a GATT peer cannot be slowed (the engine bounds what it holds).
+protocol PausableMeshLink: MeshLink {
+    var readingPaused: Bool { get set }
+}
+
 /// LE credit-based channel: raw stream bytes both ways (no extra framing on Android CoC).
-final class L2CAPLink: NSObject, MeshLink, StreamDelegate {
+final class L2CAPLink: NSObject, PausableMeshLink, StreamDelegate {
     let transport = MeshTransport.l2cap
     let label: String
     var onBytes: ((Data) -> Void)?
@@ -42,6 +48,13 @@ final class L2CAPLink: NSObject, MeshLink, StreamDelegate {
     /// Keeps the owning connection (central side) alive for the channel's lifetime.
     var onRelease: (() -> Void)?
     var queuedBytes: Int { writer.queuedBytes }
+    var readingPaused = false {
+        didSet {
+            guard oldValue, !readingPaused else { return }
+            // Bytes that arrived while paused raised no new event: read them now, outside the caller's stack.
+            DispatchQueue.main.async { [weak self] in self?.readAvailable() }
+        }
+    }
 
     init(channel: CBL2CAPChannel, label: String) {
         self.channel = channel; self.label = label
@@ -68,17 +81,21 @@ final class L2CAPLink: NSObject, MeshLink, StreamDelegate {
         guard !closed else { return }
         switch eventCode {
         case .hasBytesAvailable:
-            while !closed && channel.inputStream.hasBytesAvailable {
-                let count = channel.inputStream.read(&readBuffer, maxLength: readBuffer.count)
-                if count < 0 { fail(channel.inputStream.streamError?.localizedDescription ?? "L2CAP read error"); return }
-                if count == 0 { fail("L2CAP channel closed by the peer"); return }
-                onBytes?(Data(readBuffer[0..<count]))
-            }
+            readAvailable()
         case .hasSpaceAvailable:
             do { try drain(); onWritable?() } catch { fail("L2CAP write failed") }
         case .errorOccurred: fail(aStream.streamError?.localizedDescription ?? "L2CAP stream error")
         case .endEncountered: fail("L2CAP channel closed by the peer")
         default: break
+        }
+    }
+
+    private func readAvailable() {
+        while !closed && !readingPaused && channel.inputStream.hasBytesAvailable {
+            let count = channel.inputStream.read(&readBuffer, maxLength: readBuffer.count)
+            if count < 0 { fail(channel.inputStream.streamError?.localizedDescription ?? "L2CAP read error"); return }
+            if count == 0 { fail("L2CAP channel closed by the peer"); return }
+            onBytes?(Data(readBuffer[0..<count]))
         }
     }
 
@@ -301,6 +318,10 @@ final class ConnectionDriver {
         #if os(macOS)
         guard !releaseFailedEngine() else { return }
         #endif
+        // Stop reading while the engine holds input (call relay backpressure); resume once it parsed it.
+        if let pausable = link as? PausableMeshLink, pausable.readingPaused != engine.ingressHeld {
+            pausable.readingPaused = engine.ingressHeld
+        }
         while link.queuedBytes < Self.lowWater, let bytes = engine.nextOutgoing(now: Self.now) {
             link.send(bytes)
             #if os(macOS)

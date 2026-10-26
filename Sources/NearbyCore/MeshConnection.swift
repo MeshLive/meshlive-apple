@@ -188,20 +188,47 @@ open class MeshConnection {
         if let hello = try link.start() { enqueue(.raw(hello), .control) }
     }
 
+    /// Ingress backpressure: while true, no further record is parsed and received bytes are held (bounded by
+    /// `maxHeldIngressBytes`) until `resumeIngress`. A call relay link pauses while the other hop is behind.
+    open var ingressPaused: Bool { false }
+    /// Received bytes not yet handed to the record parser. Exceeding it while paused ends the connection.
+    public var maxHeldIngressBytes = Int.max
+    private var heldIngress = Data()
+    private var ingressStalled = false
+    /// True while received input waits for `resumeIngress` (the transport can stop reading).
+    public var ingressHeld: Bool { ingressStalled || !heldIngress.isEmpty }
+
     /// Bytes from the transport, in order. Errors are fatal for the connection.
     public func receive(_ data: Data, now: TimeInterval) {
         guard phase != .closed else { return }
         self.now = now
         receivedBytes += UInt64(data.count)
         lastReceiveAt = now
+        heldIngress.append(data)
+        guard heldIngress.count <= maxHeldIngressBytes else {
+            fail("The next hop fell too far behind (\(heldIngress.count) bytes waiting)")
+            return
+        }
+        processIngress()
+    }
+
+    /// Parses held input once `ingressPaused` is false again.
+    public func resumeIngress(now: TimeInterval) {
+        guard phase != .closed, ingressHeld, !ingressPaused else { return }
+        self.now = now
+        processIngress()
+    }
+
+    private func processIngress() {
         do {
-            var pending = data
             // Handle each record before parsing the next: a verified header can change the read cap even
             // when the transport coalesced the header and the first large audio batch into one read.
             while phase != .closed {
+                if ingressPaused { ingressStalled = true; return }
+                let pending = heldIngress
+                heldIngress = Data()
                 let outputs = try link.receive(pending, recordLimit: 1)
                 guard !outputs.isEmpty else { break }
-                pending = Data()
                 for output in outputs {
                     switch output {
                     case .send(let bytes):
@@ -219,6 +246,7 @@ open class MeshConnection {
                     }
                 }
             }
+            ingressStalled = false
         } catch {
             fail(describe(error))
         }

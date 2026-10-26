@@ -69,12 +69,29 @@ public final class CallRelayLink: MeshConnection {
     private var ordered: [(type: SecureRecordType, payload: Data)] = []
     public private(set) var copiedRecords = 0
 
+    // Backpressure, as Android's blocking copy loop (one record in flight per direction): the other hop stops parsing
+    // records while this link has `highWaterBytes` of copied records queued, and resumes below `lowWaterBytes`.
+    public static let highWaterBytes = 64 * 1024
+    public static let lowWaterBytes = 16 * 1024
+    /// Input held while paused before the relay gives up on a hop that never drains (a GATT peer cannot be slowed).
+    public static let maxHeldBytes = 512 * 1024
+    public private(set) var orderedBytes = 0
+    public var isBehind: Bool { orderedBytes >= Self.highWaterBytes }
+    /// True while the hop this link's records are copied to is behind (set by `CallRelayHop`).
+    public var isDestinationBehind: (() -> Bool)?
+    /// Called once the queue drained below `lowWaterBytes` after being behind. It runs inside the sealing path: resume
+    /// the other hop asynchronously (`CallRelayHop.resumeIngress`), never from this callback directly.
+    public var onDrained: (() -> Void)?
+    private var wasBehind = false
+    public override var ingressPaused: Bool { isDestinationBehind?() ?? false }
+
     /// - Parameter bmh3: EXPERIMENTAL BMH3 on this hop (Android: a relay is an R_FIRST responder toward its parent and an
     ///   initiator toward its child, always with its real key; nil = BMH2 only).
     public init(role: HandshakeRole, transport: MeshTransport, identity: SigningIdentity, bmh3: Bmh3CallSettings? = nil) {
         let caps = NodeCapabilities(transportMask: transport.capabilityBit | NodeCapabilities.transportCallRelay, encodeCodecMask: 0, decodeCodecMask: 0,
                                     maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 1)
         super.init(role: role, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: caps, bmh3: bmh3)
+        maxHeldIngressBytes = Self.maxHeldBytes
     }
 
     public override var linkOnly: Bool { true }
@@ -93,19 +110,32 @@ public final class CallRelayLink: MeshConnection {
     }
 
     /// Copies one endpoint record unchanged (ordered with every other copied record).
-    public func copy(_ record: SecureRecord) { ordered.append((record.type, record.payload)); copiedRecords += 1; onRecordCopied?() }
+    public func copy(_ record: SecureRecord) {
+        ordered.append((record.type, record.payload)); orderedBytes += record.payload.count; copiedRecords += 1
+        if isBehind { wasBehind = true }
+        onRecordCopied?()
+    }
     /// Fresh version-1 liveness for this hop (replaces the endpoint's heartbeat). It keeps its place among the
     /// copied records: an endpoint still in its handshake accepts only the handshake reply first (a heartbeat
     /// overtaking the callee's reply ended the caller's handshake in the first loopback).
-    public func sendLiveness() { ordered.append((.linkHeartbeat, LinkHeartbeat.version1)); onRecordCopied?() }
+    public func sendLiveness() {
+        ordered.append((.linkHeartbeat, LinkHeartbeat.version1)); orderedBytes += LinkHeartbeat.version1.count
+        onRecordCopied?()
+    }
 
     public override func nextOrderedOutgoing(now: TimeInterval) throws -> Data? {
         guard !ordered.isEmpty else { return nil }
         let (type, payload) = ordered.removeFirst()
-        return try link.seal(type, payload)
+        orderedBytes -= payload.count
+        let sealed = try link.seal(type, payload)
+        if wasBehind, orderedBytes < Self.lowWaterBytes { wasBehind = false; onDrained?() }
+        return sealed
     }
     public override var hasOrderedOutput: Bool { !ordered.isEmpty }
-    public override func didClose(reason: String, error: Bool) { if error { ordered.removeAll() }; onClosed?(reason, error) }
+    public override func didClose(reason: String, error: Bool) {
+        if error { ordered.removeAll(); orderedBytes = 0 }
+        onClosed?(reason, error)
+    }
 }
 
 /// A relay hop: one child (downstream, connected first) and one parent. Single use.
@@ -156,6 +186,8 @@ public final class CallRelayHop {
             guard let parent, parent.phase == .open else { return }   // nothing to copy to yet
             if record.type == .linkHeartbeat { parent.sendLiveness() } else { parent.copy(record) }
         }
+        child.isDestinationBehind = { [unowned self] in parent?.isBehind ?? false }
+        child.onDrained = { [unowned self] in onIngressResumable?() }
         child.onClosed = { [unowned self] reason, _ in close("Child: \(reason)") }
     }
 
@@ -183,8 +215,18 @@ public final class CallRelayHop {
             if record.type == .linkHeartbeat { child.sendLiveness() } else { child.copy(record) }
         }
         link.onClosed = { [unowned self] reason, _ in close("Parent: \(reason)") }
+        link.isDestinationBehind = { [unowned self] in child.isBehind }
+        link.onDrained = { [unowned self] in onIngressResumable?() }
         parent = link
         return link
+    }
+
+    /// A hop drained after falling behind: the app calls `resumeIngress` asynchronously (outside the sealing path).
+    public var onIngressResumable: (() -> Void)?
+
+    /// Parses input held on either hop while the other was behind.
+    public func resumeIngress(now: TimeInterval) {
+        child.resumeIngress(now: now); parent?.resumeIngress(now: now)
     }
 
     /// Parent wait bound (the endpoints' own 8 s liveness ends a stalled relayed call).

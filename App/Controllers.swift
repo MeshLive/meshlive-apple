@@ -1111,6 +1111,14 @@ final class CallRelayController: ObservableObject {
         hop = CallRelayHop(identity: identity, transport: transport, childOffer: childOffer,
                            hiddenIdentities: model.hiddenIdentities, pins: model.bmh3Pins)
         hop.onStateChange = { [weak self] s in self?.stateChanged(s) }
+        // Backpressure: a hop that drained lets the other one parse again, outside the sealing path that reported it.
+        hop.onIngressResumable = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, !self.done else { return }
+                self.hop.resumeIngress(now: ConnectionDriver.now)
+                self.childDriver?.pump(); self.parentDriver?.pump()
+            }
+        }
     }
 
     var awaitingParent: Bool { hop.state == .waitingForParent && hop.parent == nil }
