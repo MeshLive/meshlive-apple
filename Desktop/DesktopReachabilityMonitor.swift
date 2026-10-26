@@ -19,6 +19,7 @@ final class DesktopReachabilityMonitor: ObservableObject {
     private var notificationObservers: [NSObjectProtocol] = []
     private var fallback: Timer?
     private var scheduled = false
+    private var lastWindowOnly = false
     private let activity = DesktopActivityHolder()
     private let ringPanel = DesktopRingPanel()
 
@@ -28,7 +29,9 @@ final class DesktopReachabilityMonitor: ObservableObject {
         modelObserver = model.objectWillChange.sink { [weak self] _ in self?.schedule() }
         let center = NotificationCenter.default
         for name in [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
-                     UserDefaults.didChangeNotification] {
+                     UserDefaults.didChangeNotification, NSApplication.didHideNotification, NSApplication.didUnhideNotification,
+                     NSWindow.willCloseNotification, NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+                     NSWindow.didBecomeKeyNotification] {
             notificationObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.schedule() })
         }
         // Bluetooth power changes reach AppModel through the radio callbacks; this slow re-check covers a state that
@@ -50,6 +53,11 @@ final class DesktopReachabilityMonitor: ObservableObject {
     func refresh() {
         guard let model else { return }
         observeChildren(of: model)
+        // Window-only advertising: a titled MeshLive window is visible and not minimised, and the app is not hidden.
+        let windowOpen = !NSApp.isHidden && NSApp.windows.contains { $0.isVisible && !$0.isMiniaturized && $0.styleMask.contains(.titled) && !($0 is NSPanel) }
+        if model.desktopWindowOpen != windowOpen { model.desktopWindowOpen = windowOpen }
+        let windowOnly = DesktopPreview.preferences.bool(forKey: DesktopReachabilitySettings.advertiseOnlyWithWindowKey)
+        if windowOnly != lastWindowOnly { lastWindowOnly = windowOnly; model.refreshAdvertising() }
         let presence = Self.presence(of: model)
         let settings = DesktopReachabilitySettings(defaults: DesktopPreview.preferences)
         let newState = DesktopReachabilityPolicy.state(presence)
@@ -172,6 +180,7 @@ struct DesktopReachabilitySettingsRows: View {
     @AppStorage(DesktopReachabilitySettings.activityDuringMediaKey) private var activityDuringMedia = false
     @AppStorage(DesktopReachabilitySettings.noAppNapWhileReachableKey) private var noAppNap = false
     @AppStorage(DesktopReachabilitySettings.keepAwakeWhileReachableKey) private var keepAwake = false
+    @AppStorage(DesktopReachabilitySettings.advertiseOnlyWithWindowKey) private var advertiseOnlyWithWindow = false
     @ObservedObject private var login = DesktopLoginItems.shared
 
     var body: some View {
@@ -200,6 +209,10 @@ struct DesktopReachabilitySettingsRows: View {
             SettingsToggleRow(icon: "sun.max", title: "Keep Mac awake while reachable",
                               info: "Off by default. Prevents idle sleep while MeshLive is reachable for calls, so nearby phones can still reach this Mac. Uses more battery. Closing the lid still puts the Mac to sleep.",
                               identifier: "desktop-keep-awake", isOn: $keepAwake)
+            CardDivider()
+            SettingsToggleRow(icon: "macwindow", title: "Reachable only while the window is open (experimental)",
+                              info: "Off by default. This Mac announces that it can take calls only while a MeshLive window is open, not when it is closed, minimised or hidden. macOS always uses this Mac's fixed Bluetooth address, so shorter announcing makes it harder to recognise over time. Calls and live streams already running are not affected.",
+                              identifier: "desktop-advertise-with-window", isOn: $advertiseOnlyWithWindow)
         }
         if login.item.state.needsApproval {
             CardNote("Start at login is waiting for your approval in System Settings › General › Login Items.")

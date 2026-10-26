@@ -56,6 +56,9 @@ public struct DesktopReachabilitySettings: Equatable {
     public static let noAppNapWhileReachableKey = "experimentalDesktopNoAppNapWhileReachable"
     public static let keepAwakeWhileReachableKey = "desktopKeepAwakeWhileReachable"
     public static let ringWindowKey = "experimentalDesktopRingWindow"
+    /// EXPERIMENTAL, off: the call offer is advertised only while a MeshLive window is open (not closed, minimised or
+    /// hidden), so the Mac's fixed Bluetooth address is on air for shorter windows.
+    public static let advertiseOnlyWithWindowKey = "experimentalDesktopAdvertiseOnlyWithWindow"
 
     public var activityDuringMedia = false
     public var noAppNapWhileReachable = false

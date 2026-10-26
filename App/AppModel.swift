@@ -569,6 +569,17 @@ final class AppModel: ObservableObject {
 
     // MARK: Advertising (one kind at a time)
 
+    #if os(macOS)
+    /// A MeshLive window is visible (set by the reachability monitor); see the window-only advertising switch.
+    var desktopWindowOpen = true {
+        didSet {
+            guard desktopWindowOpen != oldValue else { return }
+            AppLog.event("desktop_window", ["open": "\(desktopWindowOpen)"])
+            refreshAdvertising()
+        }
+    }
+    #endif
+
     func refreshAdvertising() {
         guard !DesktopPreview.enabled, let identity else { return }
         #if os(macOS)
@@ -613,6 +624,11 @@ final class AppModel: ObservableObject {
             }
         }
         #if os(macOS)
+        if desktopCallPresence != nil, !desktopWindowOpen,
+           DesktopPreview.preferences.bool(forKey: DesktopReachabilitySettings.advertiseOnlyWithWindowKey) {
+            // Experimental window-only advertising: no idle call offer while every MeshLive window is closed.
+            announcement = nil; desktopCallPresence = nil
+        }
         desktopAdvertising.advertise(announcement, callPresence: desktopCallPresence)
         #else
         if boundarySilenceUntil != nil, announcement?.rotating == true || announcement?.isPrivateCallOffer == true { return }

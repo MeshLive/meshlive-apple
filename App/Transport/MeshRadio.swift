@@ -217,6 +217,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     /// Advertises one announcement as the compact UUID (foreground PDU) plus a local name of at most 8 bytes (R7).
     func advertise(_ announcement: DiscoveryAnnouncement?, name: String) {
         guard let announcement, let uuid = try? CompactAnnouncement.encode(announcement) else {
+            if advertisingUUID != nil { AppLog.event("advertise", ["kind": "none"]) }
             wantedAdvertisement = nil; peripheralManager?.stopAdvertising(); advertisingUUID = nil; return
         }
         let short = MeshRadio.shortName(name)
