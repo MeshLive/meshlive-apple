@@ -264,8 +264,10 @@ final class CallAudio {
             engine.disconnectNodeOutput(player)
             engine.connect(player, to: engine.mainMixerNode, format: format48)
             if wantCapture { try installTap(on: engine, voiceProcessing: voiceProcessing) }
+            let began = ProcessInfo.processInfo.systemUptime
             engine.prepare()
             try engine.start()
+            AppLog.event("audio_engine_start", ["stage": "resume", "ms": "\(Int((ProcessInfo.processInfo.systemUptime - began) * 1000))", "running": "\(engine.isRunning)"])
             guard engine.isRunning else { throw RadioError.setup("Audio engine did not restart") }
             capturing = wantCapture
             startPlayback(player)
