@@ -113,7 +113,7 @@ final class Automation {
     private func audioSelfTest(run: Int, seconds: Double) {
         let audio = CallAudio(bitrate: 24_000, route: .earpiece)
         // With -callerMicPrewarm YES the engine is warmed 2 s before start, as at outgoingRinging.
-        if UserDefaults.standard.bool(forKey: "callerMicPrewarm") {
+        if AppSettings.labSwitch("callerMicPrewarm", shipped: false) {
             audio.prewarm()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.audioSelfTestStart(audio, run: run, seconds: seconds) }
             return

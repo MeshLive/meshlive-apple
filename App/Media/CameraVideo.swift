@@ -21,7 +21,7 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
     private var encoder: VP9Encoder?
     private var forceKeyFrame = true
     /// First-frame check (LeadingBlankFrames); dropping is Experimental, `-dropLeadingBlankFrames YES`.
-    private var blankCheck = LeadingBlankFrames(dropBlank: UserDefaults.standard.bool(forKey: "dropLeadingBlankFrames"))
+    private var blankCheck = LeadingBlankFrames(dropBlank: AppSettings.labSwitch("dropLeadingBlankFrames", shipped: false))
     private var lastFrameUptime: TimeInterval = 0
     private(set) var width: Int, height: Int, fps: Int, bitrateKbps: Int
     private(set) var front: Bool

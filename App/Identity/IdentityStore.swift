@@ -303,7 +303,7 @@ struct AppSettings {
     /// Generated nearby names (Android names-v2), iPhone and Mac, on by default as on Android (user decision
     /// 2026-10-27); the switch in Settings › Privacy turns it off (the key keeps its Mac name).
     static var desktopGeneratedNames: Bool {
-        get { d.object(forKey: "experimentalDesktopGeneratedNames") as? Bool ?? true }
+        get { flag("experimentalDesktopGeneratedNames", default: true) }
         set { d.set(newValue, forKey: "experimentalDesktopGeneratedNames") }
     }
     static var displayName: String {
@@ -315,7 +315,7 @@ struct AppSettings {
         set { d.set(newValue.rawValue, forKey: "transport") }
     }
     static var availableForCalls: Bool {
-        get { d.object(forKey: "availableForCalls") as? Bool ?? true }
+        get { flag("availableForCalls", default: true) }
         set { d.set(newValue, forKey: "availableForCalls") }
     }
     static var mismatchPolicyWarnOnly: Bool {
@@ -345,49 +345,52 @@ struct AppSettings {
         get { d.bool(forKey: "experimentalRelayedCalls") }
         set { d.set(newValue, forKey: "experimentalRelayedCalls") }
     }
+    /// `LabSwitch.flag` and `LabSwitch.read` in this app's preferences (isolated under the Mac preview).
+    static func flag(_ key: String, default value: Bool, in store: UserDefaults = d) -> Bool { LabSwitch.flag(key, default: value, in: store) }
+    static func labSwitch(_ key: String, shipped: Bool) -> Bool { LabSwitch.read(key, shipped: shipped, in: d) }
     /// Relayed calls from unverified strangers ring (Android `test_relayed_stranger_calls`, on). Control arm for tests
     /// only: launch argument `-relayedStrangerCalls NO` (relayed calls from contacts only); no Settings switch.
-    static var relayedStrangerCalls: Bool { d.object(forKey: "relayedStrangerCalls") as? Bool ?? true }
-    /// Amendment CP pseudonymous relay edges (Android `test_relayed_pseudonymous_edges`, on). Control arm for tests only:
-    /// launch argument `-relayedPseudonymousEdges NO`; no Settings switch.
+    static var relayedStrangerCalls: Bool { labSwitch("relayedStrangerCalls", shipped: true) }
     /// Relayed calls sub-switch "Let phones nearby relay calls to me" (Android `relayed_calls_consent`, on within the
     /// experiment): the consent bit on this device's call offer, and whether a relayed call may ring here.
     static var relayedCallsConsent: Bool {
-        get { d.object(forKey: "relayedCallsConsent") as? Bool ?? true }
+        get { flag("relayedCallsConsent", default: true) }
         set { d.set(newValue, forKey: "relayedCallsConsent") }
     }
     /// Relayed calls sub-switch "Help calls nearby" (Android `relayed_calls_help`, preselected on within the experiment):
     /// this device may pass other people's calls on while it is idle.
     static var relayedCallsHelp: Bool {
-        get { d.object(forKey: "relayedCallsHelp") as? Bool ?? true }
+        get { flag("relayedCallsHelp", default: true) }
         set { d.set(newValue, forKey: "relayedCallsHelp") }
     }
     /// EXPERIMENTAL Design OR (Android DEBUG `test_relayed_on_demand`, off): while helping, the call listener signs
     /// RELAY_SEEK and answers searches (SEEK) from what this device scans. Launch argument `-relayedOnDemand YES`.
-    static var relayedOnDemand: Bool { d.bool(forKey: "relayedOnDemand") }
+    static var relayedOnDemand: Bool { labSwitch("relayedOnDemand", shipped: false) }
     /// DEBUG lab mask (Android `test_relayed_calls_no_direct`, off): the reach tables ignore every target's own offer,
     /// as if no target were in direct range (needed for a co-located chain test). Launch argument `-relayedNoDirect YES`.
-    static var relayedNoDirect: Bool { d.bool(forKey: "relayedNoDirect") }
-    static var relayedPseudonymousEdges: Bool { d.object(forKey: "relayedPseudonymousEdges") as? Bool ?? true }
+    static var relayedNoDirect: Bool { labSwitch("relayedNoDirect", shipped: false) }
+    /// Amendment CP pseudonymous relay edges (Android `test_relayed_pseudonymous_edges`, on). Control arm for tests only:
+    /// launch argument `-relayedPseudonymousEdges NO`; no Settings switch.
+    static var relayedPseudonymousEdges: Bool { labSwitch("relayedPseudonymousEdges", shipped: true) }
     /// Stream link pacing (Android LinkPacer, on) and the on-time seed raise (on since 2026-10-16). Control arms for
     /// tests only: launch arguments `-linkPacing NO`, `-onTimeSeedRaise NO`; there is no Settings switch.
-    static var linkPacing: Bool { d.object(forKey: "linkPacing") as? Bool ?? true }
-    static var onTimeSeedRaise: Bool { d.object(forKey: "onTimeSeedRaise") as? Bool ?? true }
+    static var linkPacing: Bool { labSwitch("linkPacing", shipped: true) }
+    static var onTimeSeedRaise: Bool { labSwitch("onTimeSeedRaise", shipped: true) }
     /// Viewer on-time reports (Android test_on_time_reports, on); control arm `-onTimeReports NO`.
-    static var onTimeReports: Bool { d.object(forKey: "onTimeReports") as? Bool ?? true }
+    static var onTimeReports: Bool { labSwitch("onTimeReports", shipped: true) }
     /// Call and stream audio: when the output starts, audio that arrived while it was still starting is dropped down
     /// to the playout target, instead of staying as latency for the whole call (on). Control arm `-audioStartTrim NO`.
-    static var audioStartTrim: Bool { d.object(forKey: "audioStartTrim") as? Bool ?? true }
+    static var audioStartTrim: Bool { labSwitch("audioStartTrim", shipped: true) }
     /// Failed live joins say "Couldn't join <title>." with Try again and retry once by themselves when the stream is
     /// listed again (Android `test_stream_join_retry`, on). Control arm `-streamJoinRetry NO`.
-    static var streamJoinRetry: Bool { d.object(forKey: "streamJoinRetry") as? Bool ?? true }
+    static var streamJoinRetry: Bool { labSwitch("streamJoinRetry", shipped: true) }
     /// Audio-only live streams (Android `audio_live`, on for everyone since 2026-10-17 with no Settings row). Off, Go
     /// live offers no audio-only stream, audio-only offers are not listed and a `BTL1` header is refused as unsupported.
     /// Control arm for tests only: launch argument `-audioLive NO`.
-    static var audioLive: Bool { d.object(forKey: "audioLive") as? Bool ?? true }
+    static var audioLive: Bool { labSwitch("audioLive", shipped: true) }
     /// Advanced "Relay: slow viewers skip to keyframes" (Android relay_child_media_age, default ON).
     static var relayChildMediaAge: Bool {
-        get { d.object(forKey: "relayChildMediaAge") as? Bool ?? true }
+        get { flag("relayChildMediaAge", default: true) }
         set { d.set(newValue, forKey: "relayChildMediaAge") }
     }
     /// Quick wipe gesture (Android `panic_wipe_gesture`): off by default, so a stray triple-tap erases nothing.
@@ -408,7 +411,7 @@ struct AppSettings {
     }
     /// Call resolution ladder (default on for user calls, like Android).
     static var resolutionLadder: Bool {
-        get { d.object(forKey: "resolutionLadder") as? Bool ?? true }
+        get { flag("resolutionLadder", default: true) }
         set { d.set(newValue, forKey: "resolutionLadder") }
     }
     /// EXPERIMENTAL call audio FEC (off; Android test_call_native_opus): in-band FEC + recovery.

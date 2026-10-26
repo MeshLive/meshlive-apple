@@ -17,7 +17,7 @@ final class CrashReports: NSObject, ObservableObject, MXMetricManagerSubscriber 
     @Published private(set) var pending: String?
     private var started = false
 
-    var enabled: Bool { defaults.object(forKey: "crashReports") as? Bool ?? true }
+    var enabled: Bool { AppSettings.flag("crashReports", default: true, in: defaults) }
 
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("crash-reports", isDirectory: true)

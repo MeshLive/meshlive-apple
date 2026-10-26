@@ -34,12 +34,12 @@ extension MeshLink {
 /// GATT lost-chunk fail-fast (Android ChunkGapPolicy, `test_gatt_gap_fast_fail`, on): a gap held 1 s or behind 128
 /// later chunks ends the link with its reason. Control arm for tests only: launch argument `-gattGapFastFail NO`.
 enum GattLinkSettings {
-    static var gapFastFail: Bool { UserDefaults.standard.object(forKey: "gattGapFastFail") as? Bool ?? true }
+    static var gapFastFail: Bool { LabSwitch.read("gattGapFastFail", shipped: true) }
     /// EXPERIMENTAL GR1 lost-chunk recovery (Android `test_gatt_chunk_recovery`, off): `-gattChunkRecovery YES`.
-    static var chunkRecovery: Bool { UserDefaults.standard.bool(forKey: "gattChunkRecovery") }
+    static var chunkRecovery: Bool { LabSwitch.read("gattChunkRecovery", shipped: false) }
     /// EXPERIMENTAL aligned values (Android `test_gatt_aligned_writes`, off): ATT values of whole 251-octet LE data PDUs
     /// (495 instead of 512). `-gattAlignedValues YES`; read when a link opens.
-    static var alignedValues: Bool { UserDefaults.standard.bool(forKey: "gattAlignedValues") }
+    static var alignedValues: Bool { LabSwitch.read("gattAlignedValues", shipped: false) }
 }
 
 /// GR1 for one GATT link: the recovery object, its 50 ms timer, and the shared receive/timer steps.
@@ -440,7 +440,7 @@ final class ConnectionDriver {
         lastTickAt = Self.now
         timer = DesktopConnectionTimer.schedule(tick: tick)
         #else
-        if UserDefaults.standard.bool(forKey: "NearbyDefaultModeLinkTimer") {
+        if LabSwitch.read("NearbyDefaultModeLinkTimer", shipped: false) {
             // Control arm: the old default-mode timer, which pauses while a scroll or held control tracks touches.
             timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true, block: tick)
         } else {

@@ -307,6 +307,15 @@ final class DesktopScreensTests: XCTestCase {
         app.terminate()
     }
 
+    /// A launch argument arrives as the string "NO"; the documented control arm must still turn a default-on switch off.
+    func testLaunchArgumentNoTurnsOffADefaultOnSwitch() {
+        let app = launch(["-NearbyScreen", "privacy", "-experimentalDesktopGeneratedNames", "NO"])
+        let toggle = app.descendants(matching: .any).matching(identifier: "desktop-generated-names").firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual((toggle.value as? NSNumber)?.boolValue, false)
+        app.terminate()
+    }
+
     func testAndroidCompatibilityCanBeEnabledAndDisabledAcrossRelaunch() {
         let key = "desktop-android-compatibility"
         var app = launch(["-NearbyScreen", "experiments", "-experimentalDesktopAndroidCompatibility", "NO"])

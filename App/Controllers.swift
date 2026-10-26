@@ -210,9 +210,9 @@ final class CallController: ObservableObject, Identifiable {
         relayed = relayHops > 0
         engine.acceptRelayedCalls = model.relayedCalls && model.relayedCallsConsent
         // Android connection review A3: 15 s (relayed 30 s) from hop authentication to Ringing; `-callerAnswerDeadline NO`.
-        engine.callerAnswerDeadline = UserDefaults.standard.object(forKey: "callerAnswerDeadline") as? Bool ?? true
+        engine.callerAnswerDeadline = AppSettings.labSwitch("callerAnswerDeadline", shipped: true)
         // EXPERIMENTAL overhead trim (Android test_call_audio_coalesce, off): `-callAudioCoalesce YES`.
-        engine.queues.coalesceAudio = UserDefaults.standard.bool(forKey: "callAudioCoalesce")
+        engine.queues.coalesceAudio = AppSettings.labSwitch("callAudioCoalesce", shipped: false)
         engine.acceptRelayedStrangerCalls = AppSettings.relayedStrangerCalls
         phaseText = role == .caller ? "Calling…" : "Connecting…"
     }
@@ -431,7 +431,7 @@ final class CallController: ObservableObject, Identifiable {
     private var prewarmedAudio: CallAudio?
 
     private func prewarmCallerAudio() {
-        guard role == .caller, prewarmedAudio == nil, audio == nil, UserDefaults.standard.bool(forKey: "callerMicPrewarm") else { return }
+        guard role == .caller, prewarmedAudio == nil, audio == nil, AppSettings.labSwitch("callerMicPrewarm", shipped: false) else { return }
         let audio = CallAudio(bitrate: 24_000, route: speaker ? .speaker : .earpiece, fec: AppSettings.callAudioFec)
         audio.prewarm()
         prewarmedAudio = audio
@@ -569,7 +569,7 @@ final class CallController: ObservableObject, Identifiable {
         engine.setCameraEnabled(cameraOn)
         if cameraOn {
             if camera == nil, let header = engine.localHeader { startCamera(header: header) } else { camera?.requestKeyFrame() }
-        } else if !UserDefaults.standard.bool(forKey: "NearbyKeepCameraWhenOff") {
+        } else if !AppSettings.labSwitch("NearbyKeepCameraWhenOff", shipped: false) {
             // Camera off releases the capture device, so the camera light goes out; turning it on
             // starts a fresh camera (and keyframe) through the path above. Control: -NearbyKeepCameraWhenOff 1.
             camera?.stop(); camera = nil
@@ -803,7 +803,7 @@ final class WatchController: ObservableObject {
     /// ends the join: it is dropped and the viewer waits again within the same deadline. `-watchKeepWaiting NO` is the
     /// control arm.
     private func linkFinished(_ reason: String) {
-        let keepWaiting = UserDefaults.standard.object(forKey: "watchKeepWaiting") as? Bool ?? true
+        let keepWaiting = AppSettings.labSwitch("watchKeepWaiting", shipped: true)
         let left = joinDeadline - ProcessInfo.processInfo.systemUptime
         if StreamJoinWait.keepWaiting(enabled: keepWaiting, hopAuthenticated: hopAuthenticated, joined: joined, stoppedByUser: stoppedByUser,
                                       ended: ended != nil, secondsLeft: left) {
@@ -1101,7 +1101,7 @@ final class WatchController: ObservableObject {
             // Android review S3: after an upstream loss nothing more will come, so the child link closes at once; after the
             // source ended the stream, the child first gets the forwarded terminal record (the link driver closes once it
             // drained, at most 2.5 s later). `-forwarderGracefulEnd NO` closes at once in both cases (the earlier rule).
-            let graceful = upstreamEnded && (UserDefaults.standard.object(forKey: "forwarderGracefulEnd") as? Bool ?? true)
+            let graceful = upstreamEnded && AppSettings.labSwitch("forwarderGracefulEnd", shipped: true)
             if graceful { f.engine.finish("The broadcast ended", error: false); f.driver.pump() } else { f.driver.cancel() }
         }
         ended = reason; state = reason; awaitingSource = false

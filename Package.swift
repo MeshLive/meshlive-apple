@@ -22,7 +22,7 @@ var targets: [Target] = [
     // MeshPeer: a macOS CoreBluetooth test peer from the protocol core and the app's radio files (Peer/README.md).
     // The Info.plist is embedded in the binary so macOS can show the Bluetooth permission prompt.
     .executableTarget(name: "MeshPeer", dependencies: peerDependencies, path: ".", exclude: ["Desktop"],
-                      sources: ["Peer/main.swift", "Peer/PeerLog.swift", "App/Transport/MeshRadio.swift", "App/Transport/MeshLinks.swift"],
+                      sources: ["Peer/main.swift", "Peer/PeerLog.swift", "App/Transport/MeshRadio.swift", "App/Transport/MeshLinks.swift", "App/LabSwitch.swift"],
                       linkerSettings: [.unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", root + "/Peer/Info.plist"])]),
     .testTarget(name: "NearbyCoreTests", dependencies: ["NearbyCore"], resources: [.copy("Fixtures")]),
     .testTarget(name: "NearbyMediaTests", dependencies: ["NearbyCore", "NearbyMedia"], resources: [.copy("Fixtures")]),

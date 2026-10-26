@@ -537,7 +537,11 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     /// refused the GAP name read), and CoreBluetooth gives a central no pairing or encryption state, so the cut could
     /// abort a pairing the user is answering. `-servicesStallSeconds 4` enables it for tests.
     static var servicesStallSeconds: TimeInterval {
-        UserDefaults.standard.object(forKey: "servicesStallSeconds") as? Double ?? 0
+        #if DEBUG
+        return UserDefaults.standard.object(forKey: "servicesStallSeconds") as? Double ?? 0
+        #else
+        return 0
+        #endif
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {

@@ -722,7 +722,7 @@ final class AppModel: ObservableObject {
         if let relay = callRelay, relay.awaitingParent { relay.attachParent(link); refreshAdvertising(); return }
         if let watch, watch.awaitingSource { watch.attach(link); refreshAdvertising(); return }
         if (call != nil || placingCall || relayDuty != nil || contactDialWait != nil), availableForCalls, let identity,
-           UserDefaults.standard.object(forKey: "callBusyDecline") as? Bool ?? true { declineBusy(link, identity: identity); return }
+           AppSettings.labSwitch("callBusyDecline", shipped: true) { declineBusy(link, identity: identity); return }
         guard call == nil, availableForCalls, let identity else { link.close(); return }
         let pins = rotating.pins
         let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
@@ -777,7 +777,7 @@ final class AppModel: ObservableObject {
     }
 
     private func glareRings(_ controller: CallController, caller: NodeId?) -> Bool {
-        let enabled = UserDefaults.standard.object(forKey: "dialCollisionRing") as? Bool ?? true
+        let enabled = AppSettings.labSwitch("dialCollisionRing", shipped: true)
         let own = ownDial()
         let action = enabled ? DialCollision.decide(dialling: own.dialling, target: own.target, callerPrefix: caller?.prefix.hex) : .declineBusy
         AppLog.event("call_collision", ["action": action == .ring ? "their_call_rings" : "declined_busy", "dialling": "\(own.dialling)",
