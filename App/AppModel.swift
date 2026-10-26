@@ -895,6 +895,15 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    // MARK: Experimental relayed calls (Design C), helper
+
+    /// A helper listener read SETUP as its first record. Helping is not switched on yet: no listener signs the helper
+    /// marks, so this cannot happen; refuse defensively by ending the connection.
+    func relaySetupRequested(by controller: CallController, message: RelaySetupMessage) {
+        AppLog.event("relayed_setup", ["role": "helper", "result": "refused", "reason": "not_helping"])
+        controller.end()
+    }
+
     // MARK: Contact dial wait (relayed calls)
 
     /// A contact called from Contacts while not listed: with relayed calls on, wait up to 45 s for a direct or relayed

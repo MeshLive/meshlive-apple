@@ -69,10 +69,16 @@ public struct RelayedCallOptions {
     /// Benchmark rule: only a chain of exactly this many relays counts (0 = any).
     public var requireRelays: Int
     public var maxRelays: Int
+    /// A listener that helps right now: its link hello signs bits 4 and 6 and capacity 1, and its first record may be
+    /// a SETUP, which pauses this engine and raises `.relaySetupRequested` (the app hands the link to a duty).
+    public var helperActive: Bool
+    /// SETUP message 4 (role-0 RDI target) is understood: rotating IDs and relayed calls both on.
+    public var acceptRdi: Bool
     public init(featureOn: Bool, route: RelayRoute? = nil, pseudonymousEdges: Bool = true, setupStartedAt: TimeInterval? = nil,
-                requireRelays: Int = 0, maxRelays: Int = RelayedCalls.defaultMaxRelays) {
+                requireRelays: Int = 0, maxRelays: Int = RelayedCalls.defaultMaxRelays, helperActive: Bool = false, acceptRdi: Bool = false) {
         self.featureOn = featureOn; self.route = route; self.pseudonymousEdges = pseudonymousEdges
         self.setupStartedAt = setupStartedAt; self.requireRelays = requireRelays; self.maxRelays = maxRelays
+        self.helperActive = helperActive; self.acceptRdi = acceptRdi
     }
 }
 
@@ -162,6 +168,8 @@ public final class CallEngine: MeshConnection {
         case peerLabels(name: String?, subject: String?)
         /// Experimental relayed calls: the first hop answered READY with this many relays to the callee.
         case relayReady(Int)
+        /// Experimental relayed calls: this helper listener's first record was SETUP (adopt the link for a duty).
+        case relaySetupRequested(RelaySetupMessage)
         case ended(String, error: Bool)
     }
 
@@ -230,7 +238,8 @@ public final class CallEngine: MeshConnection {
                                     decodeCodecMask: decodeMask & NodeCapabilities.codecMask, maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 0)
         var endpointCaps = link
         // Relayed calls: every endpoint with the experiment on signs link bit 4 (the end-to-end hello is unchanged).
-        link = RelayedCalls.linkCapabilities(link, featureOn: relayed?.featureOn == true, helperActive: false)
+        link = RelayedCalls.linkCapabilities(link, featureOn: relayed?.featureOn == true,
+                                             helperActive: role == .callee && relayed?.featureOn == true && relayed?.helperActive == true)
         // Rotating IDs: bit 3 only in the call-endpoint link hello (never the endpoint hello).
         if rotating != nil { link.transportMask |= NodeCapabilities.transportDiscoveryOpening }
         if videoFragments { endpointCaps.transportMask |= NodeCapabilities.transportVideoFragments }
@@ -245,6 +254,7 @@ public final class CallEngine: MeshConnection {
             discoveryOpeningEntries = { [weak self] in self?.callRole == .callee ? (rotating.entries?() ?? []) : [] }
             onDiscoveryOpening = { [weak self] entries in try self?.checkOpening(entries) }
         }
+        if role == .callee, relayed?.featureOn == true, relayed?.helperActive == true { acceptRelaySetup = true }
         if role == .caller, relayed?.route != nil {
             // The SETUP wait (up to 20 s plus 2 s grace) runs before the endpoint handshake.
             setupTimeout += TimeInterval(RelayedCalls.setupDeadlineMs + RelayedCalls.setupReplyGraceMs) / 1000
@@ -307,7 +317,20 @@ public final class CallEngine: MeshConnection {
         }
     }
 
+    /// A helper listener read SETUP as its first record: this engine pauses (no call) until the app adopts its link.
+    public private(set) var relaySetupRequest: RelaySetupMessage?
+    public override var ingressPaused: Bool { relaySetupRequest != nil }
+
     public override func handleRelaySetupRecord(_ record: SecureRecord) throws {
+        if callRole == .callee {
+            guard relaySetupRequest == nil, state == nil, endpoint == nil else { throw ProtocolError.state("Unexpected relay setup record") }
+            acceptRelaySetup = false
+            let message = try RelaySetupCodec.decode(record.payload, acceptRdi: relayedOptions?.acceptRdi == true)
+            guard case .setup = message else { throw ProtocolError.state("A listener reads only SETUP") }
+            relaySetupRequest = message
+            onEvent?(.relaySetupRequested(message))
+            return
+        }
         guard let route = relayRoute, let id = relaySetupId, relayReadyRelays == nil else { throw ProtocolError.state("Unexpected relay setup record") }
         acceptRelaySetup = false   // exactly one reply
         guard let reply = try? RelaySetupCodec.decode(record.payload), reply.setupId == id else {

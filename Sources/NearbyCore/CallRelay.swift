@@ -91,20 +91,60 @@ public final class CallRelayLink: MeshConnection {
 
     /// - Parameter bmh3: EXPERIMENTAL BMH3 on this hop (Android: a relay is an R_FIRST responder toward its parent and an
     ///   initiator toward its child, always with its real key; nil = BMH2 only).
+    /// Design C onward link: the next hop's `BDO1` must open this offer when it answers with a real key (rotating IDs).
+    public let openingCheck: DiscoveryAnnouncement?
+    /// Called once the link is authenticated and, when one was negotiated, the peer's opening checked.
+    public var onReady: (() throws -> Void)?
+
     /// - Parameter relaySetup: Design C helper link: the hello also signs bit 4 ("understands RELAY_SETUP").
-    public init(role: HandshakeRole, transport: MeshTransport, identity: SigningIdentity, bmh3: Bmh3CallSettings? = nil, relaySetup: Bool = false) {
+    /// - Parameter openingCheck: Design C onward link toward a rotating hop: sign bit 3 and check its `BDO1`.
+    public init(role: HandshakeRole, transport: MeshTransport, identity: SigningIdentity, bmh3: Bmh3CallSettings? = nil, relaySetup: Bool = false,
+                openingCheck: DiscoveryAnnouncement? = nil, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
+        self.openingCheck = openingCheck
         var caps = NodeCapabilities(transportMask: transport.capabilityBit | NodeCapabilities.transportCallRelay, encodeCodecMask: 0, decodeCodecMask: 0,
                                     maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 1)
         if relaySetup { caps.transportMask |= RelayedCalls.linkHelloSetupBit }
+        if openingCheck != nil { caps.transportMask |= NodeCapabilities.transportDiscoveryOpening }
         super.init(role: role, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: caps, bmh3: bmh3)
         maxHeldIngressBytes = Self.maxHeldBytes
+        if let openingCheck {
+            discoveryOpeningEntries = { [] }
+            onDiscoveryOpening = { [unowned self] entries in
+                if !linkPeerPseudonymous, let peer = peerLinkNodeId {
+                    guard DiscoverySelectionCheck.check(selected: openingCheck, expectedRole: RotatingDiscoveryIds.roleCallOffer, peerNodeId: peer.bytes,
+                                                        openingEntries: entries, verifierWallEpoch: wallEpoch()) == .pass else {
+                        throw ProtocolError.authentication
+                    }
+                }
+                try onReady?()
+            }
+        }
+    }
+
+    /// Adopts `other`'s authenticated link (a call listener whose first record was SETUP): same keys and sequences.
+    public init(adopting other: MeshConnection) {
+        openingCheck = nil
+        let caps = other.linkCapabilities
+        super.init(adopting: other, linkCapabilities: caps)
+        maxHeldIngressBytes = Self.maxHeldBytes
+    }
+
+    public override func linkDidAuthenticate() {
+        // With a negotiated opening, `onReady` follows the opening; a pseudonymous answerer sends none.
+        if openingExpected { return }
+        do { try onReady?() } catch { fail(describe(error)) }
     }
 
     public override var linkOnly: Bool { true }
 
     public override func validateLinkPeer() throws {
         guard let id = link.peerNodeId, let caps = link.peerCapabilities else { throw ProtocolError.authentication }
-        if let expectedPeerPrefix, id.prefix != expectedPeerPrefix { throw ProtocolError.authentication }
+        // A declared throwaway is not bound by prefix (Amendment CP); a real key is.
+        if let expectedPeerPrefix, !link.peerPseudonymous, id.prefix != expectedPeerPrefix { throw ProtocolError.authentication }
+        // A real-key rotating hop must open the selected offer.
+        if openingCheck != nil, !link.peerPseudonymous, caps.transportMask & NodeCapabilities.transportDiscoveryOpening == 0 {
+            throw ProtocolError.authentication
+        }
         try onAuthenticated?(id, caps)
     }
 

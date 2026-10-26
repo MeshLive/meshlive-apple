@@ -209,6 +209,37 @@ open class MeshConnection {
         link = SecureLink(role: role, identity: identity, capabilities: linkCapabilities, bmh3: bmh3)
     }
 
+    /// Takes over `other`'s authenticated link: keys, sequences, buffered input, queued output and timers. `other`
+    /// stops silently (`handedOver`), with no callback and nothing sent.
+    public init(adopting other: MeshConnection, linkCapabilities: NodeCapabilities) {
+        role = other.role; transport = other.transport; identity = other.identity
+        self.linkCapabilities = linkCapabilities; endpointCapabilities = linkCapabilities
+        bmh3 = other.bmh3; link = other.link
+        queues = other.queues; heldIngress = other.heldIngress; heldHello = other.heldHello; responderHelloHandled = true
+        startedAt = other.startedAt; now = other.now; lastReceiveAt = other.lastReceiveAt; lastSendAt = other.lastSendAt
+        receivedBytes = other.receivedBytes; sentBytes = other.sentBytes
+        peerOpening = other.peerOpening; openingExpected = other.openingExpected
+        phase = .open
+        other.handOver()
+    }
+
+    /// Closes once everything queued has been handed to the transport (a FAIL that must still go out).
+    public func requestCloseAfterFlush() { closeRequested = true }
+
+    /// True once another connection adopted this one's link.
+    public private(set) var handedOver = false
+    func handOver() {
+        handedOver = true; phase = .closed; closeReason = "Handed over"
+        queues = OutboundQueues(); heldIngress = Data(); heldHello = nil
+    }
+
+    /// Parses input already buffered in the adopted link (records that arrived with the first one).
+    public func processBufferedInput(now: TimeInterval) {
+        guard phase != .closed else { return }
+        self.now = now
+        processIngress()
+    }
+
     public var peerLinkNodeId: NodeId? { link.peerNodeId }
     /// Experimental relayed calls: hop type 12 is read while true.
     public var acceptRelaySetup: Bool {
@@ -335,6 +366,8 @@ open class MeshConnection {
             try handleRelaySetupRecord(record)
             return
         }
+        // Design C first-record dispatch: once the endpoint handshake starts, a listener reads no SETUP.
+        if role == .responder, record.type == .endToEndHandshake, link.acceptRelaySetup { link.acceptRelaySetup = false }
         if phase == .endpointHandshake {
             guard record.type == .endToEndHandshake, let handshake = endpointHandshake else {
                 throw ProtocolError.state("Expected an end-to-end handshake")

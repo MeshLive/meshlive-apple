@@ -280,6 +280,8 @@ final class CallController: ObservableObject, Identifiable {
                 label = updated; peerName = updated.title
             }
             self.subject = subject
+        case .relaySetupRequested(let message):
+            model?.relaySetupRequested(by: self, message: message)
         case .relayReady(let relays):
             relayed = true; markStage("relay_ready")
             AppLog.event("relayed_setup", ["role": "caller", "result": "ready", "relays": "\(relays)"])
@@ -368,7 +370,7 @@ final class CallController: ObservableObject, Identifiable {
                                       "videoTx": "\(engine.sentVideoPackets)", "videoRx": "\(engine.receivedVideoPackets)", "decoded": "\(remote.decodedFrames)",
                                       "rxBytes": "\(engine.receivedBytes)", "txBytes": "\(engine.sentBytes)"])
             AppLog.flush()
-        case .remoteAudio, .remoteVideo, .remoteRotation, .peerReport, .relayReady: break
+        case .remoteAudio, .remoteVideo, .remoteRotation, .peerReport, .relayReady, .relaySetupRequested: break
         }
     }
 
