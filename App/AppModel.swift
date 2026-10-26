@@ -624,7 +624,21 @@ final class AppModel: ObservableObject {
 
     private var placingCall = false
     /// Last call problem, shown on the Call screen after the call screen closes ("Couldn't reach ...").
-    @Published var callNotice: String?
+    @Published var callNotice: String? { didSet { if callNotice != oldValue { callRetry = nil } } }
+    /// "Call again" on a "Couldn't reach" notice (Android 2026-10-21): the person and call type of the failed call.
+    struct CallRetry: Equatable { let personId: UUID; let prefixHex: String?; let video: Bool; let name: String }
+    @Published private(set) var callRetry: CallRetry?
+    private var lastOutgoing: CallRetry?
+
+    /// Calls the person from the last "Couldn't reach" notice again, through their current row when it still exists.
+    func callAgain() {
+        guard let retry = callRetry else { return }
+        AppLog.event("call_again", ["video": "\(retry.video)"])
+        callNotice = nil
+        let person = people.first { $0.id == retry.personId } ?? retry.prefixHex.flatMap { prefix in people.first { $0.prefixHex == prefix } }
+        if let person { startCall(to: person, type: retry.video ? .video : .voice) }
+        else { callNotice = "\(retry.name) isn't nearby right now. Ask them to open MeshLive." }
+    }
 
     /// Asks for the microphone (and camera for video) first, so the system prompt never interrupts media.
     /// A call is just a call with Mute; while muted, holding Mute talks (no separate push-to-talk mode).
@@ -640,10 +654,12 @@ final class AppModel: ObservableObject {
 
     private func placeCall(to person: PersonRow, type: CallType) {
         guard call == nil, let identity else { return }
+        let retry = CallRetry(personId: person.id, prefixHex: person.prefixHex, video: type == .video, name: person.label.title)
+        lastOutgoing = retry
         guard let peer = radio.peers[person.id], !(peer.announcement.rotating && peer.announcement.routeCost > 0) else {
             let text = "Couldn't reach \(person.label.title) \u{2013} they may have moved away."
             AppLog.event("call_end", ["reason": text, "error": "true", "stage": "not_nearby"])
-            callNotice = text; return
+            callNotice = text; callRetry = retry; return
         }
         #if os(macOS)
         guard !peer.announcement.rotating || desktopCallCompatibility.acceptsRotating else {
@@ -713,7 +729,10 @@ final class AppModel: ObservableObject {
             CallNotifier.shared.postMissed(peerName: controller.label?.title, stranger: controller.label == nil,
                                            prefixHex: controller.peerPrefixHex, video: controller.offeredType == .video)
         }
-        if controller.failedEarly, let ended = controller.ended { callNotice = ended }
+        if controller.failedEarly, let ended = controller.ended {
+            callNotice = ended
+            if controller.role == .caller { callRetry = lastOutgoing }
+        }
         call = nil
         refreshAdvertising()
     }

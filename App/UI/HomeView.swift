@@ -94,24 +94,49 @@ extension TabPage where Bottom == EmptyView {
     init(@ViewBuilder content: () -> Content) { self.content = content(); self.bottom = EmptyView() }
 }
 
-/// A dismissible notice card ("Couldn't reach ...").
+/// A dismissible notice card ("Couldn't reach ..."), optionally with one action ("Call again").
 struct NoticeCard: View {
     let text: String
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
     let dismiss: () -> Void
     var body: some View {
-        Button(action: dismiss) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: AppIcon.problem).foregroundStyle(Palette.dimInk).accessibilityHidden(true)
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: AppIcon.problem).foregroundStyle(Palette.dimInk).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 10) {
                 Text(text).font(.subheadline).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
-                Spacer(minLength: 0)
-                Image(systemName: "xmark").font(.footnote.weight(.semibold)).foregroundStyle(Palette.dimInk).accessibilityHidden(true)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let actionTitle, let action {
+                    Button(action: action) {
+                        Text(actionTitle).font(.subheadline.weight(.semibold)).foregroundStyle(.black)
+                            .padding(.horizontal, 14).padding(.vertical, 8).background(Color.white, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("notice-action")
+                }
             }
-            .padding(14).background(Palette.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            Spacer(minLength: 0)
+            Button(action: dismiss) {
+                Image(systemName: "xmark").font(.footnote.weight(.semibold)).foregroundStyle(Palette.dimInk)
+                    .frame(width: 32, height: 32).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(text)
-        .accessibilityHint("Dismiss")
+        .padding(14).background(Palette.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .contain)
         .padding(.vertical, 6)
+    }
+}
+
+/// The last call problem with "Call again" when it was a call this device placed (Calls and Contacts).
+struct CallNoticeCard: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        if let notice = model.callNotice {
+            NoticeCard(text: notice, actionTitle: model.callRetry == nil ? nil : "Call again",
+                       action: model.callRetry == nil ? nil : { model.callAgain() }) { model.callNotice = nil }
+        }
     }
 }
 
@@ -302,7 +327,7 @@ struct CallsTab: View {
                 Chip(title: "Recent", selected: showRecent) { showRecent = true }
             }
             .padding(.vertical, 8)
-            if let notice = model.callNotice { NoticeCard(text: notice) { model.callNotice = nil } }
+            CallNoticeCard()
             if showRecent { recent } else { nearby }
         }
         .debugPush("recent-none") { EmptyView() }
@@ -439,7 +464,7 @@ struct ContactsTab: View {
     var body: some View {
         TabPage {
             TabHeader(title: "Contacts")
-            if let notice = model.callNotice { NoticeCard(text: notice) { model.callNotice = nil } }
+            CallNoticeCard()
             if let unreadable = model.contactsUnreadable {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Contacts unavailable").font(.body.weight(.semibold)).foregroundStyle(Palette.ink)

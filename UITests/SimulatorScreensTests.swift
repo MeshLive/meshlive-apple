@@ -445,6 +445,28 @@ final class SimulatorScreensTests: XCTestCase {
     /// First call: the system asks for the microphone; "Don't Allow" must leave the app usable and explain the next
     /// step (the fixture person is not on the radio, so the call itself ends with the "isn't nearby" notice).
     /// Needs reset privacy for the app (run-uitest.sh resets it before the run on a simulator).
+    /// A call that cannot reach the person leaves "Couldn't reach ..." with Call again, which tries once more.
+    func testCouldNotReachOffersCallAgain() {
+        let app = launch(["-NearbyScreen", "people"])
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'person-'")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        XCTAssertTrue(app.buttons["Voice call"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Voice call"].firstMatch.tap()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let alert = springboard.alerts.firstMatch
+        if alert.waitForExistence(timeout: 6) { alert.buttons.element(boundBy: alert.buttons.count - 1).tap() }
+        let notice = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH[c] %@", "Couldn't reach")).firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 8), "the failed call says who could not be reached")
+        let again = app.buttons["Call again"]
+        XCTAssertTrue(again.exists, "the notice offers Call again")
+        shot("call-again")
+        again.tap()
+        XCTAssertTrue(notice.waitForExistence(timeout: 8), "Call again tried the same person once more")
+        app.buttons["Dismiss"].firstMatch.tap()
+        XCTAssertFalse(app.buttons["Call again"].waitForExistence(timeout: 2), "dismissing removes the notice")
+    }
+
     func testMicrophonePromptAndDenial() {
         let app = launch(["-NearbyScreen", "people"])
         let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'person-'")).firstMatch
