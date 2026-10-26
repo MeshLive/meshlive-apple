@@ -21,6 +21,8 @@ import NearbyCore
 /// - `-NearbyAutoListen first|<handle>|<12-hex prefix>` and `-NearbyListenSeconds N` (default 60): join an
 ///   audio-only (radio) stream only; logs `auto_listen` with the verified record count at the end.
 /// - `-NearbyTransport gatt|l2cap`: transport to advertise; `-NearbyLabels 1`: experimental names and titles.
+/// - `-NearbyCallCamera off`: switch this Mac's camera off as soon as a video call is active (receive-only
+///   video tests that must not show the room); logs `auto_camera`.
 /// Every step is logged as `BENCHMARK auto_*`.
 final class Automation {
     let args: [String: String]
@@ -35,6 +37,7 @@ final class Automation {
     private var acceptedCall: ObjectIdentifier?
     private var relayStarted = false
     private var answeredActiveAt: Date?
+    private var cameraOffCall: ObjectIdentifier?
 
     static func parse(_ arguments: [String]) -> [String: String] {
         var out: [String: String] = [:]
@@ -94,6 +97,12 @@ final class Automation {
 
     private func tick() {
         guard let model else { return }
+        if args["CallCamera"] == "off", let call = model.call, call.phase == .active, call.cameraOn,
+           cameraOffCall != ObjectIdentifier(call) {
+            cameraOffCall = ObjectIdentifier(call)
+            call.toggleCamera()
+            AppLog.event("auto_camera", ["result": "off", "cameraOn": "\(call.cameraOn)"])
+        }
         if let accept = args["AutoAccept"] {
             if let call = model.call, call.phase == .incomingRinging, acceptedCall != ObjectIdentifier(call) {
                 acceptedCall = ObjectIdentifier(call); answeredActiveAt = nil

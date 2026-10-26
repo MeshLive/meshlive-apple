@@ -52,7 +52,12 @@ final class RotatingDiscoveryRuntime {
     /// The phase 1 presence key P (one long-lived key, weekly derivation) is no longer used: delete it once.
     static func deleteLegacyPresenceKey() {
         #if os(macOS)
+        #if DEBUG
+        // An ephemeral-identity DEBUG run never touches the login Keychain either.
+        DesktopLegacyPresenceCleanup.run(preview: DesktopPreview.enabled || KeychainItem.ephemeral)
+        #else
         DesktopLegacyPresenceCleanup.run(preview: DesktopPreview.enabled)
+        #endif
         #else
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.rotating"] as CFDictionary)
         #endif

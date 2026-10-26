@@ -14,8 +14,18 @@ final class SecureEnclaveSigningIdentity: SigningIdentity {
 
 enum KeychainItem {
     static let service = "org.nearbyintercom.mesh.v2"
+    #if os(macOS) && DEBUG
+    /// DEBUG-only `-NearbyEphemeralIdentity 1`: keep this run's identity and presence state in memory, so an
+    /// unattended interop run of a freshly built (differently ad-hoc signed) app never waits on a login-keychain
+    /// access prompt. Radio, media and protocol paths are the normal runtime; the identity is new each launch.
+    private static var memory: [String: Data] = [:]
+    static var ephemeral: Bool { ProcessInfo.processInfo.arguments.contains("-NearbyEphemeralIdentity") }
+    #endif
     static func read(_ account: String) throws -> Data? {
         if DesktopPreview.enabled { return nil }
+        #if os(macOS) && DEBUG
+        if ephemeral { return memory[account] }
+        #endif
         var query = base(account); query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -25,6 +35,9 @@ enum KeychainItem {
     }
     static func write(_ account: String, _ data: Data, accessible: CFString = kSecAttrAccessibleWhenUnlockedThisDeviceOnly) throws {
         if DesktopPreview.enabled { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)) }
+        #if os(macOS) && DEBUG
+        if ephemeral { memory[account] = data; return }
+        #endif
         // Update in place (add only when missing): a failed write never leaves the account without its old value.
         let status = KeychainReplace.write(
             update: {
@@ -40,6 +53,9 @@ enum KeychainItem {
     }
     static func delete(_ account: String) throws {
         if DesktopPreview.enabled { return }
+        #if os(macOS) && DEBUG
+        if ephemeral { memory[account] = nil; return }
+        #endif
         let status = SecItemDelete(base(account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
     }
@@ -50,11 +66,18 @@ enum KeychainItem {
     @discardableResult
     static func deleteAll() -> [OSStatus] {
         if DesktopPreview.enabled { return [] }
+        #if os(macOS) && DEBUG
+        // An ephemeral DEBUG run only ever held this run's in-memory items; the login Keychain is left untouched.
+        if ephemeral { memory.removeAll(); return allServices.map { _ in errSecSuccess } }
+        #endif
         return allServices.map { SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: $0] as CFDictionary) }
     }
     /// One query per service: `errSecItemNotFound` only when no item of it remains; an error is not absence.
     static func verifyAllDeleted() -> [OSStatus] {
-        allServices.map { name in
+        #if os(macOS) && DEBUG
+        if ephemeral { return allServices.map { _ in memory.isEmpty ? errSecItemNotFound : errSecSuccess } }
+        #endif
+        return allServices.map { name in
             let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: name,
                                         kSecMatchLimit as String: kSecMatchLimitOne, kSecReturnAttributes as String: true]
             var item: CFTypeRef?
