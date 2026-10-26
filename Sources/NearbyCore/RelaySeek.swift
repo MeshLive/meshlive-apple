@@ -47,6 +47,29 @@ public enum RelaySeek {
     }
 }
 
+/// What a helper tries for one search (PROTOCOL OR helper rules 7-9), from offers it heard itself: up to 3 target
+/// sightings whose RDI gives the token (strongest first), and up to `fanout` version 5 helper offers on the same bearer
+/// whose RDI does not start with a skip prefix (budget 2 only). Peers are the app's dialable row IDs.
+public struct RelaySeekPlan<P> {
+    public let targets: [(peer: P, rdi: Data)]
+    public let helpers: [(peer: P, rdi: Data)]
+
+    public init(offers: [OfferSighting<P>], nonce: Data, token: Data, skip: [Data], budget: Int, bearer: MeshTransport, ownRdis: [Data],
+                fanout: Int = RelaySeek.defaultFanout) {
+        let strongest = offers.sorted { ($0.rssi ?? -127) > ($1.rssi ?? -127) }
+        targets = Array(strongest.filter { RelaySeek.matches($0.announcement, nonce: nonce, token: token, bearer: bearer, ownRdis: ownRdis) }
+            .prefix(RelaySeek.maxTargetAddresses).map { ($0.peer, $0.announcement.nodeIdPrefix) })
+        if budget >= 2 {
+            let targetRdis = Set(targets.map(\.rdi))
+            helpers = Array(strongest.filter { o in
+                let rdi = o.announcement.nodeIdPrefix
+                return RelayedCalls.isRelayHelperOffer(o.announcement, rotating: true) && o.announcement.transport == bearer
+                    && !ownRdis.contains(rdi) && !targetRdis.contains(rdi) && !skip.contains(rdi.prefix(RelaySeek.skipPrefixBytes).rebased)
+            }.prefix(fanout).map { ($0.peer, $0.announcement.nodeIdPrefix) })
+        } else { helpers = [] }
+    }
+}
+
 /// A helper's search budgets over a rolling 10 minutes (Android RelaySeekBudgets): duty at most 60 s, on-demand scanning
 /// 30 s, 12 outgoing dials and 12 handshakes, 10 s between searches. Only work done is charged; a search that ends in
 /// READY gets its duty and scan time back.

@@ -31,9 +31,29 @@ public final class RelayHelperDuty {
 
     /// One SETUP (or a search turned into one) this helper accepted.
     public struct Request: Equatable {
-        public let target: Data, budget: Int, remainingMs: Int, setupId: Data, rotating: Bool
-        public init(target: Data, budget: Int, remainingMs: Int, setupId: Data, rotating: Bool) {
+        /// The target ID (a role-0 RDI on a rotating route). For a search, empty until the search found it.
+        public var target: Data
+        public let budget: Int, remainingMs: Int, setupId: Data, rotating: Bool
+        /// Design OR: a search (`SEEK`): the target is matched by token; a next helper gets a regenerated SEEK.
+        public let seek: Seek?
+        public struct Seek: Equatable {
+            public let nonce: Data, token: Data, skip: [Data]
+            public init(nonce: Data, token: Data, skip: [Data]) { self.nonce = nonce; self.token = token; self.skip = skip }
+        }
+        public init(target: Data, budget: Int, remainingMs: Int, setupId: Data, rotating: Bool, seek: Seek? = nil) {
             self.target = target; self.budget = budget; self.remainingMs = remainingMs; self.setupId = setupId; self.rotating = rotating
+            self.seek = seek
+        }
+        /// The request a listener read, as a duty request (a SEEK always concerns role-0 RDIs).
+        public init?(_ message: RelaySetupMessage) {
+            switch message {
+            case let .setup(target, budget, remaining, id, rotating):
+                self.init(target: target, budget: budget, remainingMs: remaining, setupId: id, rotating: rotating)
+            case let .seek(budget, remaining, id, nonce, token, skip):
+                self.init(target: Data(), budget: budget, remainingMs: remaining, setupId: id, rotating: true,
+                          seek: Seek(nonce: nonce, token: token, skip: skip))
+            default: return nil
+            }
         }
     }
 
@@ -48,7 +68,14 @@ public final class RelayHelperDuty {
     public let transport: MeshTransport
     public let parent: CallRelayLink
     public private(set) var child: CallRelayLink?
-    public let request: Request
+    public private(set) var request: Request
+    /// Design OR: a next-hop attempt failed before READY; return true when the app will try another candidate (the
+    /// duty then waits for the next `makeChildLink` instead of answering FAIL).
+    public var onChildAttemptFailed: ((RelaySetupFailure) -> Bool)?
+    /// The last child failure of a search (FAIL reason when nothing is left).
+    public private(set) var lastChildFailure: RelaySetupFailure?
+    /// Design OR: the search matched this target RDI (budget-1 target link).
+    public func setSearchTarget(_ rdi: Data) { request.target = rdi.rebased }
     public private(set) var next: NextHop?
     public private(set) var state: State = .connectingNext
     /// Relays from this helper to the target, as sent in READY.
@@ -83,6 +110,7 @@ public final class RelayHelperDuty {
     /// must be `next.hopPrefix`; a declared throwaway is not bound (the caller's end-to-end check authenticates).
     public func makeChildLink(next: NextHop, bmh3: Bmh3CallSettings?, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) -> CallRelayLink {
         self.next = next
+        child?.onClosed = nil; child?.onReady = nil; child?.onRelaySetup = nil   // a previous attempt is finished
         let expected = next.hopPrefix ?? request.target
         let opening = request.rotating ? RelayedCalls.helperOfferFor(expected, rotating: true) : nil
         let link = CallRelayLink(role: .initiator, transport: transport, identity: identity, bmh3: bmh3, relaySetup: true,
@@ -104,8 +132,14 @@ public final class RelayHelperDuty {
     /// The app could not open a link to the next hop.
     public func childConnectFailed(_ reason: String) {
         guard readyRelays == nil else { return }
-        failUpstream(next?.hopPrefix == nil ? .noRoute : .timeout, "Next hop: \(reason)")
+        attemptFailed(next?.hopPrefix == nil ? .noRoute : .timeout, "Next hop: \(reason)")
     }
+
+    /// A search found nothing to try (or ran out of candidates): FAIL with `reason`.
+    public func searchFailed(_ reason: RelaySetupFailure) { failUpstream(reason, "Search: \(reason.label)") }
+
+    /// Time left before the one deadline, in ms.
+    public func remainingMs(now: TimeInterval) -> Int { max(0, Int(((deadline - now) * 1000).rounded())) }
 
     private func childReady() throws {
         guard let child, let next else { return }
@@ -120,7 +154,24 @@ public final class RelayHelperDuty {
         let id = RelaySetupCodec.newSetupId()
         childSetupId = id
         child.acceptRelaySetup = true
-        try child.sendRelaySetup(.setup(target: request.target, budget: next.nextBudget, remainingMs: remaining, setupId: id, rotating: request.rotating))
+        if let seek = request.seek {
+            // A search goes on as a search: the next helper must have signed RELAY_SEEK.
+            guard child.linkPeerRelaySeek & RelaySeek.featureSeekV1 != 0 else { attemptFailed(.refused, "Next helper does not search"); return }
+            try child.sendRelaySetup(.seek(budget: next.nextBudget, remainingMs: min(remaining, RelayedCalls.setupDeadlineMs), setupId: id,
+                                           nonce: seek.nonce, token: seek.token, skip: seek.skip))
+        } else {
+            try child.sendRelaySetup(.setup(target: request.target, budget: next.nextBudget, remainingMs: remaining, setupId: id, rotating: request.rotating))
+        }
+    }
+
+    /// One next-hop attempt failed before READY: another candidate if the app has one, else FAIL upstream.
+    private func attemptFailed(_ reason: RelaySetupFailure, _ text: String) {
+        lastChildFailure = reason
+        let old = child
+        old?.onClosed = nil
+        old?.finish(text, error: false)
+        if onChildAttemptFailed?(reason) == true { set(.connectingNext); return }
+        failUpstream(reason, text)
     }
 
     private func childReply(_ message: RelaySetupMessage) throws {
@@ -130,7 +181,7 @@ public final class RelayHelperDuty {
             guard relays + 1 <= request.budget else { failUpstream(nil, "The next relay reported more relays than were asked for"); return }
             ready(relays: relays + 1)
         case .fail(_, let reason):
-            failUpstream(reason, "Next relay: \(reason.label)")
+            attemptFailed(reason, "Next relay: \(reason.label)")
         case .setup, .seek:
             throw ProtocolError.state("A setup reply was expected")
         }
@@ -165,7 +216,7 @@ public final class RelayHelperDuty {
         // (Android RelayIdentityPolicy.failureBeforeReady with pseudonymous edges: never "no route" for a working pair).
         let identityProblem = reason == ProtocolError.authentication.description || reason.contains("did not authenticate")
             || reason.contains("own child") || reason.contains("next relay")
-        failUpstream(identityProblem ? .childAuthentication : .timeout, "Next hop: \(reason)")
+        attemptFailed(identityProblem ? .childAuthentication : .timeout, "Next hop: \(reason)")
     }
 
     /// FAIL upstream (nil reason: an invalid next hop answer, sent as FAIL 3) and close both links.

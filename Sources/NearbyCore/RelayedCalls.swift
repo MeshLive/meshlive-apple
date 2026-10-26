@@ -155,8 +155,10 @@ public struct RelayRoute: Equatable {
     public let helperPrefix: Data
     public let relays: Int
     public let rotating: Bool
-    public init(target: Data, helperPrefix: Data, relays: Int, rotating: Bool = false) {
-        self.target = target; self.helperPrefix = helperPrefix; self.relays = relays; self.rotating = rotating
+    /// Design OR: ask the helper to search (SEEK) for the target blinded by `token` under `nonce`, instead of SETUP.
+    public let seek: RelayHelperDuty.Request.Seek?
+    public init(target: Data, helperPrefix: Data, relays: Int, rotating: Bool = false, seek: RelayHelperDuty.Request.Seek? = nil) {
+        self.target = target; self.helperPrefix = helperPrefix; self.relays = relays; self.rotating = rotating; self.seek = seek
     }
 }
 

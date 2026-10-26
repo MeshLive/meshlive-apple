@@ -106,6 +106,8 @@ public struct Bmh3CallOptions {
     public var pseudonymousRelayEdges = true
     /// Design C: the first helper's own offer when the call takes an on-demand relayed route.
     public var relayHop: DiscoveryAnnouncement?
+    /// Design OR (listener): the `RELAY_SEEK` bits signed while this device would admit a search; nil none.
+    public var relaySeek: UInt8?
     public init(pseudonyms: Bool, selected: DiscoveryAnnouncement? = nil, pins: Bmh3Pins? = nil,
                 budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
         self.pseudonyms = pseudonyms; self.selected = selected; self.pins = pins; self.budget = budget; self.wallEpoch = wallEpoch
@@ -137,6 +139,7 @@ public struct Bmh3CallOptions {
             let settings = Bmh3CallSettings(speak: false, acceptBmh2: !pseudonyms, stranger: pseudonyms ? SoftwareSigningIdentity() : nil,
                                             opening: { Bmh3CallSettings.openingValue(openingEntries?() ?? []) },
                                             replayCache: scoped?.replayCache ?? Bmh3CallSettings.sharedReplayCache, budget: scoped?.budget ?? budget)
+            settings.relaySeek = relaySeek
             if let tagChecks { settings.tagChecks = tagChecks }
             if let admitTagged { settings.admitTagged = admitTagged }
             return settings
@@ -309,7 +312,13 @@ public final class CallEngine: MeshConnection {
         let id = RelaySetupCodec.newSetupId()
         do {
             acceptRelaySetup = true
-            try sendRelaySetup(.setup(target: route.target, budget: route.relays, remainingMs: remaining, setupId: id, rotating: route.rotating))
+            if let seek = route.seek {
+                // Design OR: a search goes only to a helper that signed RELAY_SEEK.
+                guard link.peerRelaySeek & RelaySeek.featureSeekV1 != 0 else { failRelay(nil, "The helping phone does not search for routes"); return }
+                try sendRelaySetup(.seek(budget: route.relays, remainingMs: remaining, setupId: id, nonce: seek.nonce, token: seek.token, skip: seek.skip))
+            } else {
+                try sendRelaySetup(.setup(target: route.target, budget: route.relays, remainingMs: remaining, setupId: id, rotating: route.rotating))
+            }
             relaySetupId = id
             relaySetupDeadline = now + TimeInterval(remaining + RelayedCalls.setupReplyGraceMs) / 1000
         } catch {

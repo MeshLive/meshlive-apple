@@ -212,6 +212,12 @@ public final class ReachTable<P> {
 
     public func offer(_ prefix: Data) -> OfferSighting<P>? { offers.first { $0.key == prefix.hex }?.sighting }
 
+    /// Every offer heard within `withinMs` (Design OR: a search first uses what scans heard anyway).
+    public func recentOffers(withinMs: Int64) -> [OfferSighting<P>] {
+        let now = clock()
+        return offers.map(\.sighting).filter { now - $0.seenMs <= withinMs }
+    }
+
     /// The fresh connectable helper offer (FLAG_RELAY_CAPABLE) of relay `prefix`.
     public func helperOffer(_ prefix: Data, accept: (DiscoveryAnnouncement) -> Bool = { _ in true }) -> OfferSighting<P>? {
         let now = clock()
