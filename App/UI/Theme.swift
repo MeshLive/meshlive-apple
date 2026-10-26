@@ -1,5 +1,7 @@
 import SwiftUI
+#if os(iOS)
 import UIKit
+#endif
 import NearbyCore
 
 /// One product, native on each platform: Android and iOS share the screens, flow, features, wording and the
@@ -10,7 +12,14 @@ import NearbyCore
 /// SF Pro with Dynamic Type and thin SF Symbols.
 struct TokenColor {
     let dark: UInt32, light: UInt32
-    var color: Color { Color(UIColor { $0.userInterfaceStyle == .light ? UIColor(argb: light) : UIColor(argb: dark) }) }
+    var color: Color {
+        #if os(macOS)
+        return Color(.sRGB, red: Double((dark >> 16) & 255) / 255, green: Double((dark >> 8) & 255) / 255,
+                     blue: Double(dark & 255) / 255, opacity: Double((dark >> 24) & 255) / 255)
+        #else
+        return Color(UIColor { $0.userInterfaceStyle == .light ? UIColor(argb: light) : UIColor(argb: dark) })
+        #endif
+    }
 }
 
 /// Android type tokens are kept for reference (generated code); iOS uses Dynamic Type text styles.
@@ -24,7 +33,11 @@ enum Palette {
     // a muted green only for "connected".
     static let accent = C.accent.color          // primary action: white, with black text
     static let onAccent = C.onAccent.color
+    #if os(macOS)
+    static let connected = Color.white
+    #else
     static let connected = C.connected.color
+    #endif
     static let recordRed = C.recordRed.color
     static let liveRed = C.liveRed.color
     static let callAccept = C.callAccept.color
@@ -43,15 +56,16 @@ enum Palette {
     /// Avatars: a neutral disc (no per-person colours).
     static let avatar = C.panelVariant.color
     /// Grouped settings cards and sheets (Android 2026-10-17 redesign: #121212 on black).
-    static let card = Color(UIColor(rgb: 0x121212))
+    static let card = Color(meshRGB: 0x121212)
     /// Secondary capsules, chips and icon discs.
-    static let chip = Color(UIColor(rgb: 0x262626))
+    static let chip = Color(meshRGB: 0x262626)
     /// A switch that is on: light grey track (the iPhone's white thumb stays visible on it).
-    static let switchOn = Color(UIColor(rgb: 0xB8B8B8))
+    static let switchOn = Color(meshRGB: 0xB8B8B8)
     /// Inset separators in lists and between card rows (Android card outline grey).
-    static let separator = Color(UIColor(rgb: 0x262626))
+    static let separator = Color(meshRGB: 0x262626)
 }
 
+#if os(iOS)
 extension UIColor {
     convenience init(rgb: UInt32) { self.init(argb: 0xFF00_0000 | rgb) }
     convenience init(argb: UInt32) {
@@ -59,6 +73,8 @@ extension UIColor {
                   alpha: CGFloat((argb >> 24) & 0xff) / 255)
     }
 }
+
+#endif
 
 /// Dynamic Type text styles (SF), one role each, used by every screen.
 enum Typo {
@@ -84,7 +100,12 @@ struct PeerLabel: Equatable {
     /// The peer's signed self-chosen name (experimental labels), shown quoted and marked self-named.
     let selfName: String?
     /// List/ringing line: the contact label, or the quoted self-name beside the full handle, or the handle.
-    var listName: String { contactName ?? selfName.map { "\u{201C}\($0)\u{201D}  \(handle)" } ?? handle }
+    var listName: String {
+        #if os(macOS)
+        if handle.isEmpty { return title }
+        #endif
+        return contactName ?? selfName.map { "\u{201C}\($0)\u{201D}  \(handle)" } ?? handle
+    }
     let contactName: String?
     /// Full handle `XXXXX-XXXXX` (authenticated to 48 bits only after connecting).
     let handle: String
@@ -99,6 +120,11 @@ struct PeerLabel: Equatable {
     static func nearbyPhone(seed: Data) -> PeerLabel {
         PeerLabel(title: "Nearby phone", handle: "", hue: Double(seed.last ?? 0) / 255)
     }
+    #if os(macOS)
+    static func generated(_ name: String, seed: Data) -> PeerLabel {
+        PeerLabel(title: name, handle: "", hue: Double(seed.last ?? 0) / 255)
+    }
+    #endif
     /// A rotating advert recognised through a contact's presence lease: their own label, "seen nearby, unconfirmed".
     static func recognized(contactName: String, seed: Data) -> PeerLabel {
         PeerLabel(title: "\(contactName), seen nearby, unconfirmed", handle: "", hue: Double(seed.last ?? 0) / 255)

@@ -119,9 +119,18 @@ open class MeshConnection {
     public private(set) var sentBytes: UInt64 = 0
     /// Sealed bytes of video media (whole packets and fragments) handed to the transport.
     public private(set) var sentVideoBytes: UInt64 = 0
+    #if os(macOS)
+    /// Native telemetry only: media payload bytes handed to the transport, in sealing order.
+    /// Excludes rotation and record framing; fragments count their chunk bytes exactly once.
+    public var onMediaSubmitted: ((_ payloadBytes: Int, _ audio: Bool, _ at: TimeInterval) -> Void)?
+    #endif
     /// Age of the oldest video frame still waiting for the transport.
     public func videoQueueAge(now: TimeInterval) -> TimeInterval { queues.videoAge(now: now) }
     public private(set) var closeRequested = false
+    #if os(macOS)
+    /// Fatal closure discards queued output; native transports must release even if their pipe is blocked.
+    public private(set) var closedWithError = false
+    #endif
     /// EXPERIMENTAL rotating discovery IDs: this side's BDO1 entries (a callee's pinned role-0 IDs; a caller none).
     public var discoveryOpeningEntries: (() -> [OpeningEntry])?
     /// The peer's BDO1 entries arrived (the caller's RV15 check); throw to refuse the link.
@@ -186,20 +195,28 @@ open class MeshConnection {
         receivedBytes += UInt64(data.count)
         lastReceiveAt = now
         do {
-            for output in try link.receive(data) {
-                switch output {
-                case .send(let bytes):
-                    if role == .responder, !responderHelloHandled {
-                        responderHelloHandled = true
-                        if let peer = link.peerNodeId, let delay = responderHelloDelay?(peer), delay > 0 {
-                            heldHello = (bytes, now + delay); continue
+            var pending = data
+            // Handle each record before parsing the next: a verified header can change the read cap even
+            // when the transport coalesced the header and the first large audio batch into one read.
+            while phase != .closed {
+                let outputs = try link.receive(pending, recordLimit: 1)
+                guard !outputs.isEmpty else { break }
+                pending = Data()
+                for output in outputs {
+                    switch output {
+                    case .send(let bytes):
+                        if role == .responder, !responderHelloHandled {
+                            responderHelloHandled = true
+                            if let peer = link.peerNodeId, let delay = responderHelloDelay?(peer), delay > 0 {
+                                heldHello = (bytes, now + delay); continue
+                            }
                         }
+                        enqueue(.raw(bytes), .control)
+                    case .established: try linkEstablished()
+                    case .record(let record):
+                        if phase == .closed { return }
+                        try handleRecord(record)
                     }
-                    enqueue(.raw(bytes), .control)
-                case .established: try linkEstablished()
-                case .record(let record):
-                    if phase == .closed { return }
-                    try handleRecord(record)
                 }
             }
         } catch {
@@ -322,6 +339,15 @@ open class MeshConnection {
                     sentVideoBytes += UInt64(bytes.count)
                 }
                 if item.closeAfter { closeRequested = true }
+                #if os(macOS)
+                if let observe = onMediaSubmitted, case .content(let type, let flags, let payload) = item.kind {
+                    if type == .mediaPacket, flags & StreamProtocol.flagDisplayRotation == 0 {
+                        observe(max(0, payload.count - StreamProtocol.packetHeaderBytes), flags & StreamProtocol.flagAudio != 0, now)
+                    } else if type == .videoFragment {
+                        observe(max(0, payload.count - CallVideoFragments.headerBytes), false, now)
+                    }
+                }
+                #endif
                 return bytes
             } catch {
                 fail(describe(error)); return nil
@@ -367,6 +393,9 @@ open class MeshConnection {
     public func finish(_ reason: String, error: Bool) {
         guard phase != .closed else { return }
         phase = .closed; closeReason = reason
+        #if os(macOS)
+        closedWithError = error
+        #endif
         if error { queues = OutboundQueues() }
         didClose(reason: reason, error: error)
     }

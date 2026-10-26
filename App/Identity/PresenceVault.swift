@@ -24,13 +24,13 @@ final class PresenceVault {
             if let decoded = try? JSONDecoder().decode(PresenceVaultState.self, from: data) { loaded = decoded } else { persistent = false }
         }
         state = loaded
-        if !UserDefaults.standard.bool(forKey: Self.installMarker) {
+        if !DesktopPreview.preferences.bool(forKey: Self.installMarker) {
             if (existing ?? nil) != nil, persistent {
                 state.freshInstall(epoch: epoch())
                 AppLog.event("rotid_presence", ["event": "generation", "reason": "fresh_install", "generation": "\(state.generation)"])
                 save()
             }
-            UserDefaults.standard.set(true, forKey: Self.installMarker)
+            DesktopPreview.preferences.set(true, forKey: Self.installMarker)
         }
     }
 

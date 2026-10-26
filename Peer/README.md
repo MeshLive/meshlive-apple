@@ -13,7 +13,7 @@ ringing/accept/hang-up.
 ## Build
 
 ```sh
-bash ~/MeshLive/buildlock.sh swift build --scratch-path .build/swift --disable-sandbox --product MeshPeer
+swift build --scratch-path .build/swift --disable-sandbox --product MeshPeer
 peer=$(swift build --scratch-path .build/swift --disable-sandbox --product MeshPeer --show-bin-path)/MeshPeer
 $peer help
 ```
@@ -56,5 +56,5 @@ $peer call --to first --android-defaults --seconds 20    # call the first call o
 
 `--transport l2cap` advertises LE CoC instead of GATT. The default identity is a software P-256 key in
 `~/MeshLive/peer-identity.key`; it keeps the same node prefix across runs. Every event is printed as a `peer:` line,
-and the radio prints the app's `BENCHMARK` lines. Redirect the output to `~/MeshLive/logs/peer-<date>-<case>.log`.
+and the radio prints the app's `BENCHMARK` lines. Redirect the output to a log file outside the checkout.
 Use only phones assigned to the run.

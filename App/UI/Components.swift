@@ -140,6 +140,9 @@ struct NoticeRow: View {
 struct EmptyState: View {
     let icon: String, title: String, message: String
     var body: some View {
+        #if os(macOS)
+        ContentUnavailableView(title, systemImage: icon, description: Text(message))
+        #else
         if #available(iOS 17.0, *) {
             ContentUnavailableView(title, systemImage: icon, description: Text(message))
         } else {
@@ -150,6 +153,7 @@ struct EmptyState: View {
             }
             .padding(32).frame(maxWidth: .infinity)
         }
+        #endif
     }
 }
 
@@ -193,7 +197,7 @@ struct RoundControl: View {
                 Image(systemName: icon).font(.system(size: side * 0.36, weight: .semibold))
                     .frame(width: side, height: side).background(fill, in: Circle()).foregroundStyle(foreground)
                 // Never broken inside a word: when the row cannot fit, the call screen switches to a grid.
-                Text(label).font(Typo.caption).foregroundStyle(.white).lineLimit(1).fixedSize()
+                Text(label).font(Typo.caption).foregroundStyle(.white).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             }
         }
         .buttonStyle(.plain)
@@ -238,13 +242,19 @@ struct SettingsRowLabel: View {
     let icon: String, title: String
     var value: String? = nil
     var chevron = true
+    @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: icon).font(.body).foregroundStyle(Palette.dimInk).frame(width: 26).accessibilityHidden(true)
-            Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
-            Spacer(minLength: 8)
-            if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).lineLimit(1) }
-            if chevron { Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Palette.dimInk).accessibilityHidden(true) }
+            Image(systemName: icon).font(.system(size: 17)).foregroundStyle(Palette.dimInk).frame(width: 26).accessibilityHidden(true)
+            let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 8))
+            layout {
+                Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !typeSize.isAccessibilitySize { Spacer(minLength: 8) }
+                if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).fixedSize(horizontal: false, vertical: true) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if chevron { Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.dimInk).accessibilityHidden(true) }
         }
         .padding(.horizontal, 16).padding(.vertical, 15).frame(minHeight: 56)
         .contentShape(Rectangle())
@@ -257,9 +267,21 @@ struct SettingsLinkRow<Destination: View>: View {
     let icon: String, title: String
     var value: String? = nil
     @ViewBuilder let destination: () -> Destination
+    #if os(macOS)
+    @State private var desktopRouteID = UUID()
+    #endif
     var body: some View {
+        #if os(macOS)
+        NavigationLink(value: DesktopDetailRoute(id: desktopRouteID) { destination() }) {
+            SettingsRowLabel(icon: icon, title: title, value: value)
+        }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-link-" + title)
+        #else
         NavigationLink { destination() } label: { SettingsRowLabel(icon: icon, title: title, value: value) }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-link-" + title)
+        #endif
     }
 }
 
@@ -274,12 +296,13 @@ struct SettingsToggleRow: View {
     @State private var showInfo = false
     var body: some View {
         HStack(spacing: 14) {
-            if let icon { Image(systemName: icon).font(.body).foregroundStyle(Palette.dimInk).frame(width: 26).accessibilityHidden(true) }
+            if let icon { Image(systemName: icon).font(.system(size: 17)).foregroundStyle(Palette.dimInk).frame(width: 26).accessibilityHidden(true) }
             if let info {
                 Button { showInfo = true } label: {
                     (Text(title).font(.body.weight(.medium)).foregroundColor(Palette.ink)
                      + Text("  ") + Text(Image(systemName: "info.circle")).font(.footnote).foregroundColor(Palette.dimInk))
                         .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("About \(title)")
@@ -302,9 +325,10 @@ struct MeshSwitchStyle: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
         Button { configuration.isOn.toggle() } label: {
             ZStack(alignment: configuration.isOn ? .trailing : .leading) {
-                Capsule().fill(configuration.isOn ? Color.white : Color(UIColor(rgb: 0x3A3A3C))).frame(width: 52, height: 32)
-                Circle().fill(configuration.isOn ? Color.black : Color(UIColor(rgb: 0x9A9A9F))).frame(width: 24, height: 24).padding(4)
+                Capsule().fill(configuration.isOn ? Color.white : Color(meshRGB: 0x3A3A3C)).frame(width: 52, height: 32)
+                Circle().fill(configuration.isOn ? Color.black : Color(meshRGB: 0x9A9A9F)).frame(width: 24, height: 24).padding(4)
             }
+            .frame(width: 52, height: 44)
             .animation(.easeOut(duration: 0.15), value: configuration.isOn)
             .contentShape(Rectangle())
         }
@@ -342,8 +366,9 @@ struct CapsuleButton: View {
                         .foregroundStyle(kind == .whiteLive ? Palette.liveRed : (kind == .white ? Color.black : Color.white))
                         .accessibilityHidden(true)
                 }
-                Text(title).font(.title3.weight(.semibold))
+                Text(title).font(.title3.weight(.semibold)).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.horizontal, 20).padding(.vertical, 14)
             .frame(maxWidth: .infinity).frame(minHeight: 60)
             .foregroundStyle(kind == .white || kind == .whiteLive ? Color.black : Color.white)
             .background(background, in: Capsule())
@@ -387,6 +412,10 @@ struct TabHeader: View {
 struct RadioStatus {
     let title: String, detail: String, ok: Bool, action: String?
     init(model: AppModel) {
+        if DesktopPreview.enabled {
+            (title, detail, ok, action) = ("Preview", "Sample people and streams. Bluetooth and media are off.", false, nil)
+            return
+        }
         switch model.radio.central?.state {
         case .poweredOff?: (title, detail, ok, action) = ("Bluetooth off", "Turn it on to call, talk or go live", false, "Open Settings"); return
         case .unauthorized?: (title, detail, ok, action) = ("Access needed", "Bluetooth, camera and microphone", false, "Open app settings"); return

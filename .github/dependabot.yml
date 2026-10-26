@@ -1,6 +1,10 @@
 # Weekly update checks. The github-actions entry keeps .github/workflows/ci.yml current. There are no
-# external Swift Package dependencies (third-party code is vendored under Vendor/ with its licences), so the
-# swift entry is idle until a `.package(...)` dependency is added.
+# external Swift Package dependencies (third-party code is fetched by pinned, checksum-verified scripts; see
+# THIRD_PARTY_NOTICES.md), so the swift entry is idle until a `.package(...)` dependency is added.
+#
+# No custom `labels:` are set: a custom label that does not exist in the repository makes Dependabot fail to label
+# its pull requests. With the default, Dependabot creates and applies its own "dependencies" label (plus one per
+# ecosystem).
 version: 2
 updates:
   - package-ecosystem: "swift"
@@ -9,7 +13,6 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 3
-    labels: ["dependencies"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -17,4 +20,3 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 3
-    labels: ["dependencies"]

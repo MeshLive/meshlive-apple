@@ -2,6 +2,10 @@ import SwiftUI
 import AVFoundation
 import CoreImage.CIFilterBuiltins
 import NearbyCore
+#if os(macOS)
+import AppKit
+import Vision
+#endif
 
 /// "Add contact" (verify in person): your BVMID1 QR code and full ID, and scan theirs. The contact list is the Contacts tab.
 struct VerifyView: View {
@@ -15,7 +19,7 @@ struct VerifyView: View {
                 CardNote("Meet in person. Scan each other's code, or compare the safety code on both screens during a call. If they match, no one is in the middle.")
                     .padding(.bottom, 4)
                 if let text = model.myQrText(), let image = qrImage(text) {
-                    Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
+                    Image(decorative: image, scale: 1).interpolation(.none).resizable().scaledToFit()
                         .padding(14).background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .frame(maxWidth: 260).frame(maxWidth: .infinity)
                         .accessibilityLabel("QR code with your ID for the other person to scan")
@@ -46,7 +50,7 @@ struct VerifyView: View {
         }
         .background(Palette.ground.ignoresSafeArea())
         .navigationTitle("Add contact")
-        .navigationBarTitleDisplayMode(.large)
+        .mobileNavigationTitle(inline: false)
         .sheet(isPresented: $scanning) {
             QRScannerView { text in
                 scanning = false
@@ -63,15 +67,16 @@ struct VerifyView: View {
         }
     }
 
-    private func qrImage(_ text: String) -> UIImage? {
+    private func qrImage(_ text: String) -> CGImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(text.utf8); filter.correctionLevel = "M"
         guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
               let cg = CIContext().createCGImage(output, from: output.extent) else { return nil }
-        return UIImage(cgImage: cg)
+        return cg
     }
 }
 
+#if os(iOS)
 struct QRScannerView: UIViewControllerRepresentable {
     let onCode: (String) -> Void
     func makeUIViewController(context: Context) -> ScannerController { let c = ScannerController(); c.onCode = onCode; return c }
@@ -102,3 +107,54 @@ struct QRScannerView: UIViewControllerRepresentable {
         }
     }
 }
+
+#else
+struct QRScannerView: NSViewRepresentable {
+    let onCode: (String) -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(onCode: onCode) }
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        let preview = AVCaptureVideoPreviewLayer(session: context.coordinator.session)
+        preview.videoGravity = .resizeAspectFill
+        view.layer = preview
+        context.coordinator.start()
+        return view
+    }
+    func updateNSView(_ view: NSView, context: Context) {}
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) { coordinator.stop() }
+
+    final class Coordinator: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+        let session = AVCaptureSession()
+        private let queue = DispatchQueue(label: "io.github.meshlive.qr")
+        private let onCode: (String) -> Void
+        private var done = false
+        init(onCode: @escaping (String) -> Void) { self.onCode = onCode }
+        func start() {
+            MediaPermissions.requestCamera { [weak self] allowed in
+                guard allowed, let self else { return }
+                self.queue.async {
+                    guard let device = DesktopCameraDevices.selected(),
+                          let input = try? AVCaptureDeviceInput(device: device), self.session.canAddInput(input) else { return }
+                    self.session.addInput(input)
+                    let output = AVCaptureVideoDataOutput()
+                    guard self.session.canAddOutput(output) else { return }
+                    self.session.addOutput(output)
+                    output.setSampleBufferDelegate(self, queue: self.queue)
+                    self.session.startRunning()
+                }
+            }
+        }
+        func stop() { queue.async { self.done = true; self.session.stopRunning() } }
+        func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+            guard !done else { return }
+            let request = VNDetectBarcodesRequest()
+            request.symbologies = [.qr]
+            try? VNImageRequestHandler(cmSampleBuffer: sampleBuffer, orientation: .up).perform([request])
+            guard let text = request.results?.first?.payloadStringValue else { return }
+            done = true
+            DispatchQueue.main.async { self.onCode(text) }
+        }
+    }
+}
+#endif

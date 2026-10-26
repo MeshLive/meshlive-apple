@@ -34,6 +34,10 @@ public final class SecureLink {
     public private(set) var usedBmh3 = false
     /// BMH3 only: the authenticated peer of the link handshake.
     public private(set) var bmh3Peer: Bmh3Peer?
+    /// A stream reader tightens this before the header and raises it only after a verified audio-only header.
+    public var maxIncomingCiphertextBytes = SecureRecordProtocol.maxPlaintextBytes + MeshAead.tagBytes {
+        didSet { opener?.maxCiphertextBytes = maxIncomingCiphertextBytes }
+    }
     public var isEstablished: Bool { sealer != nil }
     public var acceptDiscoveryOpening = false
     public var acceptStoreForward: Bool {
@@ -89,8 +93,8 @@ public final class SecureLink {
         return frame
     }
 
-    public func receive(_ data: Data) throws -> [Output] {
-        if let opener { return try opener.feed(data).map { .record($0) } }
+    public func receive(_ data: Data, recordLimit: Int = Int.max) throws -> [Output] {
+        if let opener { return try opener.feed(data, maxRecords: recordLimit).map { .record($0) } }
         helloBuffer.append(data)
         var outputs: [Output] = []
         while sealer == nil, let frame = try nextFrame() {
@@ -98,7 +102,7 @@ public final class SecureLink {
                 install(keys)
                 outputs.append(.established)
                 let rest = helloBuffer; helloBuffer = Data()
-                if !rest.isEmpty, let opener { outputs += try opener.feed(rest).map { .record($0) } }
+                if !rest.isEmpty, let opener { outputs += try opener.feed(rest, maxRecords: recordLimit).map { .record($0) } }
             }
         }
         return outputs
@@ -109,6 +113,7 @@ public final class SecureLink {
         sealer = SecureRecordSealer(key: keys.sendKey)
         let opener = SecureRecordOpener(key: keys.receiveKey)
         opener.acceptDiscoveryOpening = acceptDiscoveryOpening && presentedCapabilities.transportMask & NodeCapabilities.transportDiscoveryOpening != 0
+        opener.maxCiphertextBytes = maxIncomingCiphertextBytes
         self.opener = opener
     }
 

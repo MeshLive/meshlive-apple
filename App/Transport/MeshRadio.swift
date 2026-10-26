@@ -67,6 +67,32 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
 
     var centralReady: Bool { central?.state == .poweredOn }
     var peripheralReady: Bool { peripheralManager?.state == .poweredOn && servicesAdded == 2 && psm != 0 }
+    #if os(macOS)
+    // Counts at the delegate boundary distinguish a silent Bluetooth input from a request that
+    // reached this process but could not be routed. No payload, address or peer ID is retained.
+    private var desktopWriteBatches = 0, desktopRawWrites = 0, desktopAcceptedWrites = 0
+    private var desktopWrongCharacteristic = 0, desktopWrongOffset = 0
+    private var desktopUnknownWriter = 0, desktopMissingWriteValue = 0
+    private var desktopLastRawWriteAt: TimeInterval?
+    private var desktopRawNotifications = 0, desktopNotificationErrors = 0
+    private var desktopUnknownNotifier = 0, desktopMissingNotificationValue = 0
+    private var desktopLastRawNotificationAt: TimeInterval?
+    private var desktopLastNotificationError = "none"
+    var desktopLogFields: [String: String] {
+        let now = ProcessInfo.processInfo.systemUptime
+        return ["discoveryScanWanted": "\(wantScan)", "discoveryScanning": "\(central?.isScanning == true)",
+                "gattServerLinks": "\(serverLinks.count)", "gattClientLinks": "\(clientLinks.count)",
+                "gattWriteBatches": "\(desktopWriteBatches)", "gattRawWriteRequests": "\(desktopRawWrites)",
+                "gattAcceptedWriteRequests": "\(desktopAcceptedWrites)",
+                "gattWrongWriteCharacteristic": "\(desktopWrongCharacteristic)", "gattWrongWriteOffset": "\(desktopWrongOffset)",
+                "gattUnknownWriter": "\(desktopUnknownWriter)", "gattMissingWriteValue": "\(desktopMissingWriteValue)",
+                "gattRawWriteIdleMs": desktopLastRawWriteAt.map { "\(Int((now - $0) * 1_000))" } ?? "none",
+                "gattRawNotifications": "\(desktopRawNotifications)", "gattNotificationErrors": "\(desktopNotificationErrors)",
+                "gattUnknownNotifier": "\(desktopUnknownNotifier)", "gattMissingNotificationValue": "\(desktopMissingNotificationValue)",
+                "gattRawNotificationIdleMs": desktopLastRawNotificationAt.map { "\(Int((now - $0) * 1_000))" } ?? "none",
+                "gattLastNotificationError": desktopLastNotificationError]
+    }
+    #endif
 
     func start() {
         if advertisingWatchdog == nil {
@@ -107,12 +133,21 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     // MARK: Scanning
 
     func setScanning(_ on: Bool) {
+        #if os(macOS)
+        let changed = wantScan != on
+        #endif
         wantScan = on
         guard centralReady else { return }
+        #if os(macOS)
+        guard changed || central.isScanning != on else { return }
+        #endif
         if on {
             // Foreground scan without a service filter: iPhone compact UUIDs differ per device.
             central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
         } else { central.stopScan() }
+        #if os(macOS)
+        AppLog.event("discovery_scan", desktopLogFields)
+        #endif
     }
 
     func prune(olderThan seconds: TimeInterval) {
@@ -291,10 +326,26 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        #if os(macOS)
+        desktopWriteBatches += 1; desktopRawWrites += requests.count
+        if !requests.isEmpty { desktopLastRawWriteAt = ProcessInfo.processInfo.systemUptime }
+        #endif
         var ok = true
         for request in requests {
             guard request.characteristic.uuid == CBUUID(string: MeshUUIDs.gattWrite), request.offset == 0,
-                  let link = serverLinks[request.central.identifier], let value = request.value else { ok = false; continue }
+                  let link = serverLinks[request.central.identifier], let value = request.value else {
+                ok = false
+                #if os(macOS)
+                if request.characteristic.uuid != CBUUID(string: MeshUUIDs.gattWrite) { desktopWrongCharacteristic += 1 }
+                else if request.offset != 0 { desktopWrongOffset += 1 }
+                else if serverLinks[request.central.identifier] == nil { desktopUnknownWriter += 1 }
+                else { desktopMissingWriteValue += 1 }
+                #endif
+                continue
+            }
+            #if os(macOS)
+            desktopAcceptedWrites += 1
+            #endif
             link.received(value)
         }
         if let first = requests.first { peripheral.respond(to: first, withResult: ok ? .success : .requestNotSupported) }
@@ -336,6 +387,12 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         attempts[key] = attempt
         peripheral.delegate = self
         attempt.timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+            #if os(macOS)
+            if let pending = self?.attempts[key] {
+                AppLog.event("connect_details", ["phase": "timeout", "setupStage": pending.stage,
+                                                 "delegateAttached": "\(pending.peripheral.delegate === self)"])
+            }
+            #endif
             self?.failAttempt(key, "Connection timed out", stage: "timeout")
         }
         central.connect(peripheral, options: nil)
@@ -382,6 +439,12 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         AppLog.event("connect", ["stage": "connected", "transport": attempt.transport.rawValue])
         attempt.stage = "services"
         let service = attempt.transport == .l2cap ? MeshUUIDs.controlService : MeshUUIDs.gattDataService
+        #if os(macOS)
+        AppLog.event("connect_details", ["phase": "services_request", "delegateAttached": "\(peripheral.delegate === self)",
+                                         "samePeripheralInstance": "\(peripheral === attempt.peripheral)",
+                                         "peripheralState": "\(peripheral.state.rawValue)",
+                                         "cachedServices": "\(peripheral.services?.count ?? 0)"])
+        #endif
         peripheral.discoverServices([CBUUID(string: service)])
     }
 
@@ -396,6 +459,11 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        #if os(macOS)
+        AppLog.event("connect_details", ["phase": "services_callback", "attemptActive": "\(attempts[peripheral.identifier] != nil)",
+                                         "services": (peripheral.services ?? []).map { $0.uuid.uuidString }.joined(separator: ","),
+                                         "error": error?.localizedDescription ?? "none"])
+        #endif
         guard let attempt = attempts[peripheral.identifier] else { return }
         let serviceId = CBUUID(string: attempt.transport == .l2cap ? MeshUUIDs.controlService : MeshUUIDs.gattDataService)
         guard error == nil, let service = peripheral.services?.first(where: { $0.uuid == serviceId }) else {
@@ -408,6 +476,11 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        #if os(macOS)
+        AppLog.event("connect_details", ["phase": "characteristics_callback", "attemptActive": "\(attempts[peripheral.identifier] != nil)",
+                                         "characteristics": "\(service.characteristics?.count ?? 0)",
+                                         "error": error?.localizedDescription ?? "none"])
+        #endif
         guard let attempt = attempts[peripheral.identifier] else { return }
         let characteristics = service.characteristics ?? []
         if attempt.transport == .l2cap {
@@ -428,6 +501,10 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        #if os(macOS)
+        AppLog.event("connect_details", ["phase": "subscribe_callback", "attemptActive": "\(attempts[peripheral.identifier] != nil)",
+                                         "notifying": "\(characteristic.isNotifying)", "error": error?.localizedDescription ?? "none"])
+        #endif
         guard let attempt = attempts[peripheral.identifier], characteristic.uuid == CBUUID(string: MeshUUIDs.gattNotify) else { return }
         guard error == nil, characteristic.isNotifying, let write = attempt.write else {
             failAttempt(peripheral.identifier, "GATT subscription failed: \(error?.localizedDescription ?? "not notifying")"); return
@@ -445,6 +522,15 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if characteristic.uuid == CBUUID(string: MeshUUIDs.gattNotify) {
+            #if os(macOS)
+            desktopRawNotifications += 1; desktopLastRawNotificationAt = ProcessInfo.processInfo.systemUptime
+            if let error = error as NSError? {
+                desktopNotificationErrors += 1
+                desktopLastNotificationError = "\(error.domain)/\(error.code)"
+            }
+            if clientLinks[peripheral.identifier] == nil { desktopUnknownNotifier += 1 }
+            if characteristic.value == nil { desktopMissingNotificationValue += 1 }
+            #endif
             if let value = characteristic.value { clientLinks[peripheral.identifier]?.received(value) }
             return
         }

@@ -432,6 +432,7 @@ final class AudioLiveEngineTests: XCTestCase {
             let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
             XCTAssertEqual(viewer.phase, .closed)
             XCTAssertNil(viewer.audioLiveHeader)
+            XCTAssertEqual(viewer.audioMarkerMismatch, false)
         }
         do { // video stream, offer marked audio only
             let source = StreamSourceEngine(transport: .l2cap, identity: sourceId, header: header, expectedViewerPrefix: nil)
@@ -439,6 +440,7 @@ final class AudioLiveEngineTests: XCTestCase {
             let pipe = Pipe(source, viewer); try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
             XCTAssertEqual(viewer.phase, .closed)
             XCTAssertNil(viewer.header)
+            XCTAssertEqual(viewer.audioMarkerMismatch, true)
         }
         do { // a record signed by another stream key
             let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
@@ -466,5 +468,218 @@ final class AudioLiveSheddingTests: XCTestCase {
         XCTAssertEqual(dropped, 13, "records older than 1.5 s at 4.0 s: 0.0 ... 2.4")
         XCTAssertEqual(q.audioAge(now: 4.0), 1.4, accuracy: 1e-9)
         XCTAssertEqual(q.count, 1 + 7, "the control item is never shed")
+    }
+}
+
+/// PROTOCOL ingress budgets: reject an over-limit ciphertext from its length alone, before reading its body.
+final class AudioLiveRecordLimitTests: XCTestCase {
+    private func pair(_ transport: MeshTransport) throws -> (StreamSourceEngine, StreamViewerEngine, AudioLiveSigner) {
+        let sourceId = SoftwareSigningIdentity(), viewerId = SoftwareSigningIdentity()
+        let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
+        let header = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
+        let source = StreamSourceEngine(transport: transport, identity: sourceId, header: header,
+                                        expectedViewerPrefix: viewerId.nodeId.prefix, audioLive: signer)
+        let viewer = StreamViewerEngine(transport: transport, identity: viewerId, decodeMask: 0,
+                                        expectedAdjacentPrefix: sourceId.nodeId.prefix, expectAudioOnly: true)
+        try source.start(now: 0); try viewer.start(now: 0)
+        // Link hellos, then endpoint hellos; leave the stream header queued at the source.
+        for _ in 0..<2 {
+            viewer.receive(try XCTUnwrap(source.nextOutgoing(now: 0)), now: 0)
+            source.receive(try XCTUnwrap(viewer.nextOutgoing(now: 0)), now: 0)
+        }
+        XCTAssertEqual(viewer.phase, .open)
+        XCTAssertNil(viewer.audioLiveHeader)
+        return (source, viewer, signer)
+    }
+
+    func testOversizedRecordFailsBeforeItsCiphertextArrives() throws {
+        for transport: MeshTransport in [.gatt, .l2cap] {
+            for afterHeader in [false, true] {
+                let (source, viewer, _) = try pair(transport)
+                if afterHeader {
+                    viewer.receive(try XCTUnwrap(source.nextOutgoing(now: 0)), now: 0)
+                    XCTAssertNotNil(viewer.audioLiveHeader)
+                }
+                let limit = afterHeader ? 28 * 1024 : 4 * 1024
+                let lengthOnly = SecureRecordProtocol.header(type: .meshEnvelope, sequence: viewer.link.receivedRecords,
+                                                            ciphertextBytes: limit + 1)
+                viewer.receive(lengthOnly, now: 0)
+                XCTAssertEqual(viewer.phase, .closed, "cap=\(limit), transport=\(transport)")
+            }
+        }
+    }
+    func testCoalescedHeaderAndLargeSignedBatchUseTheVerifiedHeaderCap() throws {
+        for transport: MeshTransport in [.gatt, .l2cap] {
+            let (source, viewer, signer) = try pair(transport)
+            source.sendSignedAudio(try signer.sign(flags: StreamProtocol.flagAudio | StreamProtocol.flagCodecConfig,
+                                                  presentationTimeUs: 0, body: OpusHead.make()))
+            var opus = Data(repeating: 0, count: 1275); opus[0] = 0xf8
+            let units = (0..<20).map {
+                MediaPacket(flags: StreamProtocol.flagAudio, presentationTimeUs: Int64($0) * 20_000, payload: opus)
+            }
+            let batch = try MediaPacket.combineAudio(units)
+            source.sendSignedAudio(try signer.sign(flags: batch.flags, presentationTimeUs: batch.presentationTimeUs, body: batch.payload))
+            var coalesced = Data()
+            while let record = source.nextOutgoing(now: 0) { coalesced.append(record) }
+            XCTAssertGreaterThan(coalesced.count, 4 * 1024)
+            viewer.receive(coalesced, now: 0)
+            XCTAssertEqual(viewer.phase, .open, viewer.closeReason ?? "")
+            XCTAssertEqual(viewer.audioLiveGuard?.verifiedRecords, 2)
+            XCTAssertEqual(viewer.audioPackets, 20)
+        }
+    }
+
+}
+
+final class StreamRoutePenaltyEngineTests: XCTestCase {
+    func testKnownParentIsBlockedOnlyAfterItsLinkAuthenticates() throws {
+        let parent = SoftwareSigningIdentity(), child = SoftwareSigningIdentity()
+        let signer = try AudioLiveSigner(identity: parent, streamId: UUID(), preset: AudioLive.presetVoice)
+        let header = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
+        let source = StreamSourceEngine(transport: .gatt, identity: parent, header: header, expectedViewerPrefix: nil, audioLive: signer)
+        let viewer = StreamViewerEngine(transport: .gatt, identity: child, decodeMask: 0, expectedAdjacentPrefix: parent.nodeId.prefix, expectAudioOnly: true)
+        var checked: NodeId?
+        viewer.isParentBlocked = { checked = $0; return true }
+        let pipe = Pipe(source, viewer, gatt: true)
+        try source.start(now: 0); try viewer.start(now: 0); try pipe.pump()
+        XCTAssertEqual(checked, parent.nodeId)
+        XCTAssertEqual(viewer.phase, .closed)
+        XCTAssertNil(viewer.audioLiveHeader)
+        XCTAssertNil(viewer.audioMarkerMismatch)
+    }
+}
+
+
+final class AudioLiveRelayEngineTests: XCTestCase {
+    func testSignedChainBootstrapControlsEndAndForgeryOnBothTransports() throws {
+        for gatt in [false, true] {
+          for forge in [false, true] {
+            let sourceId = SoftwareSigningIdentity(), relayId = SoftwareSigningIdentity(), childId = SoftwareSigningIdentity()
+            let t: MeshTransport = gatt ? .gatt : .l2cap
+            let signer = try AudioLiveSigner(identity: sourceId, streamId: UUID(), preset: AudioLive.presetVoice)
+            let placeholder = StreamHeader(width: 640, height: 360, fps: 15, codecId: StreamProtocol.codecVP9, includeAudio: true)
+            let source = StreamSourceEngine(transport: t, identity: sourceId, header: placeholder, expectedViewerPrefix: relayId.nodeId.prefix, audioLive: signer)
+            let relay = StreamViewerEngine(transport: t, identity: relayId, decodeMask: 0, expectedAdjacentPrefix: sourceId.nodeId.prefix, maxChildren: 1, expectAudioOnly: true)
+            let core = StreamForwardingCore(localNodeId: relayId.nodeId, upstreamPeerNodeId: sourceId.nodeId, streamId: signer.streamId, sourceNodeId: sourceId.nodeId, audioOnly: true)
+            var hop: StreamForwarderEngine?
+            var originals: [MeshEnvelope] = [], copies: [MeshEnvelope] = []
+            var requests = 0
+            source.onEvent = { if case .keyFrameRequested = $0 { requests += 1 } }
+            relay.onEvent = {
+                if case .envelope(let e) = $0 {
+                    originals.append(e)
+                    if case .forward(let copy, _) = try? core.receive(e) { hop?.forward(copy) }
+                }
+            }
+            let parentPipe = Pipe(source, relay, gatt: gatt)
+            try source.start(now: 0); try relay.start(now: 0); try parentPipe.pump()
+            source.sendSignedAudio(try signer.sign(flags: StreamProtocol.flagAudio | StreamProtocol.flagCodecConfig, presentationTimeUs: 0, body: OpusHead.make()))
+            try parentPipe.pump()
+            let grant = ForwardedStreamGrant(sourceNodeId: sourceId.nodeId, streamId: signer.streamId, key: try XCTUnwrap(relay.mediaOpenKey))
+            let forwarder = StreamForwarderEngine(transport: t, identity: relayId, grant: grant, codecId: 0, expectedChildPrefix: childId.nodeId.prefix, audioOnly: true)
+            let child = StreamViewerEngine(transport: t, identity: childId, decodeMask: 0, expectedAdjacentPrefix: relayId.nodeId.prefix, expectedMediaSource: sourceId.nodeId, expectAudioOnly: true)
+            hop = forwarder
+            forwarder.onEvent = {
+                if case .childAuthenticated(let id, _) = $0 { for e in (try? core.addChild(id)) ?? [] { forwarder.forward(e) } }
+                if case .keyFrameRequested = $0 { requests += 1 }
+                if case .endAcknowledged = $0 { relay.releaseEndAck() }
+            }
+            var events: [StreamViewerEngine.Event] = []
+            child.onEvent = { events.append($0); if case .envelope(let e) = $0 { copies.append(e) } }
+            let childPipe = Pipe(forwarder, child, gatt: gatt)
+            try forwarder.start(now: 0); try child.start(now: 0); try childPipe.pump()
+            XCTAssertEqual(child.audioLiveHeader, signer.header)
+            XCTAssertEqual(child.mediaSourceNodeId, sourceId.nodeId)
+            XCTAssertEqual(child.peerLinkNodeId, relayId.nodeId)
+            let units = (0..<10).map { MediaPacket(flags: StreamProtocol.flagAudio, presentationTimeUs: Int64($0) * 20_000, payload: Data([0xf8, 0xff, 0xfe])) }
+            let batch = try MediaPacket.combineAudio(units)
+            source.sendSignedAudio(try signer.sign(flags: batch.flags, presentationTimeUs: 0, body: batch.payload))
+            try parentPipe.pump(); try childPipe.pump()
+            XCTAssertEqual(child.audioPackets, 10)
+            XCTAssertEqual(child.audioLiveGuard?.verifiedRecords, 2)
+            XCTAssertTrue(events.contains(.audioConfig(OpusHead.make())))
+            for copy in copies {
+                let original = try XCTUnwrap(originals.first { $0.sequence == copy.sequence })
+                XCTAssertEqual(copy.payload, original.payload)
+                XCTAssertEqual(copy.sourceNodeId, original.sourceNodeId)
+                XCTAssertEqual(copy.ttl, original.ttl - 1)
+            }
+            source.setPaused(true); try parentPipe.pump(); try childPipe.pump()
+            XCTAssertTrue(events.contains(.state(.paused)))
+            source.setPaused(false); try parentPipe.pump(); try childPipe.pump()
+            relay.requestKeyFrame(); child.requestKeyFrame()
+            try parentPipe.pump(); try childPipe.pump()
+            XCTAssertEqual(requests, 0)
+            if forge {
+                let forger = try AudioLiveSigner(identity: sourceId, streamId: signer.streamId, preset: AudioLive.presetVoice)
+                let before = originals.count
+                source.sendSignedAudio(try forger.sign(flags: StreamProtocol.flagAudio, presentationTimeUs: 200_000, body: Data([0xf8, 0xff, 0xfe])))
+                try parentPipe.pump(); try childPipe.pump()
+                XCTAssertEqual(relay.phase, .closed)
+                XCTAssertEqual(originals.count, before, "an invalid signature never reaches forwarding")
+                XCTAssertEqual(child.audioPackets, 10)
+            } else {
+                relay.holdEndAck = true
+                source.endStream(); try parentPipe.pump(); try childPipe.pump(); try parentPipe.pump()
+                XCTAssertTrue(events.contains(.state(.ended)))
+                XCTAssertEqual(child.phase, .closed)
+                XCTAssertEqual(source.phase, .closed)
+                XCTAssertEqual(forwarder.phase, .closed)
+            }
+          }
+        }
+    }
+    private func pair(ageBound: Bool = true) throws -> (StreamForwarderEngine, StreamViewerEngine, Pipe, ForwardedStreamGrant) {
+        let p = SoftwareSigningIdentity(), c = SoftwareSigningIdentity(), s = SoftwareSigningIdentity()
+        let grant = ForwardedStreamGrant(sourceNodeId: s.nodeId, streamId: UUID(), key: Data(repeating: 9, count: 32))
+        let hop = StreamForwarderEngine(transport: .l2cap, identity: p, grant: grant, codecId: 0, expectedChildPrefix: c.nodeId.prefix, audioOnly: true)
+        hop.audioAgeBound = ageBound
+        let child = StreamViewerEngine(transport: .l2cap, identity: c, decodeMask: 0, expectedAdjacentPrefix: p.nodeId.prefix, expectAudioOnly: true)
+        let pipe = Pipe(hop, child)
+        try hop.start(now: 0); try child.start(now: 0); try pipe.pump()
+        XCTAssertTrue(hop.ready)
+        return (hop, child, pipe, grant)
+    }
+    private func envelope(_ grant: ForwardedStreamGrant, _ seq: UInt64, _ flags: UInt8) -> MeshEnvelope {
+        MeshEnvelope(streamId: grant.streamId, sourceNodeId: grant.sourceNodeId, sequence: seq, ttl: 4, flags: flags, payload: Data(repeating: 7, count: 40))
+    }
+    func testShedPredicatePreservesConfigControlAndOddFlags() throws {
+        let (hop, child, _, grant) = try pair()
+        hop.forward(envelope(grant, 0, 10), now: 0); hop.forward(envelope(grant, 1, 16), now: 0)
+        for i in 0..<9 { hop.forward(envelope(grant, UInt64(i + 2), i % 2 == 0 ? 8 : 72), now: Double(i) * 0.5) }
+        hop.forward(envelope(grant, 11, 24), now: 4)
+        XCTAssertGreaterThan(hop.shedAudioRecords, 0)
+        XCTAssertFalse(hop.isWithdrawing)
+        var kept: [MeshEnvelope] = []
+        while let bytes = hop.nextOutgoing(now: 4) {
+            for output in try child.link.receive(bytes) { if case .record(let r) = output, r.type == .meshEnvelope { kept.append(try MeshEnvelope(decoding: r.payload)) } }
+        }
+        XCTAssertEqual(Array(kept.prefix(2)).map(\.sequence), [0, 1])
+        XCTAssertEqual(kept.last?.sequence, 11)
+        XCTAssertTrue(kept.contains { $0.sequence == 10 })
+        XCTAssertLessThan(kept.count, 12)
+    }
+    func testShedRateAndThirtySecondControlArmWithdrawChild() throws {
+        for bounded in [true, false] {
+            let (hop, child, pipe, grant) = try pair(ageBound: bounded)
+            var events: [StreamViewerEngine.Event] = []
+            child.onEvent = { events.append($0) }
+            if bounded {
+                for i in 0..<25 { hop.forward(envelope(grant, UInt64(i), 72), now: Double(i) * 0.2) }
+                XCTAssertGreaterThan(hop.shedAudioRecords, 0)
+            } else {
+                hop.forward(envelope(grant, 0, 72), now: 0)
+                hop.receive(try child.link.seal(.linkHeartbeat, Data([1])), now: 29); hop.tick(now: 29)
+                XCTAssertFalse(hop.isWithdrawing)
+                hop.receive(try child.link.seal(.linkHeartbeat, Data([1])), now: 31); hop.tick(now: 31)
+                XCTAssertEqual(hop.shedAudioRecords, 0)
+            }
+            XCTAssertTrue(hop.isWithdrawing)
+            XCTAssertEqual(hop.queuedEnvelopes, 0)
+            pipe.now = bounded ? 5 : 31
+            try pipe.pump()
+            XCTAssertTrue(events.contains { if case .routeWithdrawn = $0 { return true }; return false })
+            XCTAssertEqual(child.phase, .closed)
+        }
     }
 }

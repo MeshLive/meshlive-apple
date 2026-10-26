@@ -6,7 +6,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Platform-independent implementation of PROTOCOL.md. All integers on the wire are big endian. */
+/** Platform-independent implementation of Experimental/V1_PROTOCOL.md. All integers on the wire are big endian. */
 public final class Wire {
     public static final int MAX_RECORD = 32768, MAX_TEXT = 4096;
     public static final UUID SERVICE = UUID.fromString("7D2C9B68-19E6-4F03-8B41-82AE51F26790");

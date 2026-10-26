@@ -12,6 +12,7 @@ struct CallView: View {
     @State private var controlsVisible = true
     @State private var lastInteraction = Date()
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
 
     init(call: CallController) { self.call = call; _sink = ObservedObject(wrappedValue: call.remote.sink) }
 
@@ -36,25 +37,31 @@ struct CallView: View {
                     Spacer(); Spacer()
                 }
             }
-            VStack(spacing: 0) {
-                if controlsVisible || !showsVideo { topBar.transition(.opacity) }
+            if typeSize.isAccessibilitySize {
+                ScrollView { overlay }
+            } else { overlay }
+        }
+        .animation(.easeInOut(duration: 0.2), value: controlsVisible)
+        .sheet(isPresented: $showInfo) { NavigationStack { CallInfoSheet(call: call) }.desktopReadingSize() }
+        .preferredColorScheme(.dark)
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
+            // Controls fade out after 4 s during video and come back on a tap.
+            if showsVideo, !voiceOver, controlsVisible, !call.talking, !showHoldHint, now.timeIntervalSince(lastInteraction) > 4 { controlsVisible = false }
+            if !showsVideo { controlsVisible = true }
+        }
+    }
+
+    private var overlay: some View {
+        VStack(spacing: 0) {
+                if controlsVisible || !showsVideo || voiceOver { topBar.transition(.opacity) }
                 if model.mismatchWarning != nil || call.verification == .mismatch { mismatchBanner }
                 Spacer()
                 if let camera = call.camera, call.cameraOn, call.phase == .active {
                     HStack { Spacer(); CameraPreviewView(session: camera.session).frame(width: 104, height: 150)
                         .clipShape(RoundedRectangle(cornerRadius: 6)).padding(.trailing, 16).padding(.bottom, 12) }
                 }
-                if controlsVisible || !showsVideo { bottomControls.transition(.opacity) }
+                if controlsVisible || !showsVideo || voiceOver { bottomControls.transition(.opacity) }
             }
-        }
-        .animation(.easeInOut(duration: 0.2), value: controlsVisible)
-        .sheet(isPresented: $showInfo) { NavigationStack { CallInfoSheet(call: call) } }
-        .preferredColorScheme(.dark)
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
-            // Controls fade out after 4 s during video and come back on a tap.
-            if showsVideo, controlsVisible, !call.talking, !showHoldHint, now.timeIntervalSince(lastInteraction) > 4 { controlsVisible = false }
-            if !showsVideo { controlsVisible = true }
-        }
     }
 
     @State private var showHoldHint = false
@@ -79,7 +86,7 @@ struct CallView: View {
     private var topBar: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(call.label?.title ?? call.peerName).font(Typo.title).foregroundStyle(.white).lineLimit(1)
+                Text(call.label?.title ?? call.peerName).font(Typo.title).foregroundStyle(.white).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                     Text(stateLine).font(Typo.timer).foregroundStyle(.white.opacity(0.75))
                 }
@@ -90,7 +97,7 @@ struct CallView: View {
                     Label(health, systemImage: "thermometer.medium").font(Typo.caption).foregroundStyle(Palette.accent)
                 }
                 if let subject = call.subject {
-                    Text(subject).font(Typo.secondary).foregroundStyle(.white.opacity(0.9)).lineLimit(2)
+                    Text(subject).font(Typo.secondary).foregroundStyle(.white.opacity(0.9)).lineLimit(typeSize.isAccessibilitySize ? nil : 2)
                 }
                 if let problem = call.mediaProblem, call.ended == nil {
                     Label(problem, systemImage: "exclamationmark.triangle.fill").font(Typo.caption).foregroundStyle(Palette.accent)
@@ -126,8 +133,12 @@ struct CallView: View {
         MuteControl(call: call) { lastInteraction = Date(); maybeShowHoldHint() }
         RoundControl(icon: call.cameraOn ? "video.fill" : "video.slash.fill",
                      label: call.cameraOn ? "Video off" : (call.callType == .voice ? "Add video" : "Video on")) { call.toggleCamera(); lastInteraction = Date() }
+        #if os(macOS)
+        if call.cameraOn { DesktopCameraPicker().frame(maxWidth: 220) }
+        #else
         if call.cameraOn { RoundControl(icon: "camera.rotate.fill", label: "Flip") { call.flipCamera(); lastInteraction = Date() } }
-        RoundControl(icon: "speaker.wave.2.fill", label: "Speaker", fill: call.speaker ? .white : Palette.callControl,
+        #endif
+        RoundControl(icon: "speaker.wave.2.fill", label: AppPlatform.isMac ? "Sound" : "Speaker", fill: call.speaker ? .white : Palette.callControl,
                      foreground: call.speaker ? .black : .white) { call.toggleSpeaker(); lastInteraction = Date() }
     }
 
@@ -137,7 +148,8 @@ struct CallView: View {
                 EmptyView()
             } else if call.phase == .incomingRinging {
                 Text(call.offeredType == .voice ? "Voice call" : "Video call").font(Typo.secondary).foregroundStyle(Palette.dimInk)
-                HStack(spacing: 56) {
+                let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 20)) : AnyLayout(HStackLayout(spacing: 56))
+                layout {
                     RoundControl(icon: "phone.down.fill", label: "Decline", fill: Palette.callEnd, foreground: .white, size: 76) { call.decline() }
                     if call.offeredType == .video {
                         RoundControl(icon: "phone.fill", label: "Voice", size: 76) { call.accept(as: .voice) }
@@ -220,7 +232,7 @@ struct CallInfoSheet: View {
             }
         }
         .monoList()
-        .navigationTitle(call.label?.title ?? "Call info").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(call.label?.title ?? "Call info").mobileNavigationTitle(inline: true)
         .toolbar { Button("Done") { dismiss() } }
     }
 }

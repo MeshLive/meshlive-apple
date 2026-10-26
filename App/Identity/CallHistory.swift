@@ -17,15 +17,15 @@ enum CallHistory {
     static let limit = 20
 
     static var all: [CallRecord] {
-        guard let data = UserDefaults.standard.data(forKey: key), let list = try? JSONDecoder().decode([CallRecord].self, from: data) else { return [] }
+        guard let data = DesktopPreview.preferences.data(forKey: key), let list = try? JSONDecoder().decode([CallRecord].self, from: data) else { return [] }
         return list
     }
 
     static func add(_ record: CallRecord) {
         guard record.prefixHex.count == 12 else { return }
         let list = Array(([record] + all).prefix(limit))
-        UserDefaults.standard.set(try? JSONEncoder().encode(list), forKey: key)
+        DesktopPreview.preferences.set(try? JSONEncoder().encode(list), forKey: key)
     }
 
-    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
+    static func clear() { DesktopPreview.preferences.removeObject(forKey: key) }
 }

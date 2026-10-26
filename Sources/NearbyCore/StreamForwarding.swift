@@ -64,10 +64,10 @@ public enum LinkCapacityPolicy {
 public struct RelayAdmission: Equatable {
     public let needKbps: Double, budgetKbps: Double, measuredKbps: Double, coldStart: Bool, fits: Bool
 
-    /// - Parameter advertisedKbps: the upstream offer's bitrate; 0 (unknown) admits without a check, as Android.
-    public static func evaluate(learned: LearnedLinkCapacity, advertisedKbps: Int, fps: Int, nowMs: Int64, coldStartRule: Bool = true) -> RelayAdmission {
-        guard advertisedKbps > 0 else { return RelayAdmission(needKbps: 0, budgetKbps: 0, measuredKbps: 0, coldStart: false, fits: true) }
-        let perLink = MeshBandwidth.perLinkKbps(videoKbps: advertisedKbps, fps: fps)
+    /// - Parameter advertisedKbps: the video offer's bitrate; an audio preset always supplies the load, even when the advert says 0.
+    public static func evaluate(learned: LearnedLinkCapacity, advertisedKbps: Int, fps: Int, nowMs: Int64, coldStartRule: Bool = true, audioPreset: UInt8? = nil) -> RelayAdmission {
+        guard advertisedKbps > 0 || audioPreset != nil else { return RelayAdmission(needKbps: 0, budgetKbps: 0, measuredKbps: 0, coldStart: false, fits: true) }
+        let perLink = audioPreset.map { AudioLiveRelayAdmission.perLinkKbps(preset: $0) } ?? MeshBandwidth.perLinkKbps(videoKbps: advertisedKbps, fps: fps)
         let prior = LinkCapacityPolicy.freshProbe(learned, nowMs: nowMs).map(Double.init) ?? MeshBandwidth.leSafeAggregateKbps
         let measured = LinkCapacityPolicy.budgetKbps(learned, priorKbps: prior, perLinkKbps: perLink, nowMs: nowMs)
         let cold = coldStartRule && LinkCapacityPolicy.relayColdStart(learned, nowMs: nowMs)
@@ -128,9 +128,11 @@ public final class StreamForwardingCore {
     private var latestControl: MeshEnvelope?
     public private(set) var childNodeId: NodeId?
     private var childWaitsForKeyFrame = false
+    private let audioOnly: Bool
     public private(set) var skippedBeforeJoin = 0
 
-    public init(localNodeId: NodeId, upstreamPeerNodeId: NodeId, streamId: UUID, sourceNodeId: NodeId) {
+    public init(localNodeId: NodeId, upstreamPeerNodeId: NodeId, streamId: UUID, sourceNodeId: NodeId, audioOnly: Bool = false) {
+        self.audioOnly = audioOnly
         self.localNodeId = localNodeId; self.upstreamPeerNodeId = upstreamPeerNodeId; self.streamId = streamId; self.sourceNodeId = sourceNodeId
     }
 
@@ -155,7 +157,7 @@ public final class StreamForwardingCore {
     public func addChild(_ child: NodeId) throws -> [MeshEnvelope] {
         guard child != localNodeId, child != upstreamPeerNodeId else { throw ProtocolError.state("Invalid downstream child") }
         guard childNodeId == nil else { throw ProtocolError.state("A downstream child is already connected") }
-        childNodeId = child; childWaitsForKeyFrame = true
+        childNodeId = child; childWaitsForKeyFrame = !audioOnly
         var seen = Set<UInt64>()
         return (bootstrap + [latestControl].compactMap { $0 })
             .filter { seen.insert($0.sequence).inserted }
@@ -206,6 +208,10 @@ public final class StreamForwarderEngine: MeshConnection {
     public var onEvent: ((Event) -> Void)?
     public let grant: ForwardedStreamGrant
     public let codecId: UInt8
+    public let audioOnly: Bool
+    public var audioAgeBound = true
+    public private(set) var shedAudioRecords = 0
+    private var audioHealth: [(at: TimeInterval, queued: Int, shed: Int)] = []
     public private(set) var ready = false
     /// Experimental labels: the verified upstream LABELS container to pass on (sent after the grant), or nil.
     public let labelsContainer: Data?
@@ -214,14 +220,16 @@ public final class StreamForwarderEngine: MeshConnection {
     private var lastHeartbeatAt: TimeInterval = 0
     private var endingSince: TimeInterval?
     private var withdrawingSince: TimeInterval?
+    public var isWithdrawing: Bool { withdrawingSince != nil }
     public private(set) var forwardedEnvelopes = 0
     public private(set) var forwardedBytes: UInt64 = 0
 
     public init(transport: MeshTransport, identity: SigningIdentity, grant: ForwardedStreamGrant, codecId: UInt8, expectedChildPrefix: Data?,
-                labelsContainer: Data? = nil) {
-        let mask = StreamProtocol.capabilityMask(codecId: codecId)
+                labelsContainer: Data? = nil, audioOnly: Bool = false) {
+        let mask = audioOnly ? 0 : StreamProtocol.capabilityMask(codecId: codecId)
         let caps = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: mask, decodeCodecMask: 0,
                                     maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 1)
+        self.audioOnly = audioOnly
         self.grant = grant; self.codecId = codecId; self.labelsContainer = labelsContainer
         super.init(role: .initiator, transport: transport, identity: identity, linkCapabilities: caps,
                    endpointCapabilities: PeerLabelFeature.advertise(caps, enabled: labelsContainer != nil))
@@ -236,7 +244,7 @@ public final class StreamForwarderEngine: MeshConnection {
     }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
-        guard session.peerCapabilities.decodeCodecMask & StreamProtocol.capabilityMask(codecId: codecId) != 0 else {
+        guard audioOnly || session.peerCapabilities.decodeCodecMask & StreamProtocol.capabilityMask(codecId: codecId) != 0 else {
             throw ProtocolError.incompatible("The child cannot decode the stream codec")
         }
         // The relay's child link is paced like a source's (Android: the relay sender uses the same LinkPacer).
@@ -274,12 +282,35 @@ public final class StreamForwarderEngine: MeshConnection {
     public func forward(_ envelope: MeshEnvelope, now: TimeInterval? = nil) -> ForwardOutcome {
         if let now { self.now = now }
         guard ready, endingSince == nil, withdrawingSince == nil else { return .refused }
-        if mediaAge {
+        if !audioOnly, mediaAge {
             let shedClass = relayEnvelopeShedClass(envelope)
             if shedClass != .keep, let outcome = shedForMediaAge(keyFrame: shedClass == .keyFrame) { return outcome }
         }
         envelopes.append((envelope, self.now))
+        if audioOnly {
+            if Self.isAudioRecord(envelope) { audioHealth.append((self.now, 1, 0)) }
+            checkAudioHealth(now: self.now)
+        }
         return .queued
+    }
+
+    /// Exact mesh namespace predicate (PROTOCOL review 18).
+    private static func isAudioRecord(_ envelope: MeshEnvelope) -> Bool {
+        envelope.flags == 8 || envelope.flags == 72
+    }
+    private func checkAudioHealth(now: TimeInterval) {
+        guard audioOnly, withdrawingSince == nil, endingSince == nil else { return }
+        if audioAgeBound, let oldest = envelopes.first(where: { Self.isAudioRecord($0.envelope) }), now - oldest.at > 3 {
+            let before = envelopes.count
+            envelopes.removeAll { Self.isAudioRecord($0.envelope) && now - $0.at > 1.5 }
+            let dropped = before - envelopes.count
+            shedAudioRecords += dropped; audioHealth.append((now, 0, dropped))
+        }
+        audioHealth.removeAll { now - $0.at > 10 }
+        let queued = audioHealth.reduce(0) { $0 + $1.queued }, shed = audioHealth.reduce(0) { $0 + $1.shed }
+        if (queued >= 10 && Double(shed) > 0.2 * Double(queued)) || backlog(now: now) > 30 {
+            withdrawRoute()
+        }
     }
 
     public var budgetMs: Int64 { BoundedMediaAge.streamQueueBudgetMs(viewerAddedDelayMs: childAddedDelayMs) }
@@ -307,6 +338,7 @@ public final class StreamForwarderEngine: MeshConnection {
     public var queuedAudio: Bool { envelopes.contains { $0.envelope.flags & MeshEnvelope.flagAudio != 0 } }
 
     public override func nextOrderedOutgoing(now: TimeInterval) throws -> Data? {
+        checkAudioHealth(now: now)
         while !envelopes.isEmpty {
             let (envelope, _) = envelopes.removeFirst()
             guard Int64(envelope.sequence) > lastSentSequence else { continue }
@@ -328,7 +360,7 @@ public final class StreamForwarderEngine: MeshConnection {
             let content = try endpoint.opener.open(record.payload)
             guard content.payload.isEmpty else { throw ProtocolError.malformed("Invalid child control") }
             switch content.type {
-            case .keyFrameRequest: onEvent?(.keyFrameRequested)
+            case .keyFrameRequest: if !audioOnly { onEvent?(.keyFrameRequested) }
             case .streamEndAck:
                 onEvent?(.endAcknowledged)
                 finish("Stream ended; child acknowledged", error: false)
@@ -358,6 +390,7 @@ public final class StreamForwarderEngine: MeshConnection {
     }
 
     public override func tickOpen(now: TimeInterval) {
+        checkAudioHealth(now: now)
         let timeout: TimeInterval = transport == .gatt ? 6 : 8
         if ready, now - lastHeartbeatAt > timeout, now - lastReceiveAt > timeout { finish("Child heartbeat timed out", error: true); return }
         if let endingSince, now - endingSince > 2 { finish("Stream ended; child acknowledgement timed out", error: false); return }

@@ -113,11 +113,12 @@ public enum IdentityQrCodec {
 }
 
 /// Verified contacts: full fingerprints the user confirmed by QR scan or safety code (persisted by the App).
-public struct VerifiedContact: Codable, Equatable {
+public struct VerifiedContact: Codable, Equatable, Identifiable {
     public let fingerprintHex: String
     public var displayName: String
     public let method: String
     public let verifiedAt: Date
+    public var id: String { fingerprintHex }
     public var nodePrefixHex: String { String(fingerprintHex.prefix(12)) }
     public init(fingerprint: IdentityFingerprint, displayName: String, method: String, verifiedAt: Date = Date()) {
         fingerprintHex = fingerprint.hex; self.displayName = displayName; self.method = method; self.verifiedAt = verifiedAt

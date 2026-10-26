@@ -1,0 +1,12 @@
+# Text files are stored and checked out with LF everywhere, so shell scripts run on macOS and hashes of source files
+# are the same on every OS.
+* text=auto eol=lf
+# Byte-exact test vectors and fixtures: never convert line endings.
+Tests/**/Fixtures/** -text
+# Binary files
+*.png binary
+*.jpg binary
+*.ivf binary
+*.jar binary
+*.a binary
+*.xcframework/** binary

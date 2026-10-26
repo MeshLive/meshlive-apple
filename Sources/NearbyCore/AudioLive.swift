@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-// Experimental audio-only live streams ("radio"): Android AudioLiveProtocol.kt. Wire rules: PROTOCOL.md
+// Experimental audio-only live streams ("radio"): Android AudioLiveProtocol.kt. Wire rules: Android's protocol reference (docs/dev/protocol/streams.md)
 // "Experimental audio-only live streams" in the Android project; design and reasons: DECISIONS "Design AL".
 // The offer marker, the BTL1 header with its signer block, source-signed records and the receiver's guard
 // (Opus profile, ingress budgets, clock rules). Nothing here touches video streams.
@@ -358,4 +358,113 @@ public final class AudioLiveStreamGuard {
         maxOffsetMs = peak
         guard peak - offset <= Self.burstAllowanceMs else { throw ProtocolError.malformed("Audio clock runs \(peak - offset) ms ahead of arrival") }
     }
+}
+
+/// Android StreamRoutePenalties (Design AL review 17). A forged advert never bans a logical stream.
+/// The app owns this bounded, process-local table on its main queue.
+public final class StreamRoutePenalties {
+    public struct Route: Equatable {
+        public let address: String, prefixHex: String
+        public let routeToken: UInt32
+        public init(address: String, prefixHex: String, routeToken: UInt32) {
+            self.address = address; self.prefixHex = prefixHex; self.routeToken = routeToken
+        }
+    }
+    public static let routeTTL: TimeInterval = 120
+    public static let nodeTTL: TimeInterval = 600
+    public static let maxEntries = 64
+    private var routes: [(key: Route, until: TimeInterval)] = []
+    private var nodes: [(key: NodeId, until: TimeInterval)] = []
+    public init() {}
+
+    /// Supply a node only when the mismatching header arrived over its authenticated link.
+    public func onMismatch(_ route: Route, authenticatedNode: NodeId?, now: TimeInterval) {
+        prune(now)
+        routes.removeAll { $0.key == route }
+        routes.append((route, now + Self.routeTTL))
+        if routes.count > Self.maxEntries { routes.removeFirst() }
+        if let node = authenticatedNode {
+            nodes.removeAll { $0.key == node }
+            nodes.append((node, now + Self.nodeTTL))
+            if nodes.count > Self.maxEntries { nodes.removeFirst() }
+        }
+    }
+    public func isPenalized(_ route: Route, authenticatedNode: NodeId? = nil, now: TimeInterval) -> Bool {
+        prune(now)
+        return routes.contains { $0.key == route } || nodes.contains { $0.key == authenticatedNode }
+    }
+    public func reset() { routes.removeAll(); nodes.removeAll() }
+    private func prune(_ now: TimeInterval) {
+        routes.removeAll { $0.until <= now }; nodes.removeAll { $0.until <= now }
+    }
+}
+
+
+/// Android's 200 ms audio-live wire-load calculation, including encryption, batch framing and signature.
+public enum AudioLiveRelayAdmission {
+    public static func perLinkKbps(preset: UInt8) -> Double {
+        let payload = AudioLive.presetKbps(preset) * 1_000 / 8 * 20 * 10 / 1_000
+        let batchFraming = 5 + 6 * 10
+        let recordOverhead = 33 + 50 + 34 + 13 + 4 + 64
+        return Double(payload + batchFraming + recordOverhead) * 8 / 200 * (1 + MeshBandwidth.transportMargin)
+    }
+}
+
+/// Android AudioLiveRelayInboundGuard. Count only verified non-configuration audio payload bytes.
+/// All times are monotonic seconds; the app owns this policy on its main queue.
+public final class AudioLiveRelayInboundGuard {
+    private let nominalKbps: Double
+    private var seconds: [Int64: Int] = [:]
+    private var childJoined: TimeInterval?
+    private var degradedSince: TimeInterval?
+    private var paused = false
+    public private(set) var baselineKbps = 0.0
+    public init(nominalKbps: Double) { self.nominalKbps = nominalKbps }
+    public func onBytes(_ bytes: Int, now: TimeInterval) {
+        seconds[Int64(now), default: 0] += bytes
+        while seconds.count > 40, let oldest = seconds.keys.min() { seconds.removeValue(forKey: oldest) }
+    }
+    public func onPausedChanged(_ isPaused: Bool, now: TimeInterval) {
+        paused = isPaused; degradedSince = nil
+        if !isPaused, childJoined != nil { childJoined = now }
+    }
+    public func onChildCount(_ count: Int, now: TimeInterval) {
+        if count > 0, childJoined == nil {
+            childJoined = now; degradedSince = nil
+            let end = Int64(now)
+            let covered = seconds.filter { (end - 8..<end).contains($0.key) }
+            baselineKbps = covered.count < 4 ? nominalKbps * 0.75 : Double(covered.values.reduce(0, +)) * 8 / 8_000
+        } else if count == 0 { childJoined = nil; degradedSince = nil }
+    }
+    public func shouldDropChild(now: TimeInterval) -> Bool {
+        guard let joined = childJoined, !paused, now - joined >= 4 else { return false }
+        let end = Int64(now)
+        let recent = Double(seconds.filter { (end - 3..<end).contains($0.key) }.values.reduce(0, +)) * 8 / 3_000
+        if recent >= baselineKbps * 0.65 { degradedSince = nil; return false }
+        let since = degradedSince ?? now
+        degradedSince = since
+        return now - since >= 0.5
+    }
+    public func childCarriedHealthily(now: TimeInterval) -> Bool {
+        childJoined.map { now - $0 >= 60 } == true && degradedSince == nil
+    }
+}
+
+/// Android's per-transport 2/4/8/16 minute cooldown, process-local and cleared by a wipe.
+public final class AudioLiveRelayMemory {
+    private var blockedUntil: [MeshTransport: TimeInterval] = [:]
+    private var failures: [MeshTransport: Int] = [:]
+    public init() {}
+    public func blockedFor(_ transport: MeshTransport, now: TimeInterval) -> TimeInterval {
+        max(0, (blockedUntil[transport] ?? 0) - now)
+    }
+    @discardableResult public func onDropped(_ transport: MeshTransport, now: TimeInterval) -> TimeInterval {
+        let count = min((failures[transport] ?? 0) + 1, 4)
+        failures[transport] = count
+        let cooldown = TimeInterval(120 * (1 << (count - 1)))
+        blockedUntil[transport] = now + cooldown
+        return cooldown
+    }
+    public func onHealthy(_ transport: MeshTransport) { failures.removeValue(forKey: transport) }
+    public func reset() { blockedUntil.removeAll(); failures.removeAll() }
 }

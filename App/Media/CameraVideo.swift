@@ -1,6 +1,12 @@
 import Foundation
 import AVFoundation
+#if os(iOS)
 import UIKit
+typealias PlatformVideoView = UIView
+#else
+import AppKit
+typealias PlatformVideoView = NSView
+#endif
 import SwiftUI
 import NearbyCore
 #if canImport(NearbyMedia)
@@ -44,6 +50,7 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
     }
 
     func start() {
+        guard !DesktopPreview.enabled else { return }
         MediaPermissions.requestCamera { granted in
             AppLog.event("camera_start", ["permission": granted ? "granted" : "denied", "size": "\(self.width)x\(self.height)", "fps": "\(self.fps)", "kbps": "\(self.bitrateKbps)"])
             guard granted else { self.onFailure?("Camera is off for MeshLive. Turn it on in Settings to send video."); return }
@@ -60,19 +67,33 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
             AppLog.event("camera_error", ["stage": "runtime", "error": "\(error?.domain ?? "?") \(error?.code ?? 0)"])
             self?.queue.async { self?.session.startRunning() }
         })
+        #if os(macOS)
+        observers.append(center.addObserver(forName: DesktopCameraDevices.selectionChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.queue.async {
+                guard let self else { return }
+                self.session.stopRunning()
+                self.forceKeyFrame = true
+                self.configure()
+            }
+        })
+        #endif
+        #if os(iOS)
         observers.append(center.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: .main) { note in
             AppLog.event("camera_interrupted", ["reason": "\(note.userInfo?[AVCaptureSessionInterruptionReasonKey] ?? "?")"])
         })
         observers.append(center.addObserver(forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: .main) { _ in
             AppLog.event("camera_interruption_ended")
         })
+        #endif
     }
 
     private func configure() {
         let started = ProcessInfo.processInfo.systemUptime
         // The call's audio engine owns the audio session (voice processing); the capture session must not
         // reconfigure it (it has no audio input).
+        #if os(iOS)
         session.automaticallyConfiguresApplicationAudioSession = false
+        #endif
         do {
             encoder = try VP9Encoder(width: width, height: height, fps: fps, bitrateKbps: bitrateKbps, threads: 2, speed: 8)
         } catch {
@@ -83,7 +104,12 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         session.sessionPreset = .vga640x480
         session.inputs.forEach(session.removeInput)
         session.outputs.forEach(session.removeOutput)
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: front ? .front : .back),
+        #if os(macOS)
+        let selectedDevice = DesktopCameraDevices.selected()
+        #else
+        let selectedDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: front ? .front : .back)
+        #endif
+        guard let device = selectedDevice,
               let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) else {
             session.commitConfiguration(); AppLog.event("camera_error", ["stage": "input"])
             DispatchQueue.main.async { self.onFailure?("No camera available") }; return
@@ -99,9 +125,13 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         }
         session.addOutput(output)
         if let connection = output.connection(with: .video) {
+            #if os(macOS)
+            if connection.isVideoRotationAngleSupported(0) { connection.videoRotationAngle = 0 }
+            #else
             if #available(iOS 17.0, *) {
                 if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
             } else if connection.isVideoOrientationSupported { connection.videoOrientation = .portrait }
+            #endif
             if connection.isVideoMirroringSupported { connection.isVideoMirrored = front }
         }
         session.commitConfiguration()
@@ -159,25 +189,52 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
 }
 
 /// Decoded remote video, shown with AVSampleBufferDisplayLayer and rotated clockwise as the BTV3 header says.
-final class VideoSurface: UIView {
+final class VideoSurface: PlatformVideoView {
     let displayLayer = AVSampleBufferDisplayLayer()
-    var rotation = 0 { didSet { setNeedsLayout() } }
+    var rotation = 0 {
+        didSet {
+            #if os(macOS)
+            needsLayout = true
+            #else
+            setNeedsLayout()
+            #endif
+        }
+    }
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = .black; clipsToBounds = true
         displayLayer.videoGravity = .resizeAspect
+        #if os(macOS)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.masksToBounds = true
+        layer?.addSublayer(displayLayer)
+        #else
+        backgroundColor = .black; clipsToBounds = true
         layer.addSublayer(displayLayer)
+        #endif
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
+    #if os(macOS)
+    override func layout() { super.layout(); layoutVideo() }
+    #else
+    override func layoutSubviews() { super.layoutSubviews(); layoutVideo() }
+    #endif
+
+    private func layoutVideo() {
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        let b = bounds, turned = rotation % 180 != 0
         displayLayer.setAffineTransform(.identity)
+        #if os(macOS)
+        let layout = DesktopVideoLayout(bounds: bounds, clockwiseDegrees: rotation)
+        displayLayer.bounds = layout.layerBounds
+        displayLayer.position = layout.position
+        displayLayer.setAffineTransform(layout.transform)
+        #else
+        let b = bounds, turned = rotation % 180 != 0
         displayLayer.bounds = turned ? CGRect(x: 0, y: 0, width: b.height, height: b.width) : CGRect(origin: .zero, size: b.size)
         displayLayer.position = CGPoint(x: b.midX, y: b.midY)
         displayLayer.setAffineTransform(CGAffineTransform(rotationAngle: CGFloat(rotation) * .pi / 180))
+        #endif
         CATransaction.commit()
     }
 
@@ -212,6 +269,7 @@ final class VideoSink: ObservableObject {
     func clear() { surface.displayLayer.flushAndRemoveImage(); hasVideo = false }
 }
 
+#if os(iOS)
 struct VideoSurfaceView: UIViewRepresentable {
     @ObservedObject var sink: VideoSink
     func makeUIView(context: Context) -> VideoSurface { sink.surface }
@@ -228,3 +286,26 @@ struct CameraPreviewView: UIViewRepresentable {
         var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
     }
 }
+
+#else
+struct VideoSurfaceView: NSViewRepresentable {
+    @ObservedObject var sink: VideoSink
+    func makeNSView(context: Context) -> VideoSurface { sink.surface }
+    func updateNSView(_ view: VideoSurface, context: Context) { view.rotation = sink.rotation }
+}
+
+struct CameraPreviewView: NSViewRepresentable {
+    let session: AVCaptureSession
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.videoGravity = .resizeAspectFill
+        view.layer = preview
+        return view
+    }
+    func updateNSView(_ view: NSView, context: Context) {
+        (view.layer as? AVCaptureVideoPreviewLayer)?.session = session
+    }
+}
+#endif

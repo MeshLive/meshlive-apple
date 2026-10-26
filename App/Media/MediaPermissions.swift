@@ -6,6 +6,15 @@ import AVFoundation
 /// result is logged (`BENCHMARK permissions`).
 enum MediaPermissions {
     static var microphone: String {
+        #if os(macOS)
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return "granted"
+        case .denied: return "denied"
+        case .restricted: return "restricted"
+        case .notDetermined: return "undetermined"
+        @unknown default: return "unknown"
+        }
+        #else
         if #available(iOS 17.0, *) {
             switch AVAudioApplication.shared.recordPermission {
             case .granted: return "granted"
@@ -20,6 +29,7 @@ enum MediaPermissions {
         case .undetermined: return "undetermined"
         @unknown default: return "unknown"
         }
+        #endif
     }
 
     static var camera: String {
@@ -34,11 +44,17 @@ enum MediaPermissions {
 
     static func requestMicrophone(_ done: @escaping (Bool) -> Void) {
         let finish = { (granted: Bool) in DispatchQueue.main.async { done(granted) } }
+        if DesktopPreview.enabled { finish(false); return }
+        #if os(macOS)
+        AVCaptureDevice.requestAccess(for: .audio, completionHandler: finish)
+        #else
         if #available(iOS 17.0, *) { AVAudioApplication.requestRecordPermission(completionHandler: finish) }
         else { AVAudioSession.sharedInstance().requestRecordPermission(finish) }
+        #endif
     }
 
     static func requestCamera(_ done: @escaping (Bool) -> Void) {
+        if DesktopPreview.enabled { DispatchQueue.main.async { done(false) }; return }
         AVCaptureDevice.requestAccess(for: .video) { granted in DispatchQueue.main.async { done(granted) } }
     }
 

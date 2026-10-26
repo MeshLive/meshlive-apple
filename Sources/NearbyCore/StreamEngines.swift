@@ -62,8 +62,13 @@ public final class StreamViewerEngine: MeshConnection {
     private let wallEpoch: () -> Int64
     /// Experimental audio-only live: the selected offer carried the `0x40` marker. The header must agree
     /// (BTL1 for a marked offer, BTV3 otherwise), else the link fails closed.
+    /// Non-nil only for a parsed header whose kind disagreed with the selected advert.
+    public private(set) var audioMarkerMismatch: Bool?
+    /// Checked only after the link authenticates; unauthenticated prefixes never identify a banned node.
+    public var isParentBlocked: ((NodeId) -> Bool)?
     public let expectAudioOnly: Bool
     /// The verified `BTL1` header and the per-stream guard of an audio-only stream.
+    public var onAudioLivePayload: ((Int) -> Void)?
     public private(set) var audioLiveHeader: AudioLiveHeader?
     public private(set) var audioLiveGuard: AudioLiveStreamGuard?
 
@@ -82,6 +87,7 @@ public final class StreamViewerEngine: MeshConnection {
         // Link hello bit 3 on an LE stream hop (never the end-to-end hello): BDO1 is the first hop record each way.
         if self.rotatingOffer != nil { caps.transportMask |= NodeCapabilities.transportDiscoveryOpening }
         super.init(role: .responder, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: endpointCaps)
+        if expectAudioOnly { link.maxIncomingCiphertextBytes = 4 * 1024 }
         expectedPeerPrefix = self.rotatingOffer == nil ? expectedAdjacentPrefix : nil
         if self.rotatingOffer != nil {
             // This viewer advertised a fixed-prefix (compact v1) request, so it opens nothing: count 0.
@@ -100,6 +106,9 @@ public final class StreamViewerEngine: MeshConnection {
 
     public override func validateLinkPeer() throws {
         guard let caps = link.peerCapabilities else { return }
+        if let node = link.peerNodeId, isParentBlocked?(node) == true {
+            throw ProtocolError.incompatible("This route to the stream is temporarily unavailable")
+        }
         if caps.maxChildren > 1 { throw ProtocolError.incompatible("Group-relay (BGK1) sources are not supported on iPhone") }
         if rotatingOffer != nil {
             // The connector of a selected rotating offer must sign bit 3 and open the ID; else it fails like a prefix mismatch.
@@ -182,7 +191,10 @@ public final class StreamViewerEngine: MeshConnection {
             guard duplicates.markIfNew(envelope) else { throw ProtocolError.replay }
             lastMeshSequence = Int64(envelope.sequence)
             content = try opener.open(envelope.payload)
+            // Verify ingress rules and source signatures before handing media to the forwarding core.
+            try handleContent(content)
             onEvent?(.envelope(envelope))
+            return
         case .routeControl:
             let reason = try RouteWithdrawal(decoding: record.payload)
             enqueue(.record(.routeControlAck, reason.encoded), .control, closeAfter: true)
@@ -206,8 +218,11 @@ public final class StreamViewerEngine: MeshConnection {
                 try acceptAudioLiveHeader(content.payload)
                 return
             }
-            guard !expectAudioOnly else { throw ProtocolError.incompatible("The offer was marked audio only but the stream is video") }
             let decoded = try StreamHeader(decoding: content.payload)
+            if expectAudioOnly {
+                audioMarkerMismatch = true
+                throw ProtocolError.incompatible("The offer was marked audio only but the stream is video")
+            }
             let mask = StreamProtocol.capabilityMask(codecId: decoded.codecId)
             if grant == nil {
                 guard (endpoint?.peerCapabilities.encodeCodecMask ?? 0) & mask != 0 else { throw ProtocolError.incompatible("Sender did not authenticate support for stream codec \(decoded.codecId)") }
@@ -257,13 +272,17 @@ public final class StreamViewerEngine: MeshConnection {
     /// `BTL1`: the marker must agree, the certifying identity key must hash to the authenticated source, and the
     /// certificate must verify over the mesh stream ID (zeros for a direct stream). Exactly one header per stream.
     private func acceptAudioLiveHeader(_ payload: Data) throws {
-        guard expectAudioOnly else { throw ProtocolError.incompatible("The offer was not marked audio only but the stream is audio only") }
-        guard let source = mediaSourceNodeId else { throw ProtocolError.state("No media source") }
         let decoded = try AudioLiveHeader(decoding: payload)
+        if !expectAudioOnly {
+            audioMarkerMismatch = false
+            throw ProtocolError.incompatible("The offer was not marked audio only but the stream is audio only")
+        }
+        guard let source = mediaSourceNodeId else { throw ProtocolError.state("No media source") }
         let streamId = grant?.streamId ?? meshStreamId ?? AudioLive.zeroStreamId
         let verifier = try AudioLiveVerifier(header: decoded, streamId: streamId, expectedSource: source)
         audioLiveHeader = decoded
         audioLiveGuard = AudioLiveStreamGuard(verifier: verifier)
+        link.maxIncomingCiphertextBytes = 28 * 1024
         onEvent?(.audioLiveHeader(decoded))
         if let labels = pendingLabels {
             pendingLabels = nil
@@ -286,6 +305,7 @@ public final class StreamViewerEngine: MeshConnection {
                 if let head = audioGuard.opusHead { onEvent?(.audioConfig(head)) }
                 return
             }
+            onAudioLivePayload?(opened.payload.count)
             for unit in try opened.splitAudio() { audioPackets += 1; onEvent?(.audio(unit)) }
         case .streamState:
             try audioGuard.onLifecycleRecord()
@@ -310,7 +330,7 @@ public final class StreamViewerEngine: MeshConnection {
     }
 
     /// Asks the immediate parent for a recovery keyframe (decoder error or join).
-    public func requestKeyFrame() { if endpoint != nil { enqueue(.content(.keyFrameRequest, 0, Data()), .control) } }
+    public func requestKeyFrame() { if !expectAudioOnly, endpoint != nil { enqueue(.content(.keyFrameRequest, 0, Data()), .control) } }
 
     /// Hop-local link report (version 2): measured arrival kbps and whether playout is pinned late.
     public func sendLinkReport(arrivalKbps: Int, linkLate: Bool, addedDelayMs: Int) {

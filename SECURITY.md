@@ -4,13 +4,13 @@ MeshLive is meant for places where the internet may be down or watched, so a sec
 an ordinary app. We take reports seriously, and we would rather hear about a problem privately and fix it than read
 about it in a public issue first.
 
-MeshLive for iPhone speaks the same protocol as [MeshLive for Android](https://github.com/MeshLive/meshlive-android),
+MeshLive for iPhone and Mac speaks the same protocol as [MeshLive for Android](https://github.com/MeshLive/meshlive-android),
 so a flaw in the protocol itself (handshakes, record format, key agreement) may affect both. Report it here or in the
 Android repository; we will coordinate.
 
 ## Supported versions
 
-MeshLive for iPhone is early, pre-release software with no published binary. Security fixes go to `main` only.
+MeshLive for iPhone and Mac is early, pre-release software with no published binary. Security fixes go to `main` only.
 
 ## Reporting a vulnerability
 
@@ -32,7 +32,7 @@ that issue.
 - What an attacker needs (physical range, a malicious relay or peer, a jailbroken device, and so on) and what they
   gain (read content, impersonate someone, make a call misbehave, recover wiped data).
 - Steps to reproduce, or a short proof of concept.
-- The iPhone and Android phones and OS versions you tested on.
+- The iPhone or Mac and the Android phones, with OS versions, you tested on.
 - Whether you plan to publish your findings, and any date you would like us to work towards.
 
 Please do not include real private media, other people's data or your own keys, and test with phones you own.
@@ -50,7 +50,7 @@ In scope:
 
 - **Protocol, identity and encryption** as implemented in `Sources/NearbyCore`: the BMH2 handshakes, BMS1 hop
   records, BME1 endpoint content, key agreement, signatures, replay and ordering protection, and identity
-  verification ([PROTOCOL.md](PROTOCOL.md)).
+  verification ([protocol notes](docs/dev/protocol.md)).
 - **Private calls and stream viewing**, including the admission checks and the check that a stream comes from its
   authenticated original source.
 - **Identity storage and emergency wipe**: Keychain and Secure Enclave key handling, and cases where a completed wipe
@@ -79,11 +79,11 @@ If you are unsure whether something is in scope, report it privately anyway.
   and timing of encrypted records. Encryption protects content, not the fact that you are communicating.
 - **A stable discovery prefix is broadcast while the app advertises.** A passive scanner could recognise the same
   phone over time. Rotating discovery IDs exist behind an **Experimental** switch and are not yet validated on
-  phones. See "What nearby phones can see" in the [README](README.md#what-nearby-phones-can-see).
-- **The app has had very little hardware testing.** Treat its behaviour on a real iPhone as unproven.
-- **Experimental features are experimental.** Anything in the README's experimental table is off by default and has
+  phones. See [Privacy](docs/privacy.md#what-nearby-phones-can-see).
+- **The app has had very little hardware testing.** Treat its behaviour on a real iPhone or Mac as unproven.
+- **Experimental features are experimental.** Anything in the [switch register](docs/dev/switches.md) marked experimental is off by default and has
   had less review.
-- **Emergency wipe has limits** (see "Emergency wipe" in the [Android PROTOCOL.md](https://github.com/MeshLive/meshlive-android/blob/main/docs/PROTOCOL.md)): it cannot reach copies outside the app and
+- **Emergency wipe has limits** (see "Emergency wipe" in the [Android protocol reference](https://github.com/MeshLive/meshlive-android/blob/main/docs/dev/protocol/identity.md#emergency-wipe)): it cannot reach copies outside the app and
   cannot promise erasure of flash storage.
 
 Thank you for helping keep MeshLive users safe.

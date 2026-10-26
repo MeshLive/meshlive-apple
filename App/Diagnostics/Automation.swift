@@ -169,3 +169,17 @@ final class Automation {
     /// Stops the call/watch scenario; auto-accept keeps running while the app runs.
     private func finish() { done = true; if args["AutoAccept"] == nil { timer?.invalidate() }; AppLog.flush() }
 }
+
+
+#if DEBUG
+extension AppModel {
+    /// UI-only broadcast fixture: no microphone, camera, stream engine or media capture is started.
+    func showDebugBroadcast() {
+        guard let identity else { return }
+        let preview = LiveController(model: self, identity: identity, transport: .gatt,
+                                     title: "Priya's neighbourhood radio", audioOnly: true)
+        preview.running = true
+        live = preview
+    }
+}
+#endif

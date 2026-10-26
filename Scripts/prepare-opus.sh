@@ -31,4 +31,4 @@ xcodebuild -create-xcframework -library .build/opus/iphoneos-arm64/.libs/libopus
 cp "$source_dir/COPYING" Vendor/OPUS-COPYING
 cp "$source_dir/README" Vendor/OPUS-README
 python3 Scripts/project.py
-echo "Pinned Opus installed. Build both SDKs, then run the physical voice checks in TESTING.md."
+echo "Pinned Opus installed. Build both SDKs, then run the physical voice checks in docs/dev/testing.md."

@@ -47,7 +47,16 @@ final class AppModel: ObservableObject {
     @Published var bluetoothProblem: String?
     @Published var people: [PersonRow] = []
     @Published var streams: [StreamRow] = []
-    @Published var call: CallController?
+    @Published var streamNotice: String?
+    let streamRoutePenalties = StreamRoutePenalties()
+    let audioRelayMemory = AudioLiveRelayMemory()
+    @Published var call: CallController? {
+        didSet {
+            #if os(macOS)
+            desktopCallScanning.selectCall(call?.id)
+            #endif
+        }
+    }
     @Published var watch: WatchController?
     @Published var live: LiveController?
     @Published var contacts: [VerifiedContact] = []
@@ -63,7 +72,7 @@ final class AppModel: ObservableObject {
     }
     /// Settings > Safety "Quick wipe: triple-tap the status line" (off by default, as Android).
     @Published var quickWipeGesture = AppSettings.quickWipeGesture { didSet { AppSettings.quickWipeGesture = quickWipeGesture } }
-    /// Set by three quick taps on a tab header (when the quick wipe is on): the root asks to erase.
+    /// Set by three quick taps on a tab header (when the quick wipe is on): the root view asks to erase.
     @Published var askQuickWipe = false
     /// Local incoming-call alerts (notification permission), shown in Settings.
     @Published var callAlerts: CallAlertPolicy.Authorization = .notDetermined
@@ -79,7 +88,50 @@ final class AppModel: ObservableObject {
     @Published var wiped = false
     /// EXPERIMENTAL rotating discovery IDs (Settings > Advanced).
     @Published var rotatingIds = AppSettings.rotatingIds {
-        didSet { AppSettings.rotatingIds = rotatingIds; radio.acceptRotating = rotatingIds; refreshAdvertising() }
+        didSet { AppSettings.rotatingIds = rotatingIds; updateDiscoveryCompatibility(); refreshAdvertising() }
+    }
+    #if os(macOS)
+    @Published var desktopPauseCallDiscovery = AppSettings.desktopPauseCallDiscovery {
+        didSet {
+            AppSettings.desktopPauseCallDiscovery = desktopPauseCallDiscovery
+            desktopCallScanning.setEnabled(desktopPauseCallDiscovery)
+        }
+    }
+    @Published var desktopCallDeliveryFeedback = AppSettings.desktopCallDeliveryFeedback {
+        didSet { AppSettings.desktopCallDeliveryFeedback = desktopCallDeliveryFeedback }
+    }
+    @Published var desktopGeneratedNames = AppSettings.desktopGeneratedNames {
+        didSet { AppSettings.desktopGeneratedNames = desktopGeneratedNames; rebuildLists(); refreshAdvertising() }
+    }
+    @Published private(set) var desktopAdvertisedName: String?
+    @Published var desktopAndroidCompatibility = AppSettings.desktopAndroidCompatibility {
+        didSet {
+            AppSettings.desktopAndroidCompatibility = desktopAndroidCompatibility
+            updateDiscoveryCompatibility()
+        }
+    }
+    private var desktopCallCompatibility: DesktopCallCompatibility {
+        DesktopCallCompatibility(enabled: desktopAndroidCompatibility, rotatingIds: rotatingIds,
+                                 hiddenIdentities: hiddenIdentities, pseudonyms: bmh3Pseudonyms)
+    }
+    #endif
+
+    private func updateDiscoveryCompatibility() {
+        #if os(macOS)
+        radio.acceptRotating = desktopCallCompatibility.acceptsRotating
+        rebuildLists()
+        #else
+        radio.acceptRotating = rotatingIds
+        #endif
+    }
+
+    private func outgoingRotatingOptions(selected: DiscoveryAnnouncement) -> RotatingCallOptions? {
+        #if os(macOS)
+        guard let options = desktopCallCompatibility.rotatingOptions(selected: selected) else { return nil }
+        return rotatingIds ? withPresence(options) : options
+        #else
+        return rotatingIds ? withPresence(RotatingCallOptions(selected: selected)) : nil
+        #endif
     }
     /// Phase 2 presence leases: the OFFER/LEASE exchange with a mutual verified contact in an answered call.
     func withPresence(_ options: RotatingCallOptions) -> RotatingCallOptions {
@@ -95,11 +147,16 @@ final class AppModel: ObservableObject {
 
     /// A rotating advert: "Nearby phone", or a recognised contact's own label marked unconfirmed (never a check mark;
     /// a hit is a hint that anyone replaying the ID can fake, and never a reason to connect).
-    func rotatingLabel(_ announcement: DiscoveryAnnouncement) -> PeerLabel {
+    func rotatingLabel(_ announcement: DiscoveryAnnouncement, generatedName: String? = nil) -> PeerLabel {
         let hits = rotating.vault.recognition.lookup(announcement.nodeIdPrefix)
         if hits.count == 1, let contact = contacts.first(where: { $0.fingerprintHex.hasPrefix(hits[0].contact.hex) }) {
             return PeerLabel.recognized(contactName: contact.displayName, seed: announcement.nodeIdPrefix)
         }
+        #if os(macOS)
+        if desktopGeneratedNames, let name = generatedName ?? DesktopNearbyNames.shared?.name(for: announcement)?.text {
+            return PeerLabel.generated(name, seed: announcement.nodeIdPrefix)
+        }
+        #endif
         return PeerLabel.nearbyPhone(seed: announcement.nodeIdPrefix)
     }
 
@@ -107,10 +164,15 @@ final class AppModel: ObservableObject {
     @Published var hiddenIdentities = AppSettings.hiddenIdentities { didSet { AppSettings.hiddenIdentities = hiddenIdentities } }
     @Published var bmh3Pseudonyms = AppSettings.bmh3Pseudonyms { didSet { AppSettings.bmh3Pseudonyms = bmh3Pseudonyms } }
     let bmh3Pins = Bmh3Pins()
-    /// The BMH3 options of one call, or nil (BMH2 only). Pseudonyms need rotating IDs, as on Android.
+    /// The BMH3 options of one call, or nil (BMH2 only). Mac compatibility can use a per-attempt
+    /// pseudonym for a selected rotating offer independently of this Mac's own advertising setting.
     func bmh3Options(selected: DiscoveryAnnouncement?) -> Bmh3CallOptions? {
+        #if os(macOS)
+        guard var options = desktopCallCompatibility.bmh3Options(selected: selected, pins: bmh3Pins) else { return nil }
+        #else
         guard hiddenIdentities else { return nil }
         var options = Bmh3CallOptions(pseudonyms: bmh3Pseudonyms && rotatingIds, selected: selected, pins: bmh3Pins)
+        #endif
         if rotatingIds {
             // Phase 2: real keys between contacts through the lease-derived contact tag (PROTOCOL "Real lease keys").
             let vault = rotating.vault, pins = rotating.pins
@@ -127,11 +189,47 @@ final class AppModel: ObservableObject {
     }
     let rotating = RotatingDiscoveryRuntime()
     private var rotationTimer: Timer?
+    #if !os(macOS)
     private var advertisedEpoch: Int64 = -1
     private var boundarySilenceUntil: Date?
+    #endif
+    #if os(macOS)
+    private var desktopStopping = false
+    private lazy var desktopCallScanning = DesktopCallScanning(enabled: desktopPauseCallDiscovery) { [weak self] on in
+        guard let self, !DesktopPreview.enabled else { return }
+        self.radio.setScanning(on)
+    }
+    func desktopCallLinkAttached(_ controller: CallController) -> Bool {
+        guard !desktopStopping, call === controller, controller.ended == nil else { return false }
+        return desktopCallScanning.linkAttached(to: controller.id)
+    }
+    func desktopCallLinkFinished(_ controller: CallController) {
+        desktopCallScanning.callEnded(controller.id)
+    }
+    var desktopRadioLogFields: [String: String] {
+        var fields = radio.desktopLogFields
+        fields["pauseCallDiscoveryEnabled"] = "\(desktopPauseCallDiscovery)"
+        return fields
+    }
+    private lazy var desktopAdvertising: DesktopDiscoveryAdvertising = DesktopDiscoveryAdvertising(
+        pins: rotating.pins,
+        publish: { [weak self] announcement in
+            guard let self else { return }
+            self.desktopAdvertisedName = self.desktopGeneratedNames
+                ? announcement.flatMap { DesktopNearbyNames.shared?.name(for: $0)?.text } : nil
+            self.radio.advertise(announcement, name: self.displayName)
+        }, refresh: { [weak self] in self?.refreshAdvertising() })
+    #endif
 
     /// At each epoch boundary: stop, stay silent a uniform 1-8 s (RV12), then advertise the new ID.
     private func checkRotation() {
+        #if os(macOS)
+        guard rotatingIds, !desktopStopping else { return }
+        // Reading the window on every check also expires a first-ever fixed-ID window. The
+        // desktop scheduler decides whether the current role actually has anything to rotate.
+        rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch())
+        refreshAdvertising()
+        #else
         guard rotatingIds, advertisedEpoch >= 0, boundarySilenceUntil == nil else { return }
         guard rotating.currentEpoch() != advertisedEpoch else { return }
         // Phase 2: the recognition table follows the epoch (RV10).
@@ -144,9 +242,16 @@ final class AppModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + silence) { [weak self] in
             self?.boundarySilenceUntil = nil; self?.refreshAdvertising()
         }
+        #endif
     }
 
-    func startVisibleByHandle() { rotating.startVisibleWindow(); refreshAdvertising() }
+    func startVisibleByHandle() {
+        rotating.startVisibleWindow()
+        #if os(macOS)
+        desktopAdvertising.requestCallRestart()
+        #endif
+        refreshAdvertising()
+    }
     /// Recent calls on this phone (newest first); Home shows the last 3.
     @Published var recentCalls: [CallRecord] = CallHistory.all
     /// EXPERIMENTAL (Settings > Advanced): help pass streams and calls to others nearby.
@@ -178,9 +283,16 @@ final class AppModel: ObservableObject {
 
     private func startHealthMonitoring() {
         guard healthObservers.isEmpty else { return }
+        #if os(iOS)
         UIDevice.current.isBatteryMonitoringEnabled = true
+        #endif
         let center = NotificationCenter.default
-        for name in [ProcessInfo.thermalStateDidChangeNotification, UIDevice.batteryLevelDidChangeNotification, UIDevice.batteryStateDidChangeNotification] {
+        #if os(iOS)
+        let names = [ProcessInfo.thermalStateDidChangeNotification, UIDevice.batteryLevelDidChangeNotification, UIDevice.batteryStateDidChangeNotification]
+        #else
+        let names = [ProcessInfo.thermalStateDidChangeNotification]
+        #endif
+        for name in names {
             healthObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.refreshHealth() })
         }
         refreshHealth()
@@ -188,18 +300,25 @@ final class AppModel: ObservableObject {
 
     private func refreshHealth() {
         let thermal = ProcessInfo.processInfo.thermalState
+        #if os(iOS)
         let level = UIDevice.current.batteryLevel, charging = UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full
+        #else
+        let level: Float = -1
+        let charging = true
+        #endif
         var message: String?
+        #if os(macOS)
+        if thermal == .serious || thermal == .critical { message = "Your Mac is hot. Turning off video helps it cool down." }
+        #else
         if thermal == .serious || thermal == .critical { message = "Your phone is hot. Turning off video helps it cool down." }
         else if level >= 0, level <= 0.2, !charging { message = "Battery \(Int((level * 100).rounded())) %. Plug in to keep going." }
+        #endif
         if message != healthMessage {
             healthMessage = message
             AppLog.event("device_health", ["thermal": "\(thermal.rawValue)", "battery": String(format: "%.2f", level), "charging": "\(charging)", "message": message ?? "none"])
         }
     }
     @Published var peerLabelsEnabled = AppSettings.peerLabels { didSet { AppSettings.peerLabels = peerLabelsEnabled; radio.titlePages = peerLabelsEnabled } }
-    /// Subject typed for the next outgoing call (experimental labels); consumed when the call starts.
-    @Published var pendingCallSubject = ""
     /// Title of the next broadcast (experimental labels).
     @Published var liveTitle = ""
     private var automation: Automation?
@@ -208,8 +327,7 @@ final class AppModel: ObservableObject {
     func callLabelOptions() -> CallLabelOptions? {
         guard peerLabelsEnabled else { return nil }
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let subject = pendingCallSubject.trimmingCharacters(in: .whitespacesAndNewlines)
-        return CallLabelOptions(localName: name.isEmpty ? nil : name, subject: subject.isEmpty ? nil : subject,
+        return CallLabelOptions(localName: name.isEmpty ? nil : name, subject: nil,
                                 isVerifiedPeer: { [weak self] in self?.book.state(of: $0) == .verified })
     }
     @Published var identityError: String?
@@ -232,7 +350,7 @@ final class AppModel: ObservableObject {
 
     init() {
         AppLog.start()
-        if EmergencyWipe.pending { EmergencyWipe.run() }
+        if EmergencyWipe.pending && !DesktopPreview.enabled { EmergencyWipe.run() }
         do { identity = try IdentityStore.loadOrCreate() } catch {
             // Without Keychain access (for example an unsigned build) run with a session-only identity and say so.
             identity = SoftwareSigningIdentity()
@@ -253,7 +371,10 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
-        guard identity != nil else { return }
+        guard !DesktopPreview.enabled, identity != nil else { return }
+        #if os(macOS)
+        guard !desktopStopping else { return }
+        #endif
         if rotatingIds { rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch()) }
         if automation == nil, let auto = Automation(model: self) {
             automation = auto
@@ -262,13 +383,17 @@ final class AppModel: ObservableObject {
             auto.start()
         }
         radio.titlePages = peerLabelsEnabled
-        radio.acceptRotating = rotatingIds
+        updateDiscoveryCompatibility()
         if rotationTimer == nil {
             rotationTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.checkRotation() }
         }
         startHealthMonitoring()
         radio.start()
+        #if os(macOS)
+        desktopCallScanning.start()
+        #else
         radio.setScanning(true)
+        #endif
         pruneTimer?.invalidate()
         pruneTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.radio.prune(olderThan: 8) }
         refreshAdvertising()
@@ -311,6 +436,23 @@ final class AppModel: ObservableObject {
         start()
     }
 
+    #if os(macOS)
+    /// Quit stops local media and links; closing windows only does so when macOS terminates the app.
+    func stopForDesktopExit() {
+        desktopStopping = true
+        desktopCallScanning.stop()
+        desktopAdvertising.stop()
+        call?.end()
+        watch?.stop()
+        live?.stop()
+        radio.stopAll()
+        pruneTimer?.invalidate(); pruneTimer = nil
+        rotationTimer?.invalidate(); rotationTimer = nil
+        healthObservers.forEach(NotificationCenter.default.removeObserver); healthObservers.removeAll()
+        CallNotifier.shared.clear()
+    }
+    #endif
+
     // MARK: Lists
 
     private func rebuildLists() {
@@ -318,23 +460,48 @@ final class AppModel: ObservableObject {
         if debugFixtureActive { return } // keep the simulator fixture rows
         #endif
         // Stable order: contacts first by name, then others by handle (rows no longer use advertised names).
-        let peers = radio.peers.values.sorted { a, b in
+        let peers = radio.peers.values.filter { peer in
+            #if os(macOS)
+            return !peer.announcement.rotating || radio.acceptRotating
+            #else
+            return true
+            #endif
+        }.sorted { a, b in
             let ca = contactName(prefixHex: a.prefixHex), cb = contactName(prefixHex: b.prefixHex)
             if (ca != nil) != (cb != nil) { return ca != nil }
             return (ca ?? a.prefixHex, a.announcement.streamToken) < (cb ?? b.prefixHex, b.announcement.streamToken)
         }
-        people = peers.filter { $0.announcement.isPrivateCallOffer && !$0.announcement.usesClassic }.map { p in
+        let callPeers = peers.filter { $0.announcement.isPrivateCallOffer && !$0.announcement.usesClassic }
+        #if os(macOS)
+        let generatedCalls = desktopGeneratedNames ? DesktopNearbyNames.shared?.labels(for: callPeers.map(\.announcement)) ?? [:] : [:]
+        let generatedStreams = desktopGeneratedNames ? DesktopNearbyNames.shared?.labels(for: peers.filter { $0.announcement.isStreamOffer }.map(\.announcement)) ?? [:] : [:]
+        #endif
+        people = callPeers.map { p in
             // Pre-connect the prefix is an unauthenticated hint: a verified contact's local name may label the row,
             // but the row never claims "verified" (Android shows no badge here either).
-            PersonRow(id: p.id, label: p.announcement.rotating ? rotatingLabel(p.announcement)
+            #if os(macOS)
+            let generated = generatedCalls[p.announcement.nodeIdPrefix]
+            #else
+            let generated: String? = nil
+            #endif
+            return PersonRow(id: p.id, label: p.announcement.rotating ? rotatingLabel(p.announcement, generatedName: generated)
                         : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex)),
                       prefixHex: p.prefixHex, transport: p.announcement.transport ?? .gatt, relays: Int(p.announcement.routeCost), isIPhone: p.isIPhone)
         }
         // A malformed audio-only marker is ignored (Android StreamOfferKind.MALFORMED).
-        streams = peers.filter { $0.announcement.isStreamOffer && !$0.announcement.usesClassic && $0.announcement.streamOfferKind != .malformed }.map {
-            StreamRow(id: $0.id, label: $0.announcement.rotating ? PeerLabel.nearbyPhone(seed: $0.announcement.nodeIdPrefix)
-                        : PeerLabel(prefix: $0.announcement.nodeIdPrefix, contactName: contactName(prefixHex: $0.prefixHex)),
-                      announcement: $0.announcement, advertisedTitle: peerLabelsEnabled ? radio.titleBoard.title(routeToken: $0.announcement.streamToken) : nil)
+        streams = peers.filter {
+            $0.announcement.isStreamOffer && !$0.announcement.usesClassic && $0.announcement.streamOfferKind != .malformed
+                && !streamRoutePenalties.isPenalized(streamRouteKey($0.id, $0.announcement), now: ConnectionDriver.now)
+        }.map { p in
+            #if os(macOS)
+            let label = p.announcement.rotating ? rotatingLabel(p.announcement, generatedName: generatedStreams[p.announcement.nodeIdPrefix])
+                : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex))
+            #else
+            let label = p.announcement.rotating ? PeerLabel.nearbyPhone(seed: p.announcement.nodeIdPrefix)
+                : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex))
+            #endif
+            return StreamRow(id: p.id, label: label, announcement: p.announcement,
+                             advertisedTitle: peerLabelsEnabled ? radio.titleBoard.title(routeToken: p.announcement.streamToken) : nil)
         }
         live?.viewerRequestsChanged(peers)
         watch?.viewerRequestsChanged(peers)
@@ -345,7 +512,11 @@ final class AppModel: ObservableObject {
     // MARK: Advertising (one kind at a time)
 
     func refreshAdvertising() {
-        guard let identity else { return }
+        guard !DesktopPreview.enabled, let identity else { return }
+        #if os(macOS)
+        guard !desktopStopping else { return }
+        var desktopCallPresence: DesktopDiscoveryAdvertising.CallPresence?
+        #endif
         let prefix = identity.nodeId.prefix
         let gattFlag = { (t: MeshTransport) in t == .gatt ? DiscoveryAnnouncement.flagGattTransport : 0 }
         var announcement: DiscoveryAnnouncement?
@@ -363,6 +534,9 @@ final class AppModel: ObservableObject {
         } else if let live, live.running {
             announcement = live.offerAnnouncement(prefix: prefix)
         } else if availableForCalls, call == nil, watch == nil, callRelay == nil {
+            #if os(macOS)
+            desktopCallPresence = .fixed
+            #endif
             announcement = DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: DiscoveryAnnouncement.flagAcceptingConnections |
                                                  DiscoveryAnnouncement.flagPrivateCallAvailable | gattFlag(transport),
                                                  capabilitySummary: encodeMask & decodeMask, streamToken: 0, routeCost: 0)
@@ -370,13 +544,21 @@ final class AppModel: ObservableObject {
                 // Experimental: the role-0 rotating ID instead of the fixed prefix (compact v2).
                 let entry = rotating.callEntry(nodeId: identity.nodeId)
                 announcement?.nodeIdPrefix = entry.rdi; announcement?.rotating = true
+                #if os(macOS)
+                desktopCallPresence = .rotating(entry)
+                #else
                 rotating.pins.onAdvertised(entry, elapsedMs: RotatingDiscoveryRuntime.elapsedMs)
                 advertisedEpoch = entry.epoch
+                #endif
             }
         }
+        #if os(macOS)
+        desktopAdvertising.advertise(announcement, callPresence: desktopCallPresence)
+        #else
         if boundarySilenceUntil != nil, announcement?.rotating == true || announcement?.isPrivateCallOffer == true { return }
         if rotatingIds && announcement?.rotating != true { rotating.pins.offAir(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) }
         radio.advertise(announcement, name: displayName)
+        #endif
     }
 
     // MARK: Incoming links
@@ -420,13 +602,18 @@ final class AppModel: ObservableObject {
             AppLog.event("call_end", ["reason": text, "error": "true", "stage": "not_nearby"])
             callNotice = text; return
         }
+        #if os(macOS)
+        guard !peer.announcement.rotating || desktopCallCompatibility.acceptsRotating else {
+            callNotice = "This device uses changing nearby IDs. Enable Android compatibility in Settings > Experiments to call it."
+            return
+        }
+        #endif
         let controller = CallController(model: self, role: .caller, peerName: person.label.title,
                                         peerPrefixHex: peer.announcement.rotating ? nil : person.prefixHex, identity: identity, transport: person.transport, type: type,
                                         relayHops: UInt8(min(Int(peer.announcement.routeCost), 15)),
-                                        rotating: rotatingIds ? withPresence(RotatingCallOptions(selected: peer.announcement)) : nil,
+                                        rotating: outgoingRotatingOptions(selected: peer.announcement),
                                         bmh3: bmh3Options(selected: peer.announcement))
         call = controller
-        pendingCallSubject = ""
         refreshAdvertising()
         controller.phaseText = "Calling…"
         radio.connect(to: person.id, transport: person.transport) { [weak self, weak controller] result in
@@ -448,6 +635,19 @@ final class AppModel: ObservableObject {
         let direction: CallRecord.Direction = controller.role == .caller ? .outgoing : (controller.activeSince == nil ? .missed : .incoming)
         CallHistory.add(CallRecord(prefixHex: prefix, direction: direction, video: controller.callType == .video, at: Date(), seconds: seconds))
         recentCalls = CallHistory.all
+    }
+
+    /// Same lookup as Android Contacts: a fixed ID, or one unambiguous call-offer recognition.
+    /// Recognition only selects the route; startCall retains the authenticated selection and contact-tag checks.
+    func nearbyPerson(for contact: VerifiedContact) -> PersonRow? {
+        people.first { person in
+            guard let offer = radio.peers[person.id]?.announcement, offer.rotating else {
+                return person.prefixHex == contact.nodePrefixHex
+            }
+            let hits = rotating.vault.recognition.lookup(offer.nodeIdPrefix)
+            return hits.count == 1 && hits[0].role == RotatingDiscoveryIds.roleCallOffer
+                && contact.fingerprintHex.hasPrefix(hits[0].contact.hex)
+        }
     }
 
     /// Calls a recent contact back if their phone is nearby now.
@@ -472,9 +672,24 @@ final class AppModel: ObservableObject {
 
     // MARK: Watching
 
+    /// Core Bluetooth's peripheral UUID is the advertising-address locator available to this app.
+    func streamRouteKey(_ id: UUID, _ offer: DiscoveryAnnouncement) -> StreamRoutePenalties.Route {
+        StreamRoutePenalties.Route(address: id.uuidString, prefixHex: offer.nodeIdPrefix.hex, routeToken: offer.streamToken)
+    }
+    func penalizeStreamRoute(_ route: StreamRoutePenalties.Route, authenticatedNode: NodeId?) {
+        streamRoutePenalties.onMismatch(route, authenticatedNode: authenticatedNode, now: ConnectionDriver.now)
+        rebuildLists()
+    }
+
     func startWatching(_ row: StreamRow) {
         guard watch == nil, let identity else { return }
-        let controller = WatchController(model: self, identity: identity, offer: row.announcement, name: row.label.title, route: row.route, transport: row.announcement.transport ?? .gatt)
+        let key = streamRouteKey(row.id, row.announcement)
+        guard !streamRoutePenalties.isPenalized(key, now: ConnectionDriver.now) else {
+            streamNotice = "That route to the stream is temporarily unavailable. Try another one nearby."
+            return
+        }
+        streamNotice = nil
+        let controller = WatchController(model: self, identity: identity, offer: row.announcement, name: row.label.title, route: row.route, transport: row.announcement.transport ?? .gatt, routeKey: key)
         watch = controller
         refreshAdvertising()
     }
@@ -572,7 +787,7 @@ final class AppModel: ObservableObject {
 
     func myQrText() -> String? {
         guard let fingerprint else { return nil }
-        let name = displayName.trimmingCharacters(in: .whitespaces).isEmpty ? "Phone \(handle.prefix(5))" : displayName
+        let name = displayName.trimmingCharacters(in: .whitespaces).isEmpty ? (AppPlatform.isMac ? "Mac \(handle.prefix(5))" : "Phone \(handle.prefix(5))") : displayName
         return try? IdentityQrCodec.encode(IdentityQrPayload(fingerprint: fingerprint, displayName: name))
     }
 
@@ -581,6 +796,23 @@ final class AppModel: ObservableObject {
     /// (nothing is written to the call history), so every list state can be screenshot without radios.
     private(set) var debugFixtureActive = false
     func applyDebugFixture(_ name: String) {
+        #if os(macOS)
+        if name == "nearby-names" {
+            debugFixtureActive = true
+            desktopGeneratedNames = true
+            people = ["44e69c0a7a7d", "67aba670e65a"].map { hex in
+                let rdi = Data(hex: hex)!
+                var offer = DiscoveryAnnouncement(nodeIdPrefix: rdi, flags: DiscoveryAnnouncement.flagPrivateCallAvailable,
+                                                  capabilitySummary: 1, streamToken: 0, routeCost: 0)
+                offer.rotating = true
+                return PersonRow(id: UUID(), label: rotatingLabel(offer), prefixHex: hex, transport: .gatt, relays: 0, isIPhone: false)
+            }
+            people.append(PersonRow(id: UUID(), label: PeerLabel(prefix: Data(hex: "a1b2c3d4e5f6")!, contactName: "Asha"),
+                                    prefixHex: "a1b2c3d4e5f6", transport: .gatt, relays: 0, isIPhone: false))
+            desktopAdvertisedName = "mild bream"
+            return
+        }
+        #endif
         guard name == "populated" else { return }
         debugFixtureActive = true
         let asha = Data(hex: "a1b2c3d4e5f6")!, ravi = Data(hex: "0102030405a8")!, stranger = Data(hex: "112233445566")!
@@ -635,6 +867,7 @@ final class AppModel: ObservableObject {
         default:
             controller.phase = .outgoingRinging; controller.phaseText = "Ringing…"
         }
+        controller.subject = RootView.debugArgument("-NearbyLegacySubject")
         call = controller
     }
     #endif
@@ -642,8 +875,15 @@ final class AppModel: ObservableObject {
     // MARK: Emergency wipe
 
     func emergencyWipe() {
+        #if os(macOS)
+        desktopStopping = true
+        desktopCallScanning.stop()
+        desktopAdvertising.stop()
+        #endif
         call?.end(); watch?.stop(); live?.stop()
         radio.stopAll()
+        streamRoutePenalties.reset(); streamNotice = nil
+        audioRelayMemory.reset()
         _ = EmergencyWipe.run()
         identity = nil; contacts = []; book.reset(); authenticated = [:]; people = []; streams = []; recentCalls = []
         wiped = true

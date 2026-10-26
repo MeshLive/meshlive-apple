@@ -1,5 +1,7 @@
 import Foundation
+#if os(iOS)
 import UIKit
+#endif
 import UserNotifications
 import NearbyCore
 
@@ -17,6 +19,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
     private var posted = false
 
     func configure(model: AppModel) {
+        guard !DesktopPreview.enabled else { return }
         self.model = model
         center.delegate = self
         let accept = UNNotificationAction(identifier: CallAlertPolicy.acceptAction, title: "Accept", options: [.foreground])
@@ -42,6 +45,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     /// Asks once at an understandable moment (CallAlertPolicy.shouldRequest); the Settings button always may ask.
     func requestIfAppropriate(_ moment: CallAlertPolicy.Moment) {
+        guard !DesktopPreview.enabled else { return }
         guard CallAlertPolicy.shouldRequest(moment, authorization: authorization, alreadyAsked: AppSettings.callAlertsAsked) else { return }
         AppSettings.callAlertsAsked = true
         AppLog.event("call_alerts", ["event": "request", "moment": "\(moment)"])
@@ -53,8 +57,9 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     /// The call rings, or the app's state changed while it rings: post, keep or remove the alert.
     func update(for call: CallController?) {
+        guard !DesktopPreview.enabled else { return }
         let ringing = call?.phase == .incomingRinging
-        let active = UIApplication.shared.applicationState == .active
+        let active = AppPlatform.active
         guard let call, CallAlertPolicy.shouldPost(ringing: ringing, appActive: active, authorization: authorization) else {
             if !ringing { clear() }
             return
@@ -86,7 +91,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
         // Frontmost, the call screen and ringer already show the call. Inactive (Control Center, Notification Center, a
         // system alert over the app, or on the way to the background) the alert must show, or it would be swallowed.
         DispatchQueue.main.async {
-            completionHandler(UIApplication.shared.applicationState == .active ? [] : [.banner, .list, .sound])
+            completionHandler(AppPlatform.active ? [] : [.banner, .list, .sound])
         }
     }
 

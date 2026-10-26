@@ -54,13 +54,15 @@ public final class SecureRecordOpener {
     /// Hop type 13 (BDO1) parses only for a reader whose own link hello carries bit 3; its position is
     /// enforced by MeshConnection (first record each way when both hellos carry the bit).
     public var acceptDiscoveryOpening = false
+    /// A role-specific ciphertext cap, checked from the header before waiting for or decrypting the body.
+    public var maxCiphertextBytes = SecureRecordProtocol.maxPlaintextBytes + MeshAead.tagBytes
     public var bufferedBytes: Int { buffer.count }
     public init(key: SymmetricKey) { self.key = key }
 
-    public func feed(_ data: Data) throws -> [SecureRecord] {
+    public func feed(_ data: Data, maxRecords: Int = Int.max) throws -> [SecureRecord] {
         buffer.append(data)
         var out: [SecureRecord] = []
-        while buffer.count >= SecureRecordProtocol.headerBytes {
+        while out.count < maxRecords && buffer.count >= SecureRecordProtocol.headerBytes {
             let header = buffer.prefix(SecureRecordProtocol.headerBytes).rebased
             var r = BinaryReader(header)
             guard try r.bytes(4) == SecureRecordProtocol.magic else { throw ProtocolError.malformed("Invalid secure record magic") }
@@ -73,7 +75,7 @@ public final class SecureRecordOpener {
             guard sequence <= UInt64(Int64.max) else { throw ProtocolError.malformed("Invalid secure record sequence") }
             guard sequence == nextSequence else { throw ProtocolError.replay }
             let size = Int(try r.i32())
-            guard size >= MeshAead.tagBytes, size <= SecureRecordProtocol.maxPlaintextBytes + MeshAead.tagBytes else {
+            guard size >= MeshAead.tagBytes, size <= min(maxCiphertextBytes, SecureRecordProtocol.maxPlaintextBytes + MeshAead.tagBytes) else {
                 throw ProtocolError.malformed("Invalid secure record size \(size)")
             }
             guard buffer.count >= SecureRecordProtocol.headerBytes + size else { break }

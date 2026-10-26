@@ -1,6 +1,9 @@
 import Foundation
 import CoreBluetooth
 import NearbyCore
+#if canImport(DesktopSupport)
+import DesktopSupport
+#endif
 
 /// An ordered, reliable byte pipe to one Bluetooth peer (LE L2CAP CoC or Android-framed GATT).
 /// All methods run on the main queue, like Core Bluetooth's delegate callbacks in this app.
@@ -12,9 +15,18 @@ protocol MeshLink: AnyObject {
     var onWritable: (() -> Void)? { get set }
     /// Bytes accepted by `send` but not yet handed to Core Bluetooth / the stream.
     var queuedBytes: Int { get }
+    #if os(macOS)
+    var logFields: [String: String] { get }
+    #endif
     func send(_ data: Data)
     func close()
 }
+
+#if os(macOS)
+extension MeshLink {
+    var logFields: [String: String] { ["transportQueuedBytes": "\(queuedBytes)"] }
+}
+#endif
 
 /// LE credit-based channel: raw stream bytes both ways (no extra framing on Android CoC).
 final class L2CAPLink: NSObject, MeshLink, StreamDelegate {
@@ -97,6 +109,15 @@ final class GattClientLink: MeshLink {
     private var pending: [Data] = []
     private var pendingBytes = 0
     private var closed = false
+    #if os(macOS)
+    private var inputValues = 0
+    private var lastInputAt: TimeInterval?
+    var logFields: [String: String] {
+        ["transportQueuedBytes": "\(queuedBytes)", "gattInputValues": "\(inputValues)",
+         "gattNextInputSequence": "\(reader.nextSequence)",
+         "gattInputIdleMs": lastInputAt.map { "\(Int((ProcessInfo.processInfo.systemUptime - $0) * 1000))" } ?? "none"]
+    }
+    #endif
     var onRelease: (() -> Void)?
     var queuedBytes: Int { pendingBytes }
 
@@ -121,6 +142,9 @@ final class GattClientLink: MeshLink {
 
     func received(_ value: Data) {
         guard !closed else { return }
+        #if os(macOS)
+        inputValues += 1; lastInputAt = ProcessInfo.processInfo.systemUptime
+        #endif
         do { let bytes = try reader.accept(value); if !bytes.isEmpty { onBytes?(bytes) } }
         catch { fail("GATT input: \(error)") }
     }
@@ -145,6 +169,15 @@ final class GattServerLink: MeshLink {
     private var pending: [Data] = []
     private var pendingBytes = 0
     private var closed = false
+    #if os(macOS)
+    private var inputValues = 0
+    private var lastInputAt: TimeInterval?
+    var logFields: [String: String] {
+        ["transportQueuedBytes": "\(queuedBytes)", "gattInputValues": "\(inputValues)",
+         "gattNextInputSequence": "\(reader.nextSequence)",
+         "gattInputIdleMs": lastInputAt.map { "\(Int((ProcessInfo.processInfo.systemUptime - $0) * 1000))" } ?? "none"]
+    }
+    #endif
     var onRelease: (() -> Void)?
     var queuedBytes: Int { pendingBytes }
 
@@ -168,6 +201,9 @@ final class GattServerLink: MeshLink {
 
     func received(_ value: Data) {
         guard !closed else { return }
+        #if os(macOS)
+        inputValues += 1; lastInputAt = ProcessInfo.processInfo.systemUptime
+        #endif
         do { let bytes = try reader.accept(value); if !bytes.isEmpty { onBytes?(bytes) } }
         catch { fail("GATT input: \(error)") }
     }
@@ -184,8 +220,22 @@ final class ConnectionDriver {
     let link: MeshLink
     private var timer: Timer?
     private var closing = false
+    #if os(macOS)
+    private var lastTickAt: TimeInterval?
+    private var maxTickGapMs = 0
+    #endif
     var onFinished: ((String) -> Void)?
     static let lowWater = 4_096
+
+    deinit {
+        #if os(macOS)
+        // The owner can leave while a graceful transport drain is blocked. Release its radio slot
+        // and run-loop timer even when there will be no further writable callback.
+        timer?.invalidate()
+        link.onBytes = nil; link.onWritable = nil; link.onClosed = nil
+        link.close()
+        #endif
+    }
 
     init(engine: MeshConnection, link: MeshLink) {
         self.engine = engine; self.link = link
@@ -203,18 +253,64 @@ final class ConnectionDriver {
 
     static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
+    #if os(macOS)
+    var logFields: [String: String] {
+        var fields = link.logFields
+        fields["linkReceiveIdleMs"] = "\(Int((Self.now - engine.lastReceiveAt) * 1000))"
+        fields["linkSendIdleMs"] = "\(Int((Self.now - engine.lastSendAt) * 1000))"
+        fields["connectionTickIdleMs"] = lastTickAt.map { "\(Int((Self.now - $0) * 1000))" } ?? "none"
+        fields["connectionMaxTickGapMs"] = "\(maxTickGapMs)"
+        return fields
+    }
+    #endif
+
     func start() {
         do { try engine.start(now: Self.now) } catch { engine.fail("\(error)") }
         pump()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        #if os(macOS)
+        // A synchronous setup/send failure may already have finished the driver in pump().
+        guard !closing else { return }
+        #endif
+        let tick: (Timer) -> Void = { [weak self] _ in
             guard let self else { return }
-            self.engine.tick(now: Self.now); self.pump()
+            let now = Self.now
+            #if os(macOS)
+            if let last = self.lastTickAt { self.maxTickGapMs = max(self.maxTickGapMs, Int((now - last) * 1000)) }
+            self.lastTickAt = now
+            #endif
+            self.engine.tick(now: now); self.pump()
         }
+        #if os(macOS)
+        lastTickAt = Self.now
+        timer = DesktopConnectionTimer.schedule(tick: tick)
+        #else
+        if UserDefaults.standard.bool(forKey: "NearbyDefaultModeLinkTimer") {
+            // Control arm: the old default-mode timer, which pauses while a scroll or held control tracks touches.
+            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true, block: tick)
+        } else {
+            // Common modes keep link liveness running during UI tracking, as on the Mac (DesktopConnectionTimer).
+            let linkTimer = Timer(timeInterval: 0.1, repeats: true, block: tick)
+            RunLoop.main.add(linkTimer, forMode: .common)
+            timer = linkTimer
+        }
+        #endif
     }
 
     func pump() {
         guard !closing else { return }
-        while link.queuedBytes < Self.lowWater, let bytes = engine.nextOutgoing(now: Self.now) { link.send(bytes) }
+        #if os(macOS)
+        guard !releaseFailedEngine() else { return }
+        #endif
+        while link.queuedBytes < Self.lowWater, let bytes = engine.nextOutgoing(now: Self.now) {
+            link.send(bytes)
+            #if os(macOS)
+            guard !closing else { return }
+            #endif
+        }
+        #if os(macOS)
+        // Sealing or send() can synchronously fail after the initial check.
+        guard !releaseFailedEngine() else { return }
+        #endif
         if engine.phase == .closed && !engine.hasPendingOutput && link.queuedBytes == 0 {
             closing = true
             // Give the final record (hang-up, END_ACK, route ack) time to reach the peer, as Android waits for it.
@@ -225,7 +321,21 @@ final class ConnectionDriver {
         }
     }
 
+    #if os(macOS)
+    private func releaseFailedEngine() -> Bool {
+        guard engine.phase == .closed, engine.closedWithError else { return false }
+        closing = true
+        link.close()
+        finish(engine.closeReason ?? "Closed")
+        return true
+    }
+    #endif
+
     private func finish(_ reason: String) {
+        #if os(macOS)
+        closing = true
+        link.onBytes = nil; link.onWritable = nil; link.onClosed = nil
+        #endif
         timer?.invalidate(); timer = nil
         let callback = onFinished; onFinished = nil
         callback?(reason)

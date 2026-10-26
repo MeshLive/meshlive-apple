@@ -71,6 +71,7 @@ final class CallAudio {
 
     /// Starts playback, and capture when the microphone is allowed (permission is requested if undecided).
     func start(capture: Bool) {
+        guard !DesktopPreview.enabled else { return }
         guard capture else { setUp(capture: false); return }
         MediaPermissions.requestMicrophone { granted in
             guard !self.stopped else { return }
@@ -144,6 +145,7 @@ final class CallAudio {
 
     private func configureSession() throws {
         guard CallAudio.opusAvailable else { throw RadioError.unavailable("Opus is not linked (run Scripts/prepare-opus.sh)") }
+        #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: route == .speaker ? .videoChat : .voiceChat,
                                 options: [.allowBluetoothHFP, .allowBluetoothA2DP])
@@ -151,6 +153,7 @@ final class CallAudio {
         try? session.setPreferredIOBufferDuration(0.01)
         try session.setActive(true)
         try? session.overrideOutputAudioPort(route == .speaker ? .speaker : .none)
+        #endif
         if encoder == nil || decoder == nil {
             var error: Int32 = 0
             encoder = nearby_opus_encoder(48_000, Int32(bitrate), &error)
@@ -167,6 +170,9 @@ final class CallAudio {
         let engine = AVAudioEngine(), player = AVAudioPlayerNode()
         self.engine = engine; self.player = player
         if capture && voiceProcessing { try engine.inputNode.setVoiceProcessingEnabled(true) }
+        #if os(macOS)
+        player.volume = route == .speaker ? 1 : 0
+        #endif
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format48)
         if capture { try installTap(on: engine, voiceProcessing: voiceProcessing) }
@@ -181,8 +187,13 @@ final class CallAudio {
     /// Reads the input format (it must be valid: 0 Hz means the session is still switching) and installs the tap.
     private func installTap(on engine: AVAudioEngine, voiceProcessing: Bool) throws {
         let input = engine.inputNode.outputFormat(forBus: 0)
+        #if os(iOS)
+        let available = AVAudioSession.sharedInstance().isInputAvailable
+        #else
+        let available = input.sampleRate > 0 && input.channelCount > 0
+        #endif
         AppLog.event("audio_input", ["rate": "\(input.sampleRate)", "channels": "\(input.channelCount)", "voiceProcessing": "\(voiceProcessing)",
-                                      "available": "\(AVAudioSession.sharedInstance().isInputAvailable)"])
+                                      "available": "\(available)"])
         guard input.sampleRate > 0, input.channelCount > 0 else { throw RadioError.setup("Microphone format not ready (\(input.sampleRate) Hz)") }
         let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: input.sampleRate, channels: 1, interleaved: false)!
         let newResampler = try PCMResampler(input: mono, output: format48)
@@ -239,6 +250,7 @@ final class CallAudio {
     }
 
     private func logSession(_ event: String) {
+        #if os(iOS)
         let s = AVAudioSession.sharedInstance()
         let outputs = s.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: "+")
         let inputs = s.currentRoute.inputs.map { $0.portType.rawValue }.joined(separator: "+")
@@ -246,12 +258,17 @@ final class CallAudio {
                                         "ioBufferMs": String(format: "%.1f", s.ioBufferDuration * 1000), "outputs": outputs.isEmpty ? "none" : outputs,
                                         "inputs": inputs.isEmpty ? "none" : inputs, "capture": "\(capturing)", "voiceProcessing": "\(voiceProcessing)",
                                         "engineRunning": "\(engine?.isRunning ?? false)", "outputVolume": String(format: "%.2f", s.outputVolume)])
+        #else
+        AppLog.event("audio_session", ["event": event, "capture": "\(capturing)", "voiceProcessing": "\(voiceProcessing)",
+                                       "engineRunning": "\(engine?.isRunning ?? false)"])
+        #endif
     }
 
     /// Interruptions (a phone call, Siri), route changes and media-server resets restart the engine.
     private func installObservers() {
         guard observers.isEmpty else { return }
         let center = NotificationCenter.default
+        #if os(iOS)
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             guard let self else { return }
             let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init) ?? .began
@@ -266,6 +283,7 @@ final class CallAudio {
         observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
             AppLog.event("audio_media_services_reset"); self?.restart("media services reset")
         })
+        #endif
         observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
             guard let self, let engine = note.object as? AVAudioEngine, engine === self.engine else { return }
             AppLog.event("audio_engine_configuration_change", ["running": "\(engine.isRunning)", "capture": "\(self.capturing)"])
@@ -359,7 +377,11 @@ final class CallAudio {
 
     func setRoute(_ route: Route) {
         self.route = route
+        #if os(iOS)
         try? AVAudioSession.sharedInstance().overrideOutputAudioPort(route == .speaker ? .speaker : .none)
+        #else
+        player?.volume = route == .speaker ? 1 : 0
+        #endif
         logSession("route_set")
     }
 
@@ -372,6 +394,8 @@ final class CallAudio {
             if let decoder { nearby_opus_decoder_destroy(decoder) }
             encoder = nil; decoder = nil; framer.reset(); playout.reset()
         }
+        #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
     }
 }

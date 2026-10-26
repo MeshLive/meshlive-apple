@@ -12,20 +12,27 @@ final class Ringer {
     private(set) var ringing = false
 
     func start() {
+        guard !DesktopPreview.enabled else { return }
         guard !ringing else { return }
         ringing = true
+        #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.ambient, mode: .default, options: [])
         try? session.setActive(true)
+        #endif
         if let player = try? AVAudioPlayer(data: Ringer.tone) {
             player.numberOfLoops = -1
             player.volume = 1
             player.play()
             self.player = player
         }
+        #if os(iOS)
         AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
         vibration = Timer.scheduledTimer(withTimeInterval: Ringer.period, repeats: true) { _ in AudioServicesPlaySystemSound(kSystemSoundID_Vibrate) }
         AppLog.event("ringer", ["state": "start", "silentSwitchRespected": "true", "category": session.category.rawValue])
+        #else
+        AppLog.event("ringer", ["state": "start"])
+        #endif
     }
 
     func stop() {

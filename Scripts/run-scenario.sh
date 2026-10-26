@@ -1,6 +1,6 @@
 #!/bin/bash
 # Non-interactive iPhone scenarios over SSH through the DEBUG launch-argument hook (App/Diagnostics/Automation.swift).
-# The iPhone must be unlocked; microphone/camera permission must already be granted (see TESTING.md).
+# The iPhone must be unlocked; microphone/camera permission must already be granted (see docs/dev/testing.md).
 #   bash Scripts/run-scenario.sh call <handle|short|prefix|first> voice|video <seconds>
 #   bash Scripts/run-scenario.sh answer voice|video <listen-seconds> [hang-up-after-seconds]
 #   bash Scripts/run-scenario.sh launch            # plain launch, logs only

@@ -1,36 +1,44 @@
-name: iPhone device test report
-description: Tell us how MeshLive for iPhone worked on your iPhone with an Android phone (reports where everything worked are just as useful).
-title: "[iPhone] <iPhone model>, iOS <version>"
+name: Device test report (iPhone or Mac)
+description: Tell us how MeshLive worked on your iPhone or Mac with an Android phone (reports where everything worked are just as useful).
+title: "[Device] <iPhone or Mac model>, <iOS or macOS version>"
 labels: ["device-compat", "needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you. There is **no iPhone device table yet** because the app has had almost no hardware testing; your
-        report is how we start one.
+        Thank you. There is **no pass yet** in the device table (docs/devices.md) because the apps have had almost
+        no hardware testing; your report is how we fill it.
 
-        Please answer for **your own iPhone**, tested with at least one Android phone running MeshLive. For each
+        Please answer for **your own iPhone or Mac** (the Mac app is experimental), tested with at least one Android
+        phone running MeshLive. For each
         item, choose **Pass** only if it worked for a few minutes without restarting the app or Bluetooth. Choose
         **Partial** if it worked but badly (very slow, frequent freezes, only in some conditions), **Fail** if it did
         not work, and **Not tested** if you did not try it. Some directions need the Android app's Advanced setting
         "Experimental: find iPhones"; say in the notes whether it was on.
 
         Do not post photos, recordings or names of other people, and do not paste Bluetooth addresses or identity
-        keys. Security problems: do not post details here; open an issue that says only "security report" and the
-        maintainer will arrange a private channel (see SECURITY.md).
+        keys. Security problems: do not post details here. Report them privately through GitHub Security Advisories
+        (the repository's Security tab, "Report a vulnerability"); see SECURITY.md.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Which app
+      options: ["iPhone app", "Mac app (native, experimental)"]
+    validations:
+      required: true
   - type: input
     id: iphone
     attributes:
-      label: iPhone model
-      description: Settings > General > About > Model Name.
-      placeholder: "iPhone 14 Plus"
+      label: iPhone or Mac model
+      description: "iPhone: Settings > General > About > Model Name. Mac: Apple menu > About This Mac."
+      placeholder: "iPhone 15, or MacBook Air (M2)"
     validations:
       required: true
   - type: input
     id: ios
     attributes:
-      label: iOS version
-      placeholder: "18.5"
+      label: iOS or macOS version
+      placeholder: "iOS 18.5, or macOS 15.6"
     validations:
       required: true
   - type: input
@@ -53,7 +61,7 @@ body:
     id: transport
     attributes:
       label: Bluetooth transport used (tick all that you used, if you know)
-      description: GATT is the default and needs no pairing; LE CoC is faster in some cases. The iPhone has no Classic.
+      description: GATT is the default and needs no pairing; LE CoC is faster in some cases. iPhones and Macs have no Classic.
       options:
         - label: LE GATT (default)
         - label: LE L2CAP CoC
@@ -78,7 +86,7 @@ body:
   - type: dropdown
     id: livestream
     attributes:
-      label: Livestream (this iPhone going live, and/or watching an Android phone's broadcast)
+      label: Livestream (this iPhone or Mac going live, and/or watching an Android phone's broadcast)
       options: ["Pass", "Partial", "Fail", "Not tested"]
       default: 3
     validations:
@@ -87,7 +95,7 @@ body:
     id: relay
     attributes:
       label: Relay through one extra phone (a stream reaching a viewer through a middle phone)
-      description: Relaying is not implemented on the iPhone yet, so "Not tested" is expected unless the Android phones relay between themselves.
+      description: Relaying is experimental and off by default on the iPhone and Mac, so "Not tested" is expected unless you switched it on or the Android phones relay between themselves.
       options: ["Pass", "Partial", "Fail", "Not tested"]
       default: 3
     validations:

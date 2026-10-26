@@ -2,7 +2,7 @@ import XCTest
 import CryptoKit
 @testable import NearbyCore
 
-/// Experimental audio-only live streams: the Android vectors of PROTOCOL.md (AudioLiveProtocolTest) and the
+/// Experimental audio-only live streams: the Android vectors of Android's protocol reference (AudioLiveProtocolTest) and the
 /// rejection cases, plus sign/verify round trips through the receiver guard.
 final class AudioLiveTests: XCTestCase {
     private func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
@@ -177,5 +177,37 @@ final class AudioLiveTests: XCTestCase {
         block.append(head)
         XCTAssertTrue(AudioLiveOpus.isMonoConfig(block))
         XCTAssertFalse(AudioLiveOpus.isMonoConfig(OpusHead.make(channels: 2)))
+    }
+}
+
+/// Android StreamRoutePenalties: route-local hints, authenticated-node scope, expiry and bounded storage.
+final class StreamRoutePenaltyTests: XCTestCase {
+    private func route(_ address: String, token: UInt32 = 1) -> StreamRoutePenalties.Route {
+        .init(address: address, prefixHex: "010203040506", routeToken: token)
+    }
+    func testUnauthenticatedMismatchNeverPoisonsAnotherRouteOfTheSameStream() {
+        let p = StreamRoutePenalties()
+        p.onMismatch(route("route-a"), authenticatedNode: nil, now: 0)
+        XCTAssertTrue(p.isPenalized(route("route-a"), now: 119))
+        XCTAssertFalse(p.isPenalized(route("route-b"), now: 1))
+        XCTAssertFalse(p.isPenalized(route("route-a", token: 2), now: 1))
+        XCTAssertFalse(p.isPenalized(route("route-a"), now: 120))
+    }
+    func testOnlyAnAuthenticatedNodeGetsTheLongerPenalty() throws {
+        let p = StreamRoutePenalties(), node = try NodeId(bytes: Data(repeating: 7, count: 16))
+        p.onMismatch(route("route-a"), authenticatedNode: node, now: 0)
+        XCTAssertFalse(p.isPenalized(route("route-b"), now: 1), "an advert alone never identifies that node")
+        XCTAssertTrue(p.isPenalized(route("route-b"), authenticatedNode: node, now: 599))
+        XCTAssertFalse(p.isPenalized(route("route-b"), authenticatedNode: node, now: 600))
+    }
+    func testOldestEntriesAreBoundedAndWipeResetsBothTables() throws {
+        let p = StreamRoutePenalties()
+        for i in 0...64 {
+            p.onMismatch(route("route-\(i)"), authenticatedNode: try NodeId(bytes: Data(repeating: UInt8(i), count: 16)), now: 0)
+        }
+        XCTAssertFalse(p.isPenalized(route("route-0"), authenticatedNode: try NodeId(bytes: Data(count: 16)), now: 1))
+        XCTAssertTrue(p.isPenalized(route("route-64"), now: 1))
+        p.reset()
+        XCTAssertFalse(p.isPenalized(route("route-64"), authenticatedNode: try NodeId(bytes: Data(repeating: 64, count: 16)), now: 1))
     }
 }

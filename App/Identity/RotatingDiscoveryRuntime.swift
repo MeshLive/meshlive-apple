@@ -5,7 +5,7 @@ import NearbyCore
 /// EXPERIMENTAL rotating discovery IDs (Settings > Advanced, off): the presence vault (day keys and leases), the RV4 epoch clock, the opening pins, the stranger tarpit and
 /// the Visible-by-handle window. Call-ready presence advertises the role-0 RDI as compact UUID v2.
 final class RotatingDiscoveryRuntime {
-    private let defaults = UserDefaults.standard
+    private let defaults = DesktopPreview.preferences
     let pins = OpeningPins()
     let tarpit = StrangerTarpit()
     private var clock: DiscoveryEpochClock
@@ -51,7 +51,11 @@ final class RotatingDiscoveryRuntime {
 
     /// The phase 1 presence key P (one long-lived key, weekly derivation) is no longer used: delete it once.
     static func deleteLegacyPresenceKey() {
+        #if os(macOS)
+        DesktopLegacyPresenceCleanup.run(preview: DesktopPreview.enabled)
+        #else
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.rotating"] as CFDictionary)
+        #endif
     }
 
     // MARK: Visible by handle (compact v1 until the first boundary at least 10 min later; 25 min monotonic cap)

@@ -1,5 +1,7 @@
 import SwiftUI
+#if os(iOS)
 import UIKit
+#endif
 import NearbyCore
 
 /// The four tabs of the Android app (2026-10-17 redesign): Live, Calls, Contacts and Settings. Each tab root draws
@@ -9,9 +11,11 @@ enum MainTab: Hashable { case live, calls, contacts, settings }
 struct MainTabs: View {
     @EnvironmentObject var model: AppModel
     @State private var tab: MainTab
+    @State private var callsShowRecent = false
 
     init(initial: MainTab = .live) {
         _tab = State(initialValue: initial)
+        #if os(iOS)
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
         appearance.backgroundColor = .black
@@ -24,15 +28,16 @@ struct MainTabs: View {
         }
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
+        #endif
     }
 
     var body: some View {
         TabView(selection: $tab) {
             NavigationStack { LiveTab() }
                 .tabItem { Label("Live", systemImage: "dot.radiowaves.left.and.right") }.tag(MainTab.live)
-            NavigationStack { CallsTab() }
+            NavigationStack { CallsTab(showRecent: $callsShowRecent) }
                 .tabItem { Label("Calls", systemImage: "phone") }.tag(MainTab.calls)
-            NavigationStack { ContactsTab() }
+            NavigationStack { ContactsTab { callsShowRecent = false; tab = .calls } }
                 .tabItem { Label("Contacts", systemImage: "person.2") }.tag(MainTab.contacts)
             NavigationStack { SettingsView() }
                 .tabItem { Label("Settings", systemImage: "gearshape") }.tag(MainTab.settings)
@@ -73,7 +78,7 @@ struct TabPage<Content: View, Bottom: View>: View {
                 .padding(.horizontal, 20).padding(.bottom, 16)
         }
         .background(Palette.ground.ignoresSafeArea())
-        .toolbar(.hidden, for: .navigationBar)
+        .mobileRootNavigation()
         // No bottom bar for an EmptyView: a padded empty view with a Color background grows to fill the inset
         // and squeezed the page to nothing.
         if Bottom.self == EmptyView.self {
@@ -117,6 +122,9 @@ struct NoticeCard: View {
 /// Go live starts the camera broadcast directly; with names and titles on, a sheet asks for the optional title first.
 struct LiveTab: View {
     @EnvironmentObject var model: AppModel
+    #if os(macOS)
+    @EnvironmentObject private var desktop: DesktopNavigation
+    #endif
     @State private var watching: StreamRow?
     @State private var showGoLive = false
     @State private var startAfterSheet: (audioOnly: Bool, preset: UInt8)?
@@ -133,24 +141,32 @@ struct LiveTab: View {
                     .padding(.top, 110)
             } else {
                 ForEach(Array(model.streams.enumerated()), id: \.element.id) { index, row in
-                    if index > 0 { ListDivider() }
-                    Button { watching = row } label: { StreamRowView(row: row) }
+                    if index > 0 { ListDivider(inset: 64) }
+                    Button {
+                        #if os(macOS)
+                        desktop.watching = row
+                        #else
+                        watching = row
+                        #endif
+                    } label: { StreamRowView(row: row) }
                         .buttonStyle(.plain)
                         .disabled(model.watch != nil || model.live != nil)
                 }
             }
         } bottom: {
             CapsuleButton(title: "Go live", systemImage: "dot.radiowaves.left.and.right", kind: .whiteLive) { showGoLive = true }
-            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
             .disabled(model.call != nil || model.watch != nil || model.live != nil)
-            .accessibilityHint("Broadcast your camera and voice to phones nearby")
+            .accessibilityHint("Choose video and audio, or audio only, for phones nearby")
         }
-        .fullScreenCover(item: $watching) { WatchView(row: $0) }
+        .meshFullScreenCover(item: $watching) { WatchView(row: $0) }
         .onAppear {
             // DEBUG screenshot aids: the Go live sheet and the radio player (fixture row).
             switch RootView.debugScreenName {
             case "golive": showGoLive = true
-            case "radio": watching = model.streams.first(where: \.audioOnly)
+            case "radio":
+                #if os(iOS)
+                watching = model.streams.first(where: \.audioOnly)
+                #endif
             default: break
             }
         }
@@ -161,7 +177,7 @@ struct LiveTab: View {
                 }) {
                     GoLiveSheet { audioOnly, preset in startAfterSheet = (audioOnly, preset); showGoLive = false }
                 }
-                .fullScreenCover(item: Binding(get: { model.live }, set: { _ in })) { LivePanel(live: $0) }
+                .meshFullScreenCover(item: Binding(get: { model.live }, set: { _ in })) { LivePanel(live: $0) }
         )
     }
 }
@@ -180,7 +196,7 @@ struct StatusCard: View {
             }
             if let action = status.action {
                 CapsuleButton(title: action, kind: .dark) {
-                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    AppPlatform.openSettings()
                 }
             }
         }
@@ -190,14 +206,15 @@ struct StatusCard: View {
     }
 }
 
-/// One stream row. Android puts a radio disc on audio-only rows only; video rows have no icon.
+/// One stream row: a consistent leading camera or radio icon, title and route.
 struct StreamRowView: View {
     let row: StreamRow
+    @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
         HStack(spacing: 16) {
-            if row.audioOnly { IconDisc(icon: "radio", size: 48) }
+            IconDisc(icon: row.audioOnly ? "radio" : "video", size: 48)
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.listTitle).font(.body.weight(.medium)).foregroundStyle(Palette.ink).lineLimit(2)
+                Text(row.listTitle).font(.body.weight(.medium)).foregroundStyle(Palette.ink).lineLimit(typeSize.isAccessibilitySize ? nil : 2)
                     .multilineTextAlignment(.leading)
                 Text(row.listDetail).font(.subheadline).foregroundStyle(Palette.dimInk)
             }
@@ -207,6 +224,8 @@ struct StreamRowView: View {
         .padding(.vertical, 10).frame(minHeight: 64)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+        .accessibilityValue(row.audioOnly ? "Audio only stream" : "Video stream")
+        .accessibilityIdentifier("stream-\(row.id)")
         .accessibilityHint("Opens the stream")
     }
 }
@@ -215,34 +234,47 @@ struct StreamRowView: View {
 /// signed title when names and titles are on.
 struct GoLiveSheet: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
     let start: (_ audioOnly: Bool, _ preset: UInt8) -> Void
     @AppStorage("audioLivePreset") private var preset = Int(AudioLive.presetVoice)
+    @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Go live").font(.title2.weight(.bold)).foregroundStyle(Palette.ink).padding(.top, 24)
+        ScrollView {
+          VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Go live").font(.title2.weight(.bold)).foregroundStyle(Palette.ink)
+                #if os(macOS)
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                #endif
+            }
+            .padding(.top, 24)
             if model.peerLabelsEnabled {
                 TextField("Title (optional)", text: $model.liveTitle)
                     .padding(.horizontal, 16).frame(minHeight: 52)
                     .background(Palette.chip, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+            #if os(macOS)
+            DesktopCameraPicker()
+            #endif
             CapsuleButton(title: "Video and audio", systemImage: "video", kind: .white) { start(false, AudioLive.presetVoice) }
             CapsuleButton(title: "Audio only", systemImage: "radio", kind: .dark) { start(true, UInt8(preset)) }
-            HStack(spacing: 8) {
+            let qualityLayout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
+            qualityLayout {
                 Chip(title: "Voice", selected: preset == Int(AudioLive.presetVoice)) { preset = Int(AudioLive.presetVoice) }
                 Chip(title: "Low data", selected: preset == Int(AudioLive.presetLowData)) { preset = Int(AudioLive.presetLowData) }
                 Chip(title: "Music", selected: preset == Int(AudioLive.presetMusic)) { preset = Int(AudioLive.presetMusic) }
             }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Audio only quality")
-            Text("Audio only reaches further and keeps playing with the screen off. Listeners learn your ID.")
+            Text(AppPlatform.isMac ? "Audio only uses less bandwidth and can keep playing with the display off while this Mac is awake. Listeners learn your ID." : "Audio only reaches further and keeps playing with the screen off. Listeners learn your ID.")
                 .font(.subheadline).foregroundStyle(Palette.dimInk)
-            Spacer(minLength: 0)
+          }
+          .padding(.horizontal, 20).padding(.bottom, 24)
         }
-        .padding(.horizontal, 20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Palette.card.ignoresSafeArea())
-        .presentationDetents([.height(model.peerLabelsEnabled ? 470 : 400)])
-        .presentationDragIndicator(.visible)
+        .meshPresentation(height: model.peerLabelsEnabled ? 470 : 400, largeOnly: typeSize.isAccessibilitySize)
         .preferredColorScheme(.dark)
     }
 }
@@ -253,13 +285,21 @@ struct GoLiveSheet: View {
 /// A row opens "Call <name>" with Voice call and Video call.
 struct CallsTab: View {
     @EnvironmentObject var model: AppModel
-    @State private var showRecent = false
+    @Binding var showRecent: Bool
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var picked: PersonRow?
 
     var body: some View {
         TabPage {
             TabHeader(title: "Calls")
-            HStack(spacing: 10) {
+            #if os(macOS)
+            if let name = model.desktopAdvertisedName {
+                Text("This Mac appears nearby as \(name)").font(Typo.secondary).foregroundStyle(Palette.dimInk)
+                    .accessibilityIdentifier("desktop-nearby-name")
+            }
+            #endif
+            let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
+            layout {
                 Chip(title: "Nearby", selected: !showRecent) { showRecent = false }
                 Chip(title: "Recent", selected: showRecent) { showRecent = true }
             }
@@ -272,8 +312,8 @@ struct CallsTab: View {
             Color.clear.confirmationDialog(picked.map { "Call \($0.label.title)" } ?? "Call",
                                 isPresented: Binding(get: { picked != nil }, set: { if !$0 { picked = nil } }),
                                 titleVisibility: .visible, presenting: picked) { person in
-                Button("Voice call") { model.startCall(to: person, type: .voice) }
-                Button("Video call") { model.startCall(to: person, type: .video) }
+                Button("Voice call") { model.startCall(to: person, type: .voice) }.desktopCallShortcut("a")
+                Button("Video call") { model.startCall(to: person, type: .video) }.desktopCallShortcut("v")
                 Button("Cancel", role: .cancel) {}
             }
         )
@@ -285,13 +325,6 @@ struct CallsTab: View {
                             message: "Ask the other person to open MeshLive. Stay within about 10 to 30 metres. The list updates by itself.")
                 .padding(.top, 80)
         } else {
-            if model.peerLabelsEnabled {
-                TextField("Subject (optional)", text: $model.pendingCallSubject)
-                    .padding(.horizontal, 16).frame(minHeight: 52)
-                    .background(Palette.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .padding(.top, 6)
-                CardNote("Sent with your next call, signed with your ID.").padding(.top, 6).padding(.bottom, 4)
-            }
             ForEach(Array(model.people.enumerated()), id: \.element.id) { index, person in
                 if index > 0 { ListDivider() }
                 Button { picked = person } label: { PersonRowView(person: person) }
@@ -395,11 +428,13 @@ struct RecentCallRow: View {
 
 // MARK: - Contacts
 
-extension VerifiedContact: Identifiable { public var id: String { fingerprintHex } }
-
 /// Contacts tab (Android r4): name, "Nearby now" when in range, then video call, voice call and info.
 struct ContactsTab: View {
     @EnvironmentObject var model: AppModel
+    #if os(macOS)
+    @EnvironmentObject private var desktopNavigation: DesktopNavigation
+    #endif
+    let openNearby: () -> Void
     @State private var info: VerifiedContact?
     @State private var addContact = false
 
@@ -423,14 +458,21 @@ struct ContactsTab: View {
             } else {
                 ForEach(Array(model.contacts.enumerated()), id: \.element.id) { index, contact in
                     if index > 0 { ListDivider() }
-                    ContactRow(contact: contact) { info = contact }
+                    ContactRow(contact: contact, openNearby: openNearby) { info = contact }
                 }
             }
         } bottom: {
-            CapsuleButton(title: "Add contact", systemImage: "person.badge.plus", kind: .white) { addContact = true }
-                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-        }
+            CapsuleButton(title: "Add contact", systemImage: "person.badge.plus", kind: .white) {
+                #if os(macOS)
+                desktopNavigation.detailPath.append(DesktopDetailRoute { VerifyView() })
+                #else
+                addContact = true
+                #endif
+            }
+            }
+        #if !os(macOS)
         .navigationDestination(isPresented: $addContact) { VerifyView() }
+        #endif
         .debugPush("verify") { VerifyView() }
         .sheet(item: $info) { ContactInfoSheet(contact: $0) }
     }
@@ -439,9 +481,11 @@ struct ContactsTab: View {
 struct ContactRow: View {
     @EnvironmentObject var model: AppModel
     let contact: VerifiedContact
+    let openNearby: () -> Void
     let showInfo: () -> Void
+    @State private var notFound = false
     @Environment(\.dynamicTypeSize) private var typeSize
-    private var nearbyPerson: PersonRow? { model.people.first { $0.prefixHex == contact.nodePrefixHex } }
+    private var nearbyPerson: PersonRow? { model.nearbyPerson(for: contact) }
 
     var body: some View {
         Group {
@@ -452,6 +496,12 @@ struct ContactRow: View {
             }
         }
         .padding(.vertical, 14)
+        .alert("\(contact.displayName) is not found nearby yet", isPresented: $notFound) {
+            Button("Open Nearby", action: openNearby)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("If you have not talked since adding them, call them once from the Nearby list. After that, Contacts can call them directly.")
+        }
     }
     private var names: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -467,14 +517,14 @@ struct ContactRow: View {
     }
     private func iconButton(_ icon: String, _ label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon).font(.title2).foregroundStyle(Palette.ink).frame(width: 48, height: 48).contentShape(Rectangle())
+            Image(systemName: icon).font(.system(size: 22)).foregroundStyle(Palette.ink).frame(width: 48, height: 48).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
     }
     private func call(_ type: CallType) {
         if let person = nearbyPerson { model.startCall(to: person, type: type) }
-        else { model.callNotice = "\(contact.displayName) isn't nearby right now. Ask them to open MeshLive." }
+        else { notFound = true }
     }
 }
 
@@ -526,7 +576,7 @@ struct ContactInfoSheet: View {
                 .padding(.horizontal, 20).padding(.bottom, 20)
             }
             .background(Palette.ground.ignoresSafeArea())
-            .navigationBarTitleDisplayMode(.inline)
+            .mobileNavigationTitle(inline: true)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .alert("Forget \(contact.displayName)?", isPresented: $confirmForget) {
                 Button("Forget", role: .destructive) { model.forget(contact); dismiss() }

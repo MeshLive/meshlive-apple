@@ -109,7 +109,78 @@ if not v1 and (root / "UITests").exists():
     group_obj = [o for o in objects if o.startswith(uid("group"))][0]
     objects.remove(group_obj)
     group = obj("group", f'isa = PBXGroup; children = ({",".join(children+[product,coreproduct,uiproduct])}); sourceTree = "<group>";')
-proj = obj("project", f'isa = PBXProject; attributes = {{ LastUpgradeCheck = 1600; }}; buildConfigurationList = {configlist}; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = {group}; projectDirPath = ""; projectRoot = ""; targets = ({",".join([target, coretarget] + uitargets)});')
+
+# Native macOS app: separate SDK/static-library targets, sharing the protocol sources.
+mactargets = []
+if not v1:
+    macsources = sorted(p.relative_to(root).as_posix() for p in (root / "Desktop").rglob("*.swift")) + sources
+    macbuild, macchildren = [], []
+    for path in macsources + ["Desktop/Info.plist", "Desktop/MeshLive.entitlements"]:
+        kind = {".swift": "sourcecode.swift", ".c": "sourcecode.c.c"}.get(Path(path).suffix, "text.plist.xml")
+        ref = obj("mac-ref:"+path, f'isa = PBXFileReference; lastKnownFileType = {kind}; path = {quote(path)}; sourceTree = SOURCE_ROOT;')
+        macchildren.append(ref)
+        if path in macsources: macbuild.append(obj("mac-build:"+path, f'isa = PBXBuildFile; fileRef = {ref};'))
+    macproduct = obj("mac-product", 'isa = PBXFileReference; explicitFileType = wrapper.application; path = MeshLive.app; sourceTree = BUILT_PRODUCTS_DIR;')
+    maccoreproduct = obj("mac-core-product", 'isa = PBXFileReference; explicitFileType = archive.ar; path = libNearbyCoreMac.a; sourceTree = BUILT_PRODUCTS_DIR;')
+    macframeworks = [obj("mac-core-link", f'isa = PBXBuildFile; fileRef = {maccoreproduct};')]
+    macvpx = root / "Vendor/VPX-macos.xcframework"
+    if macvpx.exists():
+        ref = obj("mac-vpx-ref", 'isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Vendor/VPX-macos.xcframework; sourceTree = SOURCE_ROOT;')
+        macchildren.append(ref)
+        macframeworks.append(obj("mac-vpx-link", f'isa = PBXBuildFile; fileRef = {ref};'))
+    elif vpx.exists(): macframeworks.append(obj("mac-vpx-link", f'isa = PBXBuildFile; fileRef = {uid("vpx-ref")};'))
+    macopus = root / ".build/opus/macos-arm64/.libs/libopus.a"
+    if macopus.exists():
+        ref = obj("mac-opus-ref", 'isa = PBXFileReference; lastKnownFileType = archive.ar; path = .build/opus/macos-arm64/.libs/libopus.a; sourceTree = SOURCE_ROOT;')
+        macchildren.append(ref)
+        macframeworks.append(obj("mac-opus-link", f'isa = PBXBuildFile; fileRef = {ref};'))
+    macsrc = obj("mac-sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(macbuild)}); runOnlyForDeploymentPostprocessing = 0;')
+    maclink = obj("mac-frameworks", f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({",".join(macframeworks)}); runOnlyForDeploymentPostprocessing = 0;')
+    macresfiles = [obj("mac-resource:"+p, f'isa = PBXBuildFile; fileRef = {uid(p)};') for p in ["App/Assets.xcassets", "App/PrivacyInfo.xcprivacy"]]
+    macaccent = obj("mac-accent-ref", 'isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Desktop/Assets.xcassets; sourceTree = SOURCE_ROOT;')
+    macchildren.append(macaccent)
+    macresfiles.append(obj("mac-accent-build", f'isa = PBXBuildFile; fileRef = {macaccent};'))
+    macnames = obj("mac-names-ref", 'isa = PBXFileReference; lastKnownFileType = folder; path = Desktop/Support/Names; sourceTree = SOURCE_ROOT;')
+    macchildren.append(macnames)
+    macresfiles.append(obj("mac-names-build", f'isa = PBXBuildFile; fileRef = {macnames};'))
+    macres = obj("mac-resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(macresfiles)}); runOnlyForDeploymentPostprocessing = 0;')
+    def macconfigs(key, extra):
+        configs = []
+        for name in ["Debug", "Release"]:
+            settings = dict(SDKROOT="macosx", SUPPORTED_PLATFORMS="macosx", MACOSX_DEPLOYMENT_TARGET="14.0", ARCHS="arm64",
+                            SWIFT_VERSION="5.0", CODE_SIGN_IDENTITY="-", CODE_SIGN_STYLE="Manual",
+                            CODE_SIGNING_ALLOWED="YES", ENABLE_USER_SCRIPT_SANDBOXING="YES",
+                            SWIFT_OPTIMIZATION_LEVEL="-Onone" if name == "Debug" else "-O",
+                            SWIFT_ACTIVE_COMPILATION_CONDITIONS="DEBUG" if name == "Debug" else "",
+                            DEBUG_INFORMATION_FORMAT="dwarf", CLANG_ENABLE_MODULES="YES")
+            settings.update(extra)
+            if key == "mac-config" and name == "Release":
+                settings["CODE_SIGN_INJECT_BASE_ENTITLEMENTS"] = "NO"
+            values = " ".join(f'{k} = {quote(v)};' for k,v in settings.items())
+            configs.append(obj(key+":"+name, f'isa = XCBuildConfiguration; name = {name}; buildSettings = {{ {values} }};'))
+        return obj(key+"-list", f'isa = XCConfigurationList; buildConfigurations = ({",".join(configs)}); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;')
+    maccoreconfig = macconfigs("mac-core-config", dict(PRODUCT_NAME="NearbyCoreMac", PRODUCT_MODULE_NAME="NearbyCore", DEFINES_MODULE="YES", SKIP_INSTALL="YES", SWIFT_INSTALL_OBJC_HEADER="NO", MACH_O_TYPE="staticlib"))
+    maccorefiles = [obj("mac-core-build:"+p, f'isa = PBXBuildFile; fileRef = {uid(p)};') for p in coresources]
+    maccorephase = obj("mac-core-sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(maccorefiles)}); runOnlyForDeploymentPostprocessing = 0;')
+    maccoretarget = obj("mac-core-target", f'isa = PBXNativeTarget; name = NearbyCoreMac; productName = NearbyCoreMac; productReference = {maccoreproduct}; productType = "com.apple.product-type.library.static"; buildConfigurationList = {maccoreconfig}; buildPhases = ({maccorephase}); dependencies = ();')
+    macconfig = macconfigs("mac-config", dict(PRODUCT_NAME="MeshLive", PRODUCT_BUNDLE_IDENTIFIER="io.github.meshlive.app", INFOPLIST_FILE="Desktop/Info.plist", CODE_SIGN_ENTITLEMENTS="Desktop/MeshLive.entitlements", ENABLE_APP_SANDBOX="YES", ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon", ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME="DesktopAccent", SUPPORTS_MACCATALYST="NO", SWIFT_OBJC_BRIDGING_HEADER="App/BridgingHeader.h", LIBRARY_SEARCH_PATHS="$(inherited) $(SRCROOT)/.build/opus/macos-arm64/.libs", HEADER_SEARCH_PATHS="$(inherited) $(SRCROOT)/Sources/CNearbyVPX/include $(SRCROOT)/.build/opus/macos-source/opus-1.6.1/include"))
+    macdep = obj("mac-core-dependency", f'isa = PBXTargetDependency; target = {maccoretarget};')
+    mactarget = obj("mac-target", f'isa = PBXNativeTarget; name = MeshLive; productName = MeshLive; productReference = {macproduct}; productType = "com.apple.product-type.application"; buildConfigurationList = {macconfig}; buildPhases = ({macsrc},{maclink},{macres}); dependencies = ({macdep});')
+    macuifiles = []
+    for p in sorted((root / "MacUITests").glob("*.swift")):
+        path = p.relative_to(root).as_posix()
+        ref = obj("mac-ui-ref:"+path, f'isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = {quote(path)}; sourceTree = SOURCE_ROOT;')
+        macchildren.append(ref); macuifiles.append(obj("mac-ui-build:"+path, f'isa = PBXBuildFile; fileRef = {ref};'))
+    macuiproduct = obj("mac-ui-product", 'isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MeshLiveUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR;')
+    macuiphase = obj("mac-ui-sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(macuifiles)}); runOnlyForDeploymentPostprocessing = 0;')
+    macuiconfig = macconfigs("mac-ui-config", dict(PRODUCT_NAME="MeshLiveUITests", PRODUCT_BUNDLE_IDENTIFIER="io.github.meshlive.app.macos-uitests", TEST_TARGET_NAME="MeshLive", GENERATE_INFOPLIST_FILE="YES"))
+    macuidep = obj("mac-ui-dependency", f'isa = PBXTargetDependency; target = {mactarget};')
+    macuitarget = obj("mac-ui-target", f'isa = PBXNativeTarget; name = MeshLiveUITests; productName = MeshLiveUITests; productReference = {macuiproduct}; productType = "com.apple.product-type.bundle.ui-testing"; buildConfigurationList = {macuiconfig}; buildPhases = ({macuiphase}); dependencies = ({macuidep});')
+    mactargets = [mactarget, maccoretarget, macuitarget]
+    objects.remove(next(o for o in objects if o.startswith(uid("group"))))
+    group = obj("group", f'isa = PBXGroup; children = ({",".join(children+[product,coreproduct]+([uiproduct] if uitargets else [])+macchildren+[macproduct,maccoreproduct,macuiproduct])}); sourceTree = "<group>";')
+
+proj = obj("project", f'isa = PBXProject; attributes = {{ LastUpgradeCheck = 1600; }}; buildConfigurationList = {configlist}; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = {group}; projectDirPath = ""; projectRoot = ""; targets = ({",".join([target, coretarget] + uitargets + mactargets)});')
 (project / "project.pbxproj").write_text('// !$*UTF8*$!\n{ archiveVersion = 1; classes = {}; objectVersion = 56; objects = {\n'+"\n".join(objects)+f'\n}}; rootObject = {proj}; }}\n')
 scheme = project / "xcshareddata/xcschemes"
 scheme.mkdir(parents=True, exist_ok=True)
@@ -124,5 +195,19 @@ scheme.mkdir(parents=True, exist_ok=True)
 <AnalyzeAction buildConfiguration="Debug"/>
 <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>
 </Scheme>''')
+
+if not v1:
+    (scheme / "MeshLive.xcscheme").write_text(f'''<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="1600" version="1.3">
+<BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries>
+<BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{mactarget}" BuildableName="MeshLive.app" BlueprintName="MeshLive" ReferencedContainer="container:NearbyIntercom.xcodeproj"/></BuildActionEntry>
+</BuildActionEntries></BuildAction>
+<TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.PosixSpawn" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{macuitarget}" BuildableName="MeshLiveUITests.xctest" BlueprintName="MeshLiveUITests" ReferencedContainer="container:NearbyIntercom.xcodeproj"/></TestableReference></Testables></TestAction>
+<LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES"><BuildableProductRunnable runnableDebuggingMode="0"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{mactarget}" BuildableName="MeshLive.app" BlueprintName="MeshLive" ReferencedContainer="container:NearbyIntercom.xcodeproj"/></BuildableProductRunnable></LaunchAction>
+<ProfileAction buildConfiguration="Release"/>
+<AnalyzeAction buildConfiguration="Debug"/>
+<ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>
+</Scheme>''')
+
 print("Generated NearbyIntercom.xcodeproj" + (" (EXPERIMENTAL standalone v1 app)" if v1 else "") + (" with pinned Opus" if opus.exists() else " (Opus absent)")
       + ("" if v1 else (" and libvpx" if vpx.exists() else " (libvpx absent: video unavailable)")))

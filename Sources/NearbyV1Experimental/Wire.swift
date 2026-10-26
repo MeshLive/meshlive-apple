@@ -3,7 +3,7 @@ import Foundation
 import NearbyCore
 #endif
 
-// Experimental standalone v1 (Noise XX) protocol: default off, not Android-compatible. See README register.
+// Experimental standalone v1 (Noise XX) protocol: default off, not Android-compatible. See docs/dev/switches.md.
 
 public enum Wire {
     public static let version: UInt8 = 1

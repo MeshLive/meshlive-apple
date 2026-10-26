@@ -20,4 +20,4 @@ if len(runs) == 2:
     if a["sessionID"] == "none" or a["sessionID"] != b["sessionID"]: raise SystemExit("Exports do not identify the same encrypted session")
     print(f"A → B: sent audio packets {a['audioSent']}; B received {b['audioReceived']}")
     print(f"B → A: sent audio packets {b['audioSent']}; A received {a['audioReceived']}")
-print("Counters describe application/OS events. Listening, echo, physical latency and sustained video require the physical checks in TESTING.md.")
+print("Counters describe application/OS events. Listening, echo, physical latency and sustained video require the physical checks in docs/dev/testing.md.")

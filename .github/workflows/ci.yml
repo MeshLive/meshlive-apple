@@ -1,5 +1,5 @@
 # Offline checks only: unit tests, design tokens and a simulator build. Nothing here touches Bluetooth, the
-# camera or the microphone, so a green run is not evidence that calls or streams work on phones (TESTING.md).
+# camera or the microphone, so a green run is not evidence that calls or streams work on phones (docs/dev/testing.md).
 name: CI
 
 on:

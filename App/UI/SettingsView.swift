@@ -22,20 +22,32 @@ struct SettingsView: View {
                                     value: model.displayName.trimmingCharacters(in: .whitespaces).isEmpty ? "Not set" : model.displayName) { NameView() }
                     CardDivider()
                     SettingsLinkRow(icon: AppIcon.identity, title: "Your ID", value: model.handle) { VerifyView() }
+                    #if os(macOS)
+                    if let name = model.desktopAdvertisedName {
+                        CardDivider()
+                        SettingsRowLabel(icon: "person.crop.circle", title: "Nearby as \(name)", chevron: false)
+                            .accessibilityIdentifier("desktop-nearby-name")
+                    }
+                    #endif
                 }
                 Card {
                     SettingsToggleRow(icon: "phone", title: "Allow calls",
-                                      info: "Phones nearby can call you while MeshLive is open. A closed app cannot ring: MeshLive uses no internet push.",
+                                      info: AppPlatform.isMac ? "Nearby phones and Macs can call while MeshLive is running. Enable Keep running with windows closed to stay available without a window. Quitting stops calls." : "Phones nearby can call you while MeshLive is open. A closed app cannot ring: MeshLive uses no internet push.",
                                       isOn: $model.availableForCalls)
                     CardDivider()
                     CallAlertsRow()
                     CardDivider()
-                    SettingsToggleRow(icon: "point.3.connected.trianglepath.dotted", title: "Relay video for others",
-                                      info: "Experimental. While you watch, this phone can pass the stream on to one phone near you. It only works with the app open.",
+                    SettingsToggleRow(icon: "point.3.connected.trianglepath.dotted", title: "Relay live streams",
+                                      info: AppPlatform.isMac ? "Experimental. While you watch or listen, this Mac can pass the stream on to one nearby device. Keep MeshLive running to accept a listener." : "Experimental. While you watch or listen, this phone can pass the stream on to one phone near you. Keep the app open to accept a listener.",
                                       isOn: $model.relayForOthers)
                     CardDivider()
                     SettingsLinkRow(icon: "lock", title: "Privacy") { PrivacyView() }
                 }
+                #if os(macOS)
+                DesktopMediaSettings()
+                DesktopLifecycleSettings()
+                DesktopReadingSettings()
+                #endif
                 SectionLabel("Advanced")
                 Card {
                     SettingsLinkRow(icon: "dot.radiowaves.left.and.right", title: "Connection",
@@ -55,7 +67,7 @@ struct SettingsView: View {
             .padding(.horizontal, 20).padding(.bottom, 24)
         }
         .background(Palette.ground.ignoresSafeArea())
-        .toolbar(.hidden, for: .navigationBar)
+        .mobileRootNavigation()
         .debugPush("privacy") { PrivacyView() }
         .debugPush("advanced-privacy") { AdvancedPrivacyView() }
         .debugPush("experiments") { ExperimentsView() }
@@ -64,8 +76,9 @@ struct SettingsView: View {
         .alert("Erase everything?", isPresented: $showWipe) {
             TextField("Type WIPE", text: $wipeText)
             Button("Erase now", role: .destructive) { if wipeText == "WIPE" { model.emergencyWipe() }; wipeText = "" }
+                .disabled(wipeText != "WIPE")
             Button("Cancel", role: .cancel) { wipeText = "" }
-        } message: { Text("Type WIPE to delete this phone's identity, verified contacts and settings.") }
+        } message: { Text(AppPlatform.isMac ? "Type WIPE to delete this Mac's identity, verified contacts and settings." : "Type WIPE to delete this phone's identity, verified contacts and settings.") }
     }
 }
 
@@ -85,8 +98,8 @@ private struct CallAlertsRow: View {
                     smallButton("Allow call alerts") { CallNotifier.shared.requestIfAppropriate(.settingsButton) }
                         .accessibilityIdentifier("allowCallAlerts")
                 case .denied:
-                    smallButton("Open iPhone Settings") {
-                        if let url = URL(string: UIApplication.openNotificationSettingsURLString) { UIApplication.shared.open(url) }
+                    smallButton(AppPlatform.isMac ? "Open System Settings" : "Open iPhone Settings") {
+                        AppPlatform.openSettings(notifications: true)
                     }.accessibilityIdentifier("openNotificationSettings")
                 case .authorized: EmptyView()
                 }
@@ -117,7 +130,7 @@ struct SettingsPage<Content: View>: View {
         }
         .background(Palette.ground.ignoresSafeArea())
         .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.large)
+        .mobileNavigationTitle(inline: false)
     }
 }
 
@@ -145,8 +158,14 @@ struct PrivacyView: View {
                                   identifier: "quickWipeToggle", isOn: $model.quickWipeGesture)
                 CardDivider()
                 SettingsToggleRow(icon: "textformat", title: "Names and titles",
-                                  info: "Experimental. Sends your name and call subjects, encrypted and signed with your ID, to the people you call or answer, and shows your live titles to phones nearby. Only phones that also turned this on see them.",
+                                  info: "Experimental. Sends your name, encrypted and signed with your ID, to the people you call or answer, and shows your live titles to phones nearby. Only phones that also turned this on see them.",
                                   isOn: $model.peerLabelsEnabled)
+                #if os(macOS)
+                CardDivider()
+                SettingsToggleRow(icon: "person.crop.circle", title: "Generated nearby names",
+                                  info: "Experimental. Shows the same changing two-word names as Android for rotating nearby IDs. These names help pick a device; they do not verify its identity. Turn on Rotating discovery IDs in Advanced privacy for this Mac to appear by a changing name too.",
+                                  identifier: "desktop-generated-names", isOn: $model.desktopGeneratedNames)
+                #endif
             }
             Card {
                 SettingsLinkRow(icon: "lock.shield", title: "Advanced privacy") { AdvancedPrivacyView() }
@@ -164,7 +183,7 @@ struct AdvancedPrivacyView: View {
         SettingsPage(title: "Advanced privacy") {
             Card {
                 SettingsToggleRow(icon: "arrow.triangle.2.circlepath", title: "Rotating discovery IDs",
-                                  info: "Experimental. Phones nearby see a new ID every 15 minutes instead of your fixed one; contacts still recognise you after connecting. While rotating, the name in Settings > General > About > Name can still identify this iPhone to phones that connect.",
+                                  info: AppPlatform.isMac ? "Experimental. Nearby devices see a new ID every 15 minutes instead of your fixed one; contacts still recognise you after connecting. macOS may expose this Mac's system Bluetooth name to connected devices. Use a neutral computer name if it is personal." : "Experimental. Phones nearby see a new ID every 15 minutes instead of your fixed one; contacts still recognise you after connecting. While rotating, the name in Settings > General > About > Name can still identify this iPhone to phones that connect.",
                                   isOn: $model.rotatingIds)
                 if model.rotatingIds {
                     CardDivider()
@@ -181,7 +200,7 @@ struct AdvancedPrivacyView: View {
                 }
             }
             if model.rotatingIds {
-                CardNote("While rotating, the name in Settings > General > About > Name can still identify this iPhone to phones that connect. Use a neutral name if it is personal.")
+                CardNote(AppPlatform.isMac ? "macOS may expose this Mac's system Bluetooth name to connected devices. A neutral computer name reduces that separate identifying clue." : "While rotating, the name in Settings > General > About > Name can still identify this iPhone to phones that connect. Use a neutral name if it is personal.")
             }
             Card {
                 SettingsToggleRow(icon: "eye.slash", title: "Hidden identities",
@@ -230,7 +249,7 @@ struct ConnectionView: View {
                     .accessibilityAddTraits(model.transport == transport ? [.isSelected] : [])
                 }
             }
-            CardNote("Connection type for calls and streams this phone offers. Standard works with every phone.")
+            CardNote(AppPlatform.isMac ? "Connection type for calls and streams this Mac offers. Standard works with every supported device." : "Connection type for calls and streams this phone offers. Standard works with every phone.")
         }
     }
 }
@@ -240,19 +259,34 @@ struct ExperimentsView: View {
     @EnvironmentObject var model: AppModel
     var body: some View {
         SettingsPage(title: "Experiments") {
+            #if os(macOS)
+            Card {
+                SettingsToggleRow(icon: "antenna.radiowaves.left.and.right", title: "Android compatibility",
+                                  info: "Experimental. Finds Android devices that use changing nearby IDs and calls them with a one-time identity. Advanced privacy controls how this Mac appears nearby.",
+                                  identifier: "desktop-android-compatibility", isOn: $model.desktopAndroidCompatibility)
+                CardDivider()
+                SettingsToggleRow(icon: "speedometer", title: "Adapt call video to delivery",
+                                  info: "Experimental. Uses the other device's delivery reports to reduce queued video and keep calls responsive. Older devices keep the existing adaptation.",
+                                  identifier: "desktop-call-delivery-feedback", isOn: $model.desktopCallDeliveryFeedback)
+                CardDivider()
+                SettingsToggleRow(icon: "antenna.radiowaves.left.and.right.slash", title: "Pause discovery during calls",
+                                  info: "Experimental. Pauses nearby discovery once a call connects, giving Bluetooth more time for the call. Discovery resumes when the call ends.",
+                                  identifier: "desktop-pause-call-discovery", isOn: $model.desktopPauseCallDiscovery)
+            }
+            #endif
             Card {
                 SettingsToggleRow(icon: "waveform", title: "Call audio error correction",
                                   info: "Experimental. Adds Opus in-band error correction to call audio, so a lost packet can be rebuilt from the next one.",
                                   isOn: Binding(get: { AppSettings.callAudioFec }, set: { AppSettings.callAudioFec = $0; model.objectWillChange.send() }))
                 CardDivider()
                 SettingsToggleRow(icon: "forward.end", title: "Relay: slow viewers skip to keyframes",
-                                  info: "Used when Relay video for others is on. A phone you pass a stream to that cannot keep up skips stale video to the next keyframe and keeps the sound, instead of being dropped.",
+                                  info: "Used when Relay live streams is on. A phone you pass a stream to that cannot keep up skips stale video to the next keyframe and keeps the sound, instead of being dropped.",
                                   isOn: Binding(get: { AppSettings.relayChildMediaAge }, set: { AppSettings.relayChildMediaAge = $0; model.objectWillChange.send() }))
             }
             Card {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Experimental, off").font(.body.weight(.medium)).foregroundStyle(Palette.ink)
-                    Text("Standalone iPhone-to-iPhone protocol (v1, Noise). Call video fragments. Neither is used in this app; see the README register.")
+                    Text("Standalone iPhone-to-iPhone protocol (v1, Noise). Call video fragments. Neither is used in this app; see the switch register in the project's docs.")
                         .font(.footnote).foregroundStyle(Palette.dimInk)
                 }
                 .padding(16).frame(maxWidth: .infinity, alignment: .leading)
@@ -269,6 +303,8 @@ struct AboutView: View {
             Card {
                 infoRow("Version", Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-")
                 CardDivider(inset: 16)
+                infoRow("Build", Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "-")
+                CardDivider(inset: 16)
                 infoRow("Video decode", decodeText)
                 CardDivider(inset: 16)
                 infoRow("Video encode", VP9Encoder.isAvailable ? "VP9, software" : "Unavailable")
@@ -276,9 +312,9 @@ struct AboutView: View {
                 infoRow("Voice", CallAudio.opusAvailable ? "Opus 48 kHz" : "Unavailable")
             }
             SectionLabel("Calls")
-            CardNote("Calls reach you while MeshLive is open. A call that starts ringing just as you leave the app shows an alert. A closed app cannot ring: MeshLive uses no internet push. A call keeps going if you lock the phone. While muted, hold Mute to talk.")
-            SectionLabel("Not possible on iPhone")
-            CardNote("Bluetooth Classic links, being found while the app is in the background, and incoming calls while the app is closed.")
+            CardNote(AppPlatform.isMac ? "Calls reach you while MeshLive is running. Call alerts require notification permission. Keep running with windows closed is optional; quitting stops Bluetooth and media. Sleep can interrupt connections. While muted, hold Mute to talk." : "Calls reach you while MeshLive is open. A call that starts ringing just as you leave the app shows an alert. A closed app cannot ring: MeshLive uses no internet push. A call keeps going if you lock the phone. While muted, hold Mute to talk.")
+            SectionLabel(AppPlatform.isMac ? "Not available in this Mac app" : "Not possible on iPhone")
+            CardNote(AppPlatform.isMac ? "Bluetooth Classic links and incoming calls after quitting. Keep this Mac awake to stay reachable." : "Bluetooth Classic links, being found while the app is in the background, and incoming calls while the app is closed.")
         }
     }
     private func infoRow(_ title: String, _ value: String) -> some View {
@@ -288,7 +324,9 @@ struct AboutView: View {
             Text(value).font(.body).foregroundStyle(Palette.dimInk).multilineTextAlignment(.trailing)
         }
         .padding(.horizontal, 16).padding(.vertical, 14)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title + ": " + value)
+        .accessibilityIdentifier("about-" + title)
     }
     private var decodeText: String {
         var parts: [String] = []

@@ -84,6 +84,18 @@ final class SimulatorScreensTests: XCTestCase {
         return element.exists
     }
 
+    /// A partially visible button can be hittable. Require the full control to fit in the window.
+    private func revealFully(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        guard element.waitForExistence(timeout: 5) else { return false }
+        let visible = app.frame
+        for _ in 0..<8 {
+            let frame = element.frame
+            if element.isHittable, visible.contains(frame) { return true }
+            if frame.minY < visible.minY { app.swipeDown() } else { app.swipeUp() }
+        }
+        return element.isHittable && visible.contains(element.frame)
+    }
+
     /// Every interactive element needs a non-empty label for VoiceOver.
     private func checkLabels(_ app: XCUIApplication, _ screen: String) {
         let unlabeled = app.buttons.allElementsBoundByIndex.filter { $0.exists && $0.isHittable && $0.label.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -107,6 +119,61 @@ final class SimulatorScreensTests: XCTestCase {
         ("call-mismatch", ["-NearbyScreen", "call-mismatch"], "Identity does not match"),
         ("call-ended", ["-NearbyScreen", "call-ended"], "Call ended"),
     ]
+
+
+    func testAccessibilityLargeTextControls() {
+        let size = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        var app = launch(["-NearbyScreen", "golive"] + size)
+        XCTAssertTrue(app.buttons["Video and audio"].waitForExistence(timeout: 5))
+        shot("large-text-go-live-top")
+        for title in ["Video and audio", "Audio only", "Voice", "Low data", "Music"] {
+            let button = app.buttons[title]
+            XCTAssertTrue(revealFully(button, in: app), "\(title) remains reachable at the largest text size")
+            XCTAssertTrue(button.isHittable, "\(title) is visible and tappable")
+        }
+        app.swipeUp()
+        shot("large-text-go-live")
+        checkLabels(app, "large-text-go-live")
+        app.terminate()
+
+        app = launch(["-NearbyScreen", "radio"] + size)
+        XCTAssertTrue(revealFully(app.buttons["Leave"], in: app))
+        XCTAssertTrue(app.buttons["Leave"].isHittable)
+        shot("large-text-radio")
+        checkLabels(app, "large-text-radio")
+        app.terminate()
+
+        app = launch(["-NearbyScreen", "call-incoming"] + size)
+        for title in ["Decline", "Voice", "Accept"] {
+            XCTAssertTrue(revealFully(app.buttons[title], in: app), "\(title): frame \(app.buttons[title].frame), window \(app.frame)")
+            XCTAssertTrue(app.buttons[title].isHittable)
+            let frame = app.buttons[title].frame
+            XCTAssertGreaterThanOrEqual(frame.minX, app.frame.minX)
+            XCTAssertLessThanOrEqual(frame.maxX, app.frame.maxX)
+        }
+        shot("large-text-incoming-call")
+        app.terminate()
+
+        app = launch(["-NearbyScreen", "broadcast-radio"] + size)
+        XCTAssertTrue(app.buttons["Mute"].waitForExistence(timeout: 5))
+        shot("large-text-broadcast-top")
+        for title in ["Mute", "Pause", "End"] {
+            XCTAssertTrue(revealFully(app.buttons[title], in: app), "\(title): frame \(app.buttons[title].frame), window \(app.frame)")
+            XCTAssertTrue(app.buttons[title].isHittable)
+        }
+        shot("large-text-broadcast-controls")
+        checkLabels(app, "large-text-broadcast")
+        app.terminate()
+
+        app = launch(["-NearbyScreen", "contacts"] + size)
+        XCTAssertTrue(app.buttons["Contact info Asha"].waitForExistence(timeout: 5))
+        for title in ["Video call Asha", "Voice call Asha", "Contact info Asha"] {
+            XCTAssertTrue(revealFully(app.buttons[title], in: app), "\(title): frame \(app.buttons[title].frame), window \(app.frame)")
+        }
+        shot("large-text-contacts")
+        checkLabels(app, "large-text-contacts")
+        app.terminate()
+    }
 
     func testEveryScreen() {
         for screen in screens {
@@ -155,10 +222,121 @@ final class SimulatorScreensTests: XCTestCase {
         shot("list-watch")
     }
 
+    /// Live rows expose their kind, retain the full title and keep the empty state truthful.
+    func testLiveRowsAndEmptyState() {
+        var app = launch(["-NearbyScreen", "live"])
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'stream-'"))
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows.allElementsBoundByIndex.filter { ($0.value as? String) == "Video stream" }.count, 2)
+        XCTAssertEqual(rows.allElementsBoundByIndex.filter { ($0.value as? String) == "Audio only stream" }.count, 1)
+        XCTAssertTrue(app.staticTexts["Neighbourhood radio, ward 12 updates"].exists)
+        XCTAssertFalse(app.staticTexts["LIVE"].exists)
+        shot("live-kinds")
+        app.terminate()
+        app = launch(["-NearbyScreen", "live", "-NearbyFixture", "empty"])
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'No one is live nearby' AND label CONTAINS 'Looking'")).firstMatch.waitForExistence(timeout: 5))
+        shot("live-empty")
+    }
+
+    func testCallsSkipSubjectAndKeepLegacyIncomingSubject() {
+        var app = launch(["-NearbyScreen", "people", "-NearbyLabels", "1"])
+        XCTAssertTrue(app.buttons["Nearby"].exists)
+        XCTAssertTrue(app.buttons["Recent"].exists)
+        XCTAssertFalse(app.textFields["Subject (optional)"].exists)
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'person-'")).firstMatch.tap()
+        XCTAssertTrue(app.buttons["Voice call"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.buttons["Video call"].exists)
+        XCTAssertFalse(app.textFields["Subject (optional)"].exists)
+        shot("call-choice")
+        app.terminate()
+        app = launch(["-NearbyScreen", "call-incoming", "-NearbyLegacySubject", "Meeting update"])
+        XCTAssertTrue(app.staticTexts["Meeting update"].waitForExistence(timeout: 4))
+        shot("call-legacy-subject")
+    }
+
+    func testContactNotNearbyExplainsAndOpensNearby() {
+        let app = launch(["-NearbyScreen", "contacts"])
+        XCTAssertTrue(app.buttons["Voice call Asha"].waitForExistence(timeout: 4))
+        app.buttons["Voice call Asha"].tap()
+        let dialog = app.alerts["Asha is not found nearby yet"]
+        XCTAssertTrue(dialog.waitForExistence(timeout: 4))
+        XCTAssertTrue(dialog.staticTexts["If you have not talked since adding them, call them once from the Nearby list. After that, Contacts can call them directly."].exists)
+        XCTAssertTrue(app.tabBars.buttons["Contacts"].isSelected)
+        shot("contact-not-nearby")
+        dialog.buttons["Cancel"].tap()
+        XCTAssertTrue(app.tabBars.buttons["Contacts"].isSelected)
+        app.buttons["Video call Asha"].tap()
+        XCTAssertTrue(dialog.waitForExistence(timeout: 4))
+        dialog.buttons["Open Nearby"].tap()
+        XCTAssertTrue(app.tabBars.buttons["Calls"].isSelected)
+        XCTAssertTrue(app.buttons["Nearby"].isSelected)
+        shot("contact-open-nearby")
+    }
+
+    func testOnboardingWalkthroughAndPersistence() {
+        var app = launch(["-NearbyScreen", "onboarding"])
+        XCTAssertTrue(app.staticTexts["Calls and live video, no internet needed"].waitForExistence(timeout: 4))
+        shot("onboarding-welcome")
+        app.buttons["Next"].tap()
+        XCTAssertTrue(app.staticTexts["What you can do"].exists)
+        shot("onboarding-capabilities")
+        app.buttons["Next"].tap()
+        XCTAssertTrue(app.staticTexts["Allow what the app needs"].exists)
+        XCTAssertTrue(app.staticTexts["Bluetooth"].exists)
+        XCTAssertTrue(reveal(app.staticTexts["Notifications"], in: app))
+        shot("onboarding-permissions")
+        app.buttons["Next"].tap()
+        XCTAssertTrue(app.staticTexts["You are ready"].isHittable, "Each onboarding page starts at the top")
+        XCTAssertGreaterThanOrEqual(app.staticTexts["You are ready"].frame.minY, app.frame.minY)
+        sleep(1) // Let the native button label transition finish before capturing.
+        shot("onboarding-ready")
+        app.buttons["Start"].tap()
+        XCTAssertTrue(app.buttons["Go live"].waitForExistence(timeout: 5))
+        app.terminate()
+        app = XCUIApplication()
+        app.launch()
+        XCTAssertTrue(app.buttons["Go live"].waitForExistence(timeout: 5), "completion survives a normal relaunch")
+        XCTAssertFalse(app.staticTexts["Calls and live video, no internet needed"].exists)
+    }
+
+    func testSettingsInfoBuildAndTypedWipe() {
+        var app = launch(["-NearbyScreen", "settings"])
+        let info = app.buttons["About Allow calls"]
+        XCTAssertTrue(info.waitForExistence(timeout: 4))
+        info.tap()
+        XCTAssertTrue(app.alerts["Allow calls"].waitForExistence(timeout: 4))
+        shot("settings-explanation")
+        app.alerts.buttons["OK"].tap()
+        let about = app.buttons["About this app"].firstMatch
+        XCTAssertTrue(reveal(about, in: app))
+        about.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Version'")).firstMatch.waitForExistence(timeout: 4))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Build'")).firstMatch.exists)
+        shot("about-build")
+        app.terminate()
+        app = launch(["-NearbyScreen", "settings"])
+        let wipe = app.buttons["Wipe everything"]
+        XCTAssertTrue(reveal(wipe, in: app))
+        wipe.tap()
+        let dialog = app.alerts["Erase everything?"]
+        XCTAssertTrue(dialog.waitForExistence(timeout: 4))
+        let erase = dialog.buttons["Erase now"]
+        XCTAssertFalse(erase.isEnabled)
+        dialog.textFields.firstMatch.tap()
+        dialog.textFields.firstMatch.typeText("WIPEX")
+        XCTAssertFalse(erase.isEnabled)
+        dialog.textFields.firstMatch.typeText(XCUIKeyboardKey.delete.rawValue)
+        XCTAssertTrue(erase.isEnabled)
+        shot("wipe-typed-confirmation")
+        dialog.buttons["Cancel"].tap()
+        XCTAssertTrue(app.tabBars.buttons["Settings"].isSelected)
+    }
+
     /// A Settings switch can be flipped and survives a terminate/relaunch.
     func testSettingsAdvancedPersist() {
         var app = launch(["-NearbyScreen", "settings"])
-        let relay = NSPredicate(format: "label BEGINSWITH 'Relay video for others'")
+        let relay = NSPredicate(format: "label BEGINSWITH 'Relay live streams'")
         let toggle = app.switches.matching(relay).firstMatch
         XCTAssertTrue(reveal(toggle, in: app, timeout: 3), "relay toggle")
         let before = toggle.value as? String

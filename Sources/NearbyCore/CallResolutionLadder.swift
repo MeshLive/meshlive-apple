@@ -8,7 +8,7 @@ public struct VideoResolution: Equatable, Hashable, CustomStringConvertible {
     public var description: String { "\(width)x\(height)" }
 }
 
-/// Call resolution ladder, a port of Android's CallResolutionLadder (user decision 2026-10-10, default on for
+/// Call resolution ladder, a port of Android's CallResolutionLadder (design decision 2026-10-10, default on for
 /// user calls). Rate control alone lowers only the bitrate; WebRTC instead picks the send size from the target
 /// rate. Its default singlecast limits (encoder_info_settings.cc GetDefaultSinglecastBitrateLimits, webrtc
 /// a05204958f9d, BSD-3) give each frame size a minimum start bitrate; a size uses the smallest table entry at

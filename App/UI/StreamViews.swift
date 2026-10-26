@@ -18,20 +18,28 @@ struct WatchView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
     let row: StreamRow
+    var onLeave: (() -> Void)? = nil
+    var stopOnDisappear = true
     var body: some View {
         Group {
-            if let watch = model.watch, watch.isRadio { RadioPlayer(watch: watch, title: watch.signedTitle ?? row.listTitle) }
-            else if let watch = model.watch { WatchPlayer(watch: watch, sink: watch.remote.sink, title: watch.signedTitle ?? row.listTitle) }
+            if let watch = model.watch, watch.isRadio { RadioPlayer(watch: watch, title: watch.signedTitle ?? row.listTitle, leave: onLeave) }
+            else if let watch = model.watch { WatchPlayer(watch: watch, sink: watch.remote.sink, title: watch.signedTitle ?? row.listTitle, leave: onLeave) }
             else {
                 ZStack {
                     Color.black.ignoresSafeArea()
-                    VStack { Spacer(); RoundControl(icon: "xmark", label: "Leave") { dismiss() }.padding(.bottom, 16) }
+                    VStack {
+                        Spacer()
+                        if let notice = model.streamNotice {
+                            Text(notice).font(.body).foregroundStyle(Palette.ink).multilineTextAlignment(.center).padding(20)
+                        }
+                        RoundControl(icon: "xmark", label: "Leave") { if let onLeave { onLeave() } else { dismiss() } }.padding(.bottom, 16)
+                    }
                 }
             }
         }
-        .toolbar(.hidden, for: .navigationBar)
+        .mobileRootNavigation()
         .onAppear { if model.watch == nil { model.startWatching(row) } }
-        .onDisappear { model.watch?.stop() }
+        .onDisappear { if stopOnDisappear { model.watch?.stop() } }
     }
 }
 
@@ -42,6 +50,7 @@ private struct WatchPlayer: View {
     @ObservedObject var watch: WatchController
     @ObservedObject var sink: VideoSink
     let title: String
+    var leave: (() -> Void)? = nil
     @State private var showInfo = false
     var body: some View {
         ZStack {
@@ -66,13 +75,13 @@ private struct WatchPlayer: View {
                 if watch.sharing {
                     Label("Sharing with a phone near you", systemImage: "arrow.triangle.branch").font(Typo.caption).foregroundStyle(.white.opacity(0.85))
                 }
-                RoundControl(icon: "xmark", label: "Leave") { watch.stop(); dismiss() }
+                RoundControl(icon: "xmark", label: "Leave") { watch.stop(); if let leave { leave() } else { dismiss() } }
                     .padding(.top, 12)
             }
             .padding(16)
         }
         .preferredColorScheme(.dark)
-        .sheet(isPresented: $showInfo) { NavigationStack { StreamInfoSheet(watch: watch, title: title) } }
+        .sheet(isPresented: $showInfo) { NavigationStack { StreamInfoSheet(watch: watch, title: title) }.desktopReadingSize() }
     }
 }
 
@@ -82,11 +91,21 @@ private struct RadioPlayer: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var watch: WatchController
     let title: String
+    var leave: (() -> Void)? = nil
     @State private var showInfo = false
+    @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VStack(spacing: 18) {
+            if typeSize.isAccessibilitySize {
+                ScrollView { playerContent }
+            } else { playerContent }
+        }
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showInfo) { NavigationStack { StreamInfoSheet(watch: watch, title: title) }.desktopReadingSize() }
+    }
+    private var playerContent: some View {
+        VStack(spacing: 18) {
                 HStack(alignment: .top) {
                     if watch.sourceFingerprint != nil && watch.ended == nil { LiveTag(text: watch.paused ? "Paused" : "Live", blinking: !watch.paused) }
                     Spacer()
@@ -99,19 +118,16 @@ private struct RadioPlayer: View {
                 }
                 Spacer()
                 IconDisc(icon: "radio", size: 120)
-                Text(title).font(.title2.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center).lineLimit(3)
+                Text(title).font(.title2.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center).lineLimit(typeSize.isAccessibilitySize ? nil : 3)
                 Text(subtitle).font(.subheadline).foregroundStyle(Palette.dimInk)
                 if !watch.state.isEmpty {
                     Text(watch.state).font(.body).foregroundStyle(.white).multilineTextAlignment(.center)
                 }
                 Spacer()
-                Text("Keeps playing with the screen off.").font(.footnote).foregroundStyle(Palette.dimInk)
-                RoundControl(icon: "xmark", label: "Leave") { watch.stop(); dismiss() }
+                Text(AppPlatform.isMac ? "Keeps playing with the display off while this Mac is awake." : "Keeps playing with the screen off.").font(.footnote).foregroundStyle(Palette.dimInk)
+                RoundControl(icon: "xmark", label: "Leave") { watch.stop(); if let leave { leave() } else { dismiss() } }
             }
             .padding(20)
-        }
-        .preferredColorScheme(.dark)
-        .sheet(isPresented: $showInfo) { NavigationStack { StreamInfoSheet(watch: watch, title: title) } }
     }
     private var subtitle: String {
         switch watch.radioPreset {
@@ -144,59 +160,83 @@ struct StreamInfoSheet: View {
             Section("Link details") { Text(watch.stats).font(Typo.caption).foregroundStyle(Palette.dimInk) }
         }
         .monoList()
-        .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(title).mobileNavigationTitle(inline: true)
         .toolbar { Button("Done") { dismiss() } }
     }
 }
 
-/// The broadcaster screen (full screen over the Live tab while `model.live` is set).
+/// The broadcaster screen, with a scrolling control column at accessibility text sizes.
 struct LivePanel: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var live: LiveController
+    @Environment(\.dynamicTypeSize) private var typeSize
     private var radioSubtitle: String {
         let quality = live.preset == AudioLive.presetLowData ? "Low data" : live.preset == AudioLive.presetMusic ? "Music" : "Voice"
-        return "Audio only \u{00B7} \(quality) \u{00B7} keeps going with the screen off"
+        return "Audio only · \(quality) · keeps going with the screen off"
     }
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             if let camera = live.camera { CameraPreviewView(session: camera.session).ignoresSafeArea() }
-            if live.audioOnly {
-                VStack(spacing: 16) {
-                    IconDisc(icon: "radio", size: 120)
-                    Text(live.title ?? "Audio only").font(.title2.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
-                    Text(radioSubtitle).font(.subheadline).foregroundStyle(Palette.dimInk)
+            if typeSize.isAccessibilitySize {
+                ScrollView {
+                    VStack(spacing: 24) {
+                        status
+                        if live.audioOnly { radioContent }
+                        controls
+                    }
+                    .padding(20)
                 }
-                .padding(20)
-            }
-            VStack {
-                HStack {
-                    if !live.state.isEmpty {
-                        Text(live.state).font(Typo.secondary).foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(.black.opacity(0.5), in: Capsule())
+            } else {
+                if live.audioOnly { radioContent.padding(20) }
+                VStack {
+                    status
+                    if let health = model.healthMessage {
+                        Label(health, systemImage: "thermometer.medium").font(Typo.caption).foregroundStyle(.white)
+                            .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.5), in: Capsule())
                     }
                     Spacer()
-                    LiveTag(text: live.paused ? "Paused" : "Live  \(live.viewers.count)", blinking: !live.paused)
-                        .accessibilityLabel(live.paused ? "Paused" : "Live, \(live.viewers.count) \(live.audioOnly ? "listeners" : "viewers")")
+                    controls
+                        .padding(.vertical, 20).frame(maxWidth: .infinity)
+                        .background(LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
                 }
-                if let health = model.healthMessage {
-                    Label(health, systemImage: "thermometer.medium").font(Typo.caption).foregroundStyle(.white)
-                        .padding(.horizontal, 10).padding(.vertical, 6).background(.black.opacity(0.5), in: Capsule())
-                }
-                Spacer()
-                HStack(spacing: 40) {
-                    if live.audioOnly {
-                        RoundControl(icon: live.muted ? "mic.slash.fill" : "mic.fill", label: live.muted ? "Unmute" : "Mute",
-                                     fill: live.muted ? .white : Palette.callControl, foreground: live.muted ? .black : .white) { live.toggleMute() }
-                    }
-                    RoundControl(icon: live.paused ? "play.fill" : "pause.fill", label: live.paused ? "Resume" : "Pause") { live.togglePause() }
-                    RoundControl(icon: "stop.fill", label: "End", fill: Palette.liveEnd, size: 68) { live.stop() }
-                }
-                .padding(.vertical, 20).frame(maxWidth: .infinity)
-                .background(LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
+                .padding(.horizontal, 16)
             }
-            .padding(.horizontal, 16)
         }
         .preferredColorScheme(.dark)
+    }
+    private var status: some View {
+        VStack(spacing: 12) {
+            HStack {
+                if !live.state.isEmpty {
+                    Text(live.state).font(Typo.secondary).foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.black.opacity(0.5), in: Capsule())
+                }
+                Spacer()
+                LiveTag(text: live.paused ? "Paused" : "Live  \(live.viewers.count)", blinking: !live.paused)
+                    .accessibilityLabel(live.paused ? "Paused" : "Live, \(live.viewers.count) \(live.audioOnly ? "listeners" : "viewers")")
+            }
+            if typeSize.isAccessibilitySize, let health = model.healthMessage {
+                Label(health, systemImage: "thermometer.medium").font(Typo.caption).foregroundStyle(.white)
+            }
+        }
+    }
+    private var radioContent: some View {
+        VStack(spacing: 16) {
+            IconDisc(icon: "radio", size: 120)
+            Text(live.title ?? "Audio only").font(.title2.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
+            Text(radioSubtitle).font(.subheadline).foregroundStyle(Palette.dimInk).multilineTextAlignment(.center)
+        }
+    }
+    private var controls: some View {
+        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 16)) : AnyLayout(HStackLayout(spacing: 40))
+        return layout {
+            if live.audioOnly {
+                RoundControl(icon: live.muted ? "mic.slash.fill" : "mic.fill", label: live.muted ? "Unmute" : "Mute",
+                             fill: live.muted ? .white : Palette.callControl, foreground: live.muted ? .black : .white) { live.toggleMute() }
+            }
+            RoundControl(icon: live.paused ? "play.fill" : "pause.fill", label: live.paused ? "Resume" : "Pause") { live.togglePause() }
+            RoundControl(icon: "stop.fill", label: "End", fill: Palette.liveEnd, size: 68) { live.stop() }
+        }
     }
 }
