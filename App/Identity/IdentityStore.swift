@@ -356,6 +356,9 @@ struct AppSettings {
         get { d.object(forKey: "relayedCallsHelp") as? Bool ?? true }
         set { d.set(newValue, forKey: "relayedCallsHelp") }
     }
+    /// EXPERIMENTAL Design OR (Android DEBUG `test_relayed_on_demand`, off): while helping, the call listener signs
+    /// RELAY_SEEK and answers searches (SEEK) from what this device scans. Launch argument `-relayedOnDemand YES`.
+    static var relayedOnDemand: Bool { d.bool(forKey: "relayedOnDemand") }
     /// DEBUG lab mask (Android `test_relayed_calls_no_direct`, off): the reach tables ignore every target's own offer,
     /// as if no target were in direct range (needed for a co-located chain test). Launch argument `-relayedNoDirect YES`.
     static var relayedNoDirect: Bool { d.bool(forKey: "relayedNoDirect") }

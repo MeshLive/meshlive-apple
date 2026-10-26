@@ -1325,6 +1325,7 @@ final class RelayDutyController: ObservableObject {
             guard !done else { return }
             done = true
             timer?.invalidate(); timer = nil
+            onClosed?(duty); onClosed = nil
             if let failure = duty.failure {
                 AppLog.event("relayed_setup", ["role": "helper", "result": "failed", "reason": failure.label])
             }
@@ -1340,6 +1341,8 @@ final class RelayDutyController: ObservableObject {
     }
 
     func preempt() { duty.close("This device is needed for something else") }
+    /// Called once when the duty closed (search budgets and the FAIL cache).
+    var onClosed: ((RelayHelperDuty) -> Void)?
 }
 
 final class CallRelayController: ObservableObject {

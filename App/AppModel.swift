@@ -249,6 +249,13 @@ final class AppModel: ObservableObject {
     let bmh3Pins = Bmh3Pins(storage: DesktopPreview.enabled ? nil : Bmh3PinFile())
     /// The BMH3 options of one call, or nil (BMH2 only). Mac compatibility can use a per-attempt
     /// pseudonym for a selected rotating offer independently of this Mac's own advertising setting.
+    /// The call listener's BMH3 options: RELAY_SEEK is signed while this device would admit a search (Design OR).
+    private func listenerBmh3Options() -> Bmh3CallOptions? {
+        var options = bmh3Options(selected: nil)
+        if relaySeekSigning { options?.relaySeek = RelaySeek.featureSeekV1 }
+        return options
+    }
+
     func bmh3Options(selected: DiscoveryAnnouncement?) -> Bmh3CallOptions? {
         #if os(macOS)
         guard var options = desktopCallCompatibility.bmh3Options(selected: selected, pins: bmh3Pins) else { return nil }
@@ -712,7 +719,7 @@ final class AppModel: ObservableObject {
         let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
                                         identity: identity, transport: link.transport, type: .video, relayHops: 0,
                                         rotating: rotatingIds ? withPresence(RotatingCallOptions(entries: { pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) })) : nil,
-                                        bmh3: bmh3Options(selected: nil),
+                                        bmh3: listenerBmh3Options(),
                                         relayed: relayedCalls ? RelayedCallOptions(featureOn: true, helperActive: relayHelperActive,
                                                                                    acceptRdi: rotatingIds) : nil)
         call = controller
@@ -932,19 +939,20 @@ final class AppModel: ObservableObject {
     /// A helper listener read SETUP as its first record: admit it (PROTOCOL setup rule 2), take over the link and dial
     /// the next hop from this device's own reach table, or answer FAIL.
     func relaySetupRequested(by controller: CallController, message: RelaySetupMessage) {
-        guard case let .setup(target, budget, remaining, setupId, rotatingTarget) = message, let identity,
+        guard let request = RelayHelperDuty.Request(message), let identity,
               call === controller, let (link, engine) = controller.abandonForRelay() else { controller.end(); return }
+        let target = request.target, budget = request.budget, rotatingTarget = request.rotating
         #if os(macOS)
         desktopCallLinkFinished(controller)
         #endif
         call = nil
         let now = ConnectionDriver.now
         let parent = CallRelayLink(adopting: engine)
-        let duty = RelayHelperDuty(identity: identity, transport: link.transport, parent: parent,
-                                   request: .init(target: target, budget: budget, remainingMs: remaining, setupId: setupId, rotating: rotatingTarget), now: now)
+        let duty = RelayHelperDuty(identity: identity, transport: link.transport, parent: parent, request: request, now: now)
         let relay = RelayDutyController(model: self, duty: duty, parentLink: link)
         relayDuty = relay
         refreshAdvertising()
+        if request.seek != nil { serveSeek(relay: relay, duty: duty, parent: parent, bearer: link.transport, identity: identity); return }
         // Admission, cheap checks first, table last.
         let parentId = parent.peerLinkNodeId
         let pseudonymousParent = parent.linkPeerPseudonymous
@@ -985,6 +993,105 @@ final class AppModel: ObservableObject {
             case .failure(let error): relay.childConnectFailed("\(error)")
             }
         }
+    }
+
+    // MARK: Design OR searches (helper)
+
+    let relaySeekBudgets = RelaySeekBudgets()
+    private let relaySeekFails = RelaySeekFailCache()
+
+    /// The listener signs RELAY_SEEK while it would admit a search now.
+    var relaySeekSigning: Bool {
+        relayHelperActive && AppSettings.relayedOnDemand && hiddenIdentities && rotatingIds
+            && !relaySeekBudgets.exhausted(now: MeshRadio.reachClockMs)
+    }
+
+    /// A SEEK (PROTOCOL Design OR helper rules): FAIL cache, admission and budgets first, then a search of what this
+    /// device heard (an offer seen in the last 5 s, else up to 3 s more of its ongoing scan), then the target's
+    /// addresses (budget 1 or a match) or up to two next helpers (budget 2), at most 3 dials.
+    private func serveSeek(relay: RelayDutyController, duty: RelayHelperDuty, parent: CallRelayLink, bearer: MeshTransport, identity: SigningIdentity) {
+        guard let seek = duty.request.seek else { relay.refuse(.refused); return }
+        let request = duty.request
+        let startedMs = MeshRadio.reachClockMs
+        if let cached = relaySeekFails.lookup(budget: request.budget, nonce: seek.nonce, token: seek.token, skip: seek.skip, now: startedMs) {
+            AppLog.event("relayed_seek", ["role": "helper", "result": "cached", "budget": "\(request.budget)", "reason": cached.label])
+            relay.refuse(cached); return
+        }
+        let limiterKey = RelaySetupRateLimiter.key(parentPrefixHex: parent.peerLinkNodeId?.prefix.hex ?? "", pseudonymous: parent.linkPeerPseudonymous,
+                                                   remoteAddress: nil)
+        let refused = !relayedCalls || !relayedCallsHelp || !AppSettings.relayedOnDemand || relayHelperPause != nil
+            || parent.peerLinkCapabilities.map(RelayedCalls.linkUnderstandsSetup) != true
+            || !relaySetupLimiter.tryAdmit(limiterKey, nowMs: startedMs)
+        if refused || relaySeekBudgets.refusal(budget: request.budget, now: startedMs) != nil {
+            AppLog.event("relayed_seek", ["role": "helper", "result": "refused", "budget": "\(request.budget)",
+                                          "reason": relaySeekBudgets.refusal(budget: request.budget, now: startedMs) ?? "policy"])
+            relay.refuse(.refused); return
+        }
+        AppLog.event("relayed_seek", ["role": "helper", "result": "accepted", "budget": "\(request.budget)"])
+        let budgets = relaySeekBudgets, fails = relaySeekFails
+        var scanMs: Int64 = 0
+        relay.onClosed = { duty in
+            let now = MeshRadio.reachClockMs
+            budgets.finish(startedAt: startedMs, scanMs: scanMs, ready: duty.readyRelays != nil, now: now)
+            if duty.readyRelays == nil, let failure = duty.failure {
+                fails.store(budget: request.budget, nonce: seek.nonce, token: seek.token, skip: seek.skip, reason: failure, now: now)
+            }
+        }
+        let ownRdis = [rotating.callEntry(nodeId: identity.nodeId).rdi]
+        var dials = 0
+        var candidates: [(peer: UUID, next: RelayHelperDuty.NextHop, rdi: Data, hop: DiscoveryAnnouncement)] = []
+        func plan() -> Bool {
+            guard let table = radio.reachRotating else { return false }
+            let offers = table.recentOffers(withinMs: RelaySeek.opportunisticCacheMs)
+            let p = RelaySeekPlan(offers: offers, nonce: seek.nonce, token: seek.token, skip: seek.skip, budget: request.budget,
+                                  bearer: bearer, ownRdis: ownRdis)
+            func announcement(_ peer: UUID) -> DiscoveryAnnouncement? { offers.first { $0.peer == peer }?.announcement }
+            candidates = p.targets.compactMap { t in announcement(t.peer).map { (t.peer, .init(hopPrefix: nil, nextBudget: 0), t.rdi, $0) } }
+            if candidates.isEmpty {
+                candidates = p.helpers.compactMap { h in announcement(h.peer).map { (h.peer, .init(hopPrefix: h.rdi, nextBudget: request.budget - 1), h.rdi, $0) } }
+            }
+            return !candidates.isEmpty
+        }
+        func tryNext() -> Bool {
+            if case .closed = duty.state { return false }
+            guard !candidates.isEmpty, dials < RelaySeek.dialsPerRequest else { return false }
+            let c = candidates.removeFirst()
+            dials += 1
+            let now = MeshRadio.reachClockMs
+            budgets.chargeDial(now: now); budgets.chargeHandshake(now: now)
+            if c.next.hopPrefix == nil { duty.setSearchTarget(c.rdi) }
+            AppLog.event("relayed_seek", ["role": "helper", "result": c.next.hopPrefix == nil ? "matched" : "forwarded", "budget": "\(request.budget)",
+                                          "dials": "\(dials)"])
+            let onward = relayOnwardBmh3(hop: c.hop)
+            _ = radio.connect(to: c.peer, transport: bearer) { [weak relay] result in
+                guard let relay else { if case .success(let l) = result { l.close() }; return }
+                switch result {
+                case .success(let childLink): relay.attachChild(childLink, next: c.next, bmh3: onward)
+                case .failure(let error): relay.childConnectFailed("\(error)")
+                }
+            }
+            return true
+        }
+        duty.onChildAttemptFailed = { _ in tryNext() }
+        // Search: what scans heard in the last 5 s, else keep looking up to the scan limit while time is left.
+        let scanStart = MeshRadio.reachClockMs
+        func search() {
+            if case .closed = duty.state { return }
+            let elapsed = MeshRadio.reachClockMs - scanStart
+            if plan() {
+                scanMs = elapsed
+                if !tryNext() { duty.searchFailed(.noRoute) }
+                return
+            }
+            let leftMs = duty.remainingMs(now: ConnectionDriver.now) - RelaySeek.onwardTargetMs
+            if elapsed >= Int64(RelaySeek.defaultScanMs) || leftMs <= 0 {
+                scanMs = elapsed
+                AppLog.event("relayed_seek", ["role": "helper", "result": "failed", "budget": "\(request.budget)", "reason": "no match", "scan_ms": "\(elapsed)"])
+                duty.searchFailed(.noRoute); return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { search() }
+        }
+        search()
     }
 
     /// Amendment CP: an onward relay edge in pseudonym mode speaks BMH3 with a declared throwaway, fresh per
