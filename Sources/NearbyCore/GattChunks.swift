@@ -56,13 +56,34 @@ public struct GattChunkReader {
     public let failFast: Bool
     /// When the current gap opened (the first chunk parked behind a missing one).
     public private(set) var gapOpenedAt: TimeInterval?
-    public init(failFast: Bool = true) { self.failFast = failFast }
+    /// Experimental GR1: once the peer's HELLO arrived, a gap waits for resends instead of the fail-fast.
+    public var recovery: GattChunkRecovery?
+    private var parkedBytes = 0
+    private var recoveryFailure: String?
+    public init(failFast: Bool = true, recovery: GattChunkRecovery? = nil) { self.failFast = failFast; self.recovery = recovery }
 
-    /// Ends the stream when the current gap has been held too long (call it when the gap's deadline passes).
-    public func check(now: TimeInterval) throws {
+    /// Ends the stream when the current gap has been held too long (call it when the gap's deadline passes, and every
+    /// recovery tick: it also sends GR1 requests that are due).
+    public mutating func check(now: TimeInterval) throws {
+        if let recoveryFailure { throw ProtocolError.malformed(recoveryFailure) }
+        if let recovery, recovery.readerActive {
+            let keys = pending.keys.sorted { Gr1.after($0, $1) < 0 }
+            if let reason = recovery.update(next: nextSequence, pending: keys, parkedBytes: parkedBytes, now: now) {
+                recoveryFailure = reason; throw ProtocolError.malformed(reason)
+            }
+            return
+        }
         guard failFast, let opened = gapOpenedAt, ChunkGapPolicy.lost(heldSeconds: now - opened, parkedChunks: pending.count) else { return }
         throw ProtocolError.malformed(ChunkGapPolicy.reason(missing: nextSequence, parkedChunks: pending.count, heldSeconds: now - opened))
     }
+
+    /// GR1 GONE from the peer: a missing chunk it no longer holds ends the stream at the next check.
+    public mutating func recoveryGone(_ range: Gr1.SeqRange) {
+        if let hit = recovery?.goneHit(range) { recoveryFailure = "GATT chunk \(hit) was lost and the peer no longer holds it" }
+    }
+
+    /// GR1 HIGH from the peer: a missing tail is requested at the next check.
+    public mutating func recoveryHigh(_ sequence: UInt32) { _ = recovery?.onHigh(sequence, next: nextSequence) }
 
     /// Returns in-order stream bytes made available by this value (possibly empty).
     public mutating func accept(_ value: Data, now: TimeInterval = ProcessInfo.processInfo.systemUptime) throws -> Data {
@@ -76,16 +97,17 @@ public struct GattChunkReader {
             guard sequence - nextSequence <= GattChunkReader.maxReorderDistance, pending.count < GattChunkReader.maxReordered else {
                 throw ProtocolError.malformed("Received chunk \(sequence); expected \(nextSequence)")
             }
-            pending[sequence] = v
+            pending[sequence] = v; parkedBytes += v.count
             if gapOpenedAt == nil { gapOpenedAt = now }
             try check(now: now)
             return Data()
         }
         guard sequence == nextSequence else { throw ProtocolError.malformed("Received chunk \(sequence); expected \(nextSequence)") }
         var out = Data(v.dropFirst(GattChunk.headerBytes)); advance()
-        while let next = pending.removeValue(forKey: nextSequence) { out.append(next.dropFirst(GattChunk.headerBytes)); advance() }
+        while let next = pending.removeValue(forKey: nextSequence) { parkedBytes -= next.count; out.append(next.dropFirst(GattChunk.headerBytes)); advance() }
         // The gap filled: a second gap left behind it starts its own clock.
         gapOpenedAt = pending.isEmpty ? nil : now
+        if recovery?.readerActive == true { try check(now: now) }
         return out
     }
 

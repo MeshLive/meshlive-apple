@@ -32,6 +32,29 @@ extension MeshLink {
 /// later chunks ends the link with its reason. Control arm for tests only: launch argument `-gattGapFastFail NO`.
 enum GattLinkSettings {
     static var gapFastFail: Bool { UserDefaults.standard.object(forKey: "gattGapFastFail") as? Bool ?? true }
+    /// EXPERIMENTAL GR1 lost-chunk recovery (Android `test_gatt_chunk_recovery`, off): `-gattChunkRecovery YES`.
+    static var chunkRecovery: Bool { UserDefaults.standard.bool(forKey: "gattChunkRecovery") }
+}
+
+/// GR1 for one GATT link: the recovery object, its 50 ms timer, and the shared receive/timer steps.
+final class GattLinkRecovery {
+    let core: GattChunkRecovery
+    private var timer: Timer?
+    init(label: String) {
+        core = GattChunkRecovery { line in AppLog.event("gatt_recovery", ["detail": line, "link": label]) }
+    }
+    static func make(label: String) -> GattLinkRecovery? { GattLinkSettings.chunkRecovery ? GattLinkRecovery(label: label) : nil }
+    func start(valueLimit: Int, tick: @escaping () -> Void) {
+        core.start(valueLimit: valueLimit, now: ProcessInfo.processInfo.systemUptime)
+        let t = Timer(timeInterval: Gr1.tick, repeats: true) { _ in tick() }
+        RunLoop.main.add(t, forMode: .common); timer = t
+    }
+    func stop() { timer?.invalidate(); timer = nil; core.close() }
+    /// The data sequence of a chunk value this side sent.
+    static func sequence(of value: Data) -> UInt32 {
+        let v = value.rebased
+        return UInt32(v[1]) << 24 | UInt32(v[2]) << 16 | UInt32(v[3]) << 8 | UInt32(v[4])
+    }
 }
 
 /// A link whose reads can stop while the engine holds input (call relay backpressure). An LE credit-based channel
@@ -130,6 +153,7 @@ final class GattClientLink: MeshLink {
     private var chunker = GattChunkWriter()
     private var reader = GattChunkReader(failFast: GattLinkSettings.gapFastFail)
     private var gapCheckScheduled = false
+    private var recovery: GattLinkRecovery?
     private var pending: [Data] = []
     private var pendingBytes = 0
     private var closed = false
@@ -147,6 +171,10 @@ final class GattClientLink: MeshLink {
 
     init(peripheral: CBPeripheral, write: CBCharacteristic, label: String) {
         self.peripheral = peripheral; self.write = write; self.label = label
+        if let recovery = GattLinkRecovery.make(label: "client") {
+            self.recovery = recovery; reader.recovery = recovery.core
+            recovery.start(valueLimit: peripheral.maximumWriteValueLength(for: .withoutResponse)) { [weak self] in self?.recoveryTick() }
+        }
     }
 
     func send(_ data: Data) {
@@ -157,9 +185,14 @@ final class GattClientLink: MeshLink {
     }
 
     func pump() {
-        while !closed, let value = pending.first, peripheral.canSendWriteWithoutResponse {
+        let now = ProcessInfo.processInfo.systemUptime
+        while !closed, peripheral.canSendWriteWithoutResponse {
+            // GR1 control values and resends go ahead of new data.
+            if let control = recovery?.core.nextPriorityValue(now: now) { peripheral.writeValue(control, for: write, type: .withoutResponse); continue }
+            guard let value = pending.first else { break }
             peripheral.writeValue(value, for: write, type: .withoutResponse)
             pending.removeFirst(); pendingBytes -= value.count
+            recovery?.core.onDataSent(sequence: GattLinkRecovery.sequence(of: value), value: value, now: now)
         }
         if pending.isEmpty { onWritable?() }
     }
@@ -169,9 +202,23 @@ final class GattClientLink: MeshLink {
         #if os(macOS)
         inputValues += 1; lastInputAt = ProcessInfo.processInfo.systemUptime
         #endif
+        if let recovery, value.first == Gr1.type {
+            recovery.core.onControl(value, now: ProcessInfo.processInfo.systemUptime, reader: &reader)
+            recoveryTick(); return
+        }
         do { let bytes = try reader.accept(value); if !bytes.isEmpty { onBytes?(bytes) } }
         catch { fail("GATT input: \(error)"); return }
         scheduleGapCheck()
+        if recovery?.core.hasPriorityValues == true { pump() }
+    }
+
+    /// GR1 timer step: HELLO repeat, HIGH, the reader's rounds and deadline, then send what is due.
+    private func recoveryTick() {
+        guard !closed, let recovery else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        recovery.core.tick(now: now)
+        do { try reader.check(now: now) } catch { fail("GATT input: \(error)"); return }
+        if recovery.core.hasPriorityValues { pump() }
     }
 
     /// ChunkGapPolicy: a gap that nothing else fills ends the stream when its 1 s passes, not 8 s later.
@@ -189,7 +236,7 @@ final class GattClientLink: MeshLink {
 
     func fail(_ reason: String) { guard !closed else { return }; shutdown(); onClosed?(reason) }
     func close() { guard !closed else { return }; shutdown() }
-    private func shutdown() { closed = true; pending.removeAll(); pendingBytes = 0; onRelease?(); onRelease = nil }
+    private func shutdown() { closed = true; recovery?.stop(); pending.removeAll(); pendingBytes = 0; onRelease?(); onRelease = nil }
 }
 
 /// Android GATT byte stream as a peripheral (iPhone hosts c8d5a105): central writes in, notifications out.
@@ -205,6 +252,7 @@ final class GattServerLink: MeshLink {
     private var chunker = GattChunkWriter()
     private var reader = GattChunkReader(failFast: GattLinkSettings.gapFastFail)
     private var gapCheckScheduled = false
+    private var recovery: GattLinkRecovery?
     private var pending: [Data] = []
     private var pendingBytes = 0
     private var closed = false
@@ -222,6 +270,10 @@ final class GattServerLink: MeshLink {
 
     init(central: CBCentral, manager: CBPeripheralManager, notify: CBMutableCharacteristic, label: String) {
         self.central = central; self.manager = manager; self.notify = notify; self.label = label
+        if let recovery = GattLinkRecovery.make(label: "server") {
+            self.recovery = recovery; reader.recovery = recovery.core
+            recovery.start(valueLimit: central.maximumUpdateValueLength) { [weak self] in self?.recoveryTick() }
+        }
     }
 
     func send(_ data: Data) {
@@ -231,9 +283,17 @@ final class GattServerLink: MeshLink {
     }
 
     func pump() {
-        while !closed, let value = pending.first {
+        let now = ProcessInfo.processInfo.systemUptime
+        while !closed {
+            // GR1 control values and resends go ahead of new data; a refused one is tried again first.
+            if let control = recovery?.core.peekPriorityValue() {
+                guard manager.updateValue(control, for: notify, onSubscribedCentrals: [central]) else { return }
+                _ = recovery?.core.nextPriorityValue(now: now); continue
+            }
+            guard let value = pending.first else { break }
             guard manager.updateValue(value, for: notify, onSubscribedCentrals: [central]) else { return }
             pending.removeFirst(); pendingBytes -= value.count
+            recovery?.core.onDataSent(sequence: GattLinkRecovery.sequence(of: value), value: value, now: now)
         }
         if pending.isEmpty { onWritable?() }
     }
@@ -243,9 +303,23 @@ final class GattServerLink: MeshLink {
         #if os(macOS)
         inputValues += 1; lastInputAt = ProcessInfo.processInfo.systemUptime
         #endif
+        if let recovery, value.first == Gr1.type {
+            recovery.core.onControl(value, now: ProcessInfo.processInfo.systemUptime, reader: &reader)
+            recoveryTick(); return
+        }
         do { let bytes = try reader.accept(value); if !bytes.isEmpty { onBytes?(bytes) } }
         catch { fail("GATT input: \(error)"); return }
         scheduleGapCheck()
+        if recovery?.core.hasPriorityValues == true { pump() }
+    }
+
+    /// GR1 timer step: HELLO repeat, HIGH, the reader's rounds and deadline, then send what is due.
+    private func recoveryTick() {
+        guard !closed, let recovery else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        recovery.core.tick(now: now)
+        do { try reader.check(now: now) } catch { fail("GATT input: \(error)"); return }
+        if recovery.core.hasPriorityValues { pump() }
     }
 
     /// ChunkGapPolicy: a gap that nothing else fills ends the stream when its 1 s passes, not 8 s later.
@@ -263,7 +337,7 @@ final class GattServerLink: MeshLink {
 
     func fail(_ reason: String) { guard !closed else { return }; shutdown(); onClosed?(reason) }
     func close() { guard !closed else { return }; shutdown() }
-    private func shutdown() { closed = true; pending.removeAll(); pendingBytes = 0; onRelease?(); onRelease = nil }
+    private func shutdown() { closed = true; recovery?.stop(); pending.removeAll(); pendingBytes = 0; onRelease?(); onRelease = nil }
 }
 
 /// Binds one sans-I/O engine to one link: pushes received bytes in, pulls sealed records out while the
