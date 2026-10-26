@@ -1,5 +1,8 @@
 import Foundation
 import NearbyCore
+#if canImport(NearbyMedia)
+import NearbyMedia
+#endif
 
 /// DEBUG-only remote control through launch arguments (like Android's `test_*` extras), for runs over SSH:
 ///
@@ -26,6 +29,10 @@ import NearbyCore
 /// - `-NearbyAudioSelfTest N`: two back-to-back N-second runs of the call audio engine (microphone with voice
 ///   processing, packets looped back into playout, output volume 0 on a Mac); logs `auto_audio_selftest` with the
 ///   setup time and stats, so audio bring-up and teardown can be timed without a second device.
+/// - `-NearbyVideoSelfTest N`: the viewer side of a live join without a source or camera: a generated moving picture
+///   is VP9-encoded off the main thread and fed, packet by packet on the main thread as the link delivers them, to
+///   the same `RemoteVideo` a viewer uses (decoder set-up, decode, display). Logs `auto_video_selftest` with the
+///   decoder set-up time and decoded frames, so a join can be timed and profiled without a second device.
 /// - `-NearbyCallCamera off`: switch this Mac's camera off as soon as a video call is active (receive-only
 ///   video tests that must not show the room); logs `auto_camera`.
 /// Every step is logged as `BENCHMARK auto_*`.
@@ -44,6 +51,7 @@ final class Automation {
     private var answeredActiveAt: Date?
     private var cameraOffCall: ObjectIdentifier?
     private var selfTestAudio: CallAudio?
+    private var selfTestVideo: RemoteVideo?
 
     static func parse(_ arguments: [String]) -> [String: String] {
         var out: [String: String] = [:]
@@ -63,6 +71,39 @@ final class Automation {
         #else
         return nil
         #endif
+    }
+
+    /// Generated frames → VP9 (background) → `RemoteVideo` on the main thread, as a viewer receives them.
+    private func videoSelfTest(seconds: Double) {
+        let width = MediaDefaults.width, height = MediaDefaults.height, fps = MediaDefaults.fps
+        let remote = RemoteVideo()
+        selfTestVideo = remote
+        let began = ProcessInfo.processInfo.systemUptime
+        remote.configure(header: StreamHeader(width: width, height: height, fps: fps, codecId: StreamProtocol.codecVP9, includeAudio: false))
+        AppLog.event("auto_video_selftest", ["event": "configured", "ms": AppLog.ms(since: began), "decoder": remote.decoderName])
+        let queue = DispatchQueue(label: "io.github.meshlive.app.selftest.video", qos: .userInitiated)
+        queue.async { [weak self] in
+            guard let encoder = try? VP9Encoder(width: width, height: height, fps: fps, bitrateKbps: MediaDefaults.videoKbps) else {
+                AppLog.event("auto_video_selftest", ["event": "failure", "message": "no VP9 encoder"]); return
+            }
+            var picture = I420Picture(width: width, height: height)
+            let frames = Int(seconds * Double(fps))
+            for index in 0..<frames {
+                // A moving gradient: enough change per frame for real encoder and decoder work.
+                for row in 0..<height { for col in 0..<width { picture.y[row * width + col] = UInt8(truncatingIfNeeded: col + row + index * 4) } }
+                let pts = Int64(index) * 1_000_000 / Int64(fps)
+                if let frame = try? encoder.encode(picture, presentationTimeUs: pts, forceKeyFrame: index == 0) {
+                    let packet = MediaPacket(flags: frame.keyFrame ? StreamProtocol.flagKeyFrame : 0, presentationTimeUs: pts, payload: frame.data)
+                    DispatchQueue.main.async { remote.decode(packet) }
+                }
+                Thread.sleep(forTimeInterval: 1 / Double(fps))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                AppLog.event("auto_video_selftest", ["event": "done", "sent": "\(frames)", "decoded": "\(remote.decodedFrames)",
+                                                     "ms": AppLog.ms(since: began)])
+                remote.stop(); self?.selfTestVideo = nil
+            }
+        }
     }
 
     /// One loopback run of `CallAudio`; the second run starts right after the first one's stop (teardown ordering).
@@ -98,7 +139,13 @@ final class Automation {
         if let ladder = args["ResolutionLadder"] { AppSettings.resolutionLadder = ladder == "1" }
         if args["RequestPermissions"] == "1" { MediaPermissions.request(video: true, context: "launch") { _, _ in } }
         if args["Relay"] == "1" { model?.relayForOthers = true }
-        if let seconds = args["AudioSelfTest"].flatMap(Double.init), seconds > 0 { audioSelfTest(run: 1, seconds: seconds) }
+        // `-NearbySelfTestDelay N` starts the self-tests N s later (time for a profiler to attach).
+        let delay = args["SelfTestDelay"].flatMap(Double.init) ?? 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            if let seconds = self.args["AudioSelfTest"].flatMap(Double.init), seconds > 0 { self.audioSelfTest(run: 1, seconds: seconds) }
+            if let seconds = self.args["VideoSelfTest"].flatMap(Double.init), seconds > 0 { self.videoSelfTest(seconds: seconds) }
+        }
         if let title = args["AutoRadio"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
                 guard let self, let model = self.model else { return }
