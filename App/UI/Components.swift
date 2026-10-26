@@ -268,7 +268,10 @@ struct SettingsRowLabel: View {
             VStack(alignment: .leading, spacing: 3) {
                 // Android (2026-10-21): the value sits at the right when title and value fit on one line, and wraps
                 // under the title otherwise, instead of squeezing both into narrow columns.
-                if typeSize.isAccessibilitySize { stacked } else { ViewThatFits(in: .horizontal) { inline; stacked } }
+                TitleValueLayout(alwaysStacked: typeSize.isAccessibilitySize) {
+                    Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
+                    if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).multilineTextAlignment(.leading) }
+                }
                 if let subtitle {
                     Text(subtitle).font(.footnote).foregroundStyle(Palette.dimInk).multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -281,22 +284,45 @@ struct SettingsRowLabel: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
-    private var titleText: some View {
-        Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
+}
+
+/// Title and value on one line (value at the trailing edge) when both fit, else the value under the title, as
+/// Android's 2026-10-21 settings rows. One copy of each text, so VoiceOver and the accessibility audit see one row.
+struct TitleValueLayout: Layout {
+    var alwaysStacked = false
+    var spacing: CGFloat = 8, lineSpacing: CGFloat = 4
+
+    private func inline(_ width: CGFloat?, _ subviews: Subviews) -> Bool {
+        guard !alwaysStacked, subviews.count == 2 else { return subviews.count < 2 }
+        guard let width else { return true }
+        return subviews[0].sizeThatFits(.unspecified).width + spacing + subviews[1].sizeThatFits(.unspecified).width <= width
     }
-    private var inline: some View {
-        HStack(spacing: 8) {
-            titleText.lineLimit(1)
-            Spacer(minLength: 8)
-            if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).lineLimit(1) }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let first = subviews.first else { return .zero }
+        let column = ProposedViewSize(width: proposal.width, height: nil)
+        if subviews.count == 1 { return first.sizeThatFits(column) }
+        if inline(proposal.width, subviews) {
+            let a = subviews[0].sizeThatFits(.unspecified), b = subviews[1].sizeThatFits(.unspecified)
+            return CGSize(width: proposal.width ?? a.width + spacing + b.width, height: max(a.height, b.height))
         }
+        let a = subviews[0].sizeThatFits(column), b = subviews[1].sizeThatFits(column)
+        return CGSize(width: proposal.width ?? max(a.width, b.width), height: a.height + lineSpacing + b.height)
     }
-    private var stacked: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            titleText.fixedSize(horizontal: false, vertical: true)
-            if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).fixedSize(horizontal: false, vertical: true) }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let first = subviews.first else { return }
+        let column = ProposedViewSize(width: bounds.width, height: nil)
+        if subviews.count == 1 { first.place(at: bounds.origin, proposal: column); return }
+        if inline(bounds.width, subviews) {
+            let a = subviews[0].sizeThatFits(.unspecified), b = subviews[1].sizeThatFits(.unspecified)
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(a))
+            subviews[1].place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: ProposedViewSize(b))
+        } else {
+            let height = subviews[0].sizeThatFits(column).height
+            subviews[0].place(at: bounds.origin, proposal: column)
+            subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + height + lineSpacing), proposal: column)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
