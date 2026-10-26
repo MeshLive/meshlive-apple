@@ -586,6 +586,10 @@ final class WatchController: ObservableObject {
     @Published var stats = ""
     @Published var sourceFingerprint: IdentityFingerprint?
     @Published var signedTitle: String?
+    /// The source's stream header arrived: the join worked (StreamJoinRetry).
+    private(set) var joined = false
+    /// The user left (not a failed join).
+    private(set) var stoppedByUser = false
     /// Experimental audio-only live: the selected offer is a radio stream (no video; screen-off playback).
     let isRadio: Bool
     private let routeKey: StreamRoutePenalties.Route
@@ -620,7 +624,9 @@ final class WatchController: ObservableObject {
         self.routeKey = routeKey
         isRadio = offer.isAudioOnlyOffer
         forwardingEnabled = model.relayForOthers && offer.streamToken != 0
-        timeout = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
+        // DEBUG -NearbyWatchTimeout N shortens the wait for UI tests of a failed join.
+        let wait = RootView.debugArgument("-NearbyWatchTimeout").flatMap(Double.init) ?? 45
+        timeout = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
             guard let self, self.awaitingSource else { return }
             self.finish("Could not join. Move closer and try again. The broadcaster's phone needs \"Find iPhones\" turned on.")
         }
@@ -685,6 +691,7 @@ final class WatchController: ObservableObject {
             adjacentNodeId = adjacent
             sourceFingerprint = fp; model?.noteAuthenticated(fp); state = isRadio ? "Waiting for sound…" : "Waiting for video…"
         case .header(let h):
+            joined = true
             remote.configure(header: h)
             if h.hasAudio {
                 let audio = CallAudio(bitrate: 24_000, route: .speaker)
@@ -728,7 +735,7 @@ final class WatchController: ObservableObject {
         }
     }
 
-    func stop() { driver?.cancel(); finish("Stopped watching") }
+    func stop() { stoppedByUser = true; driver?.cancel(); finish("Stopped watching") }
 
     // MARK: Experimental forwarding
 

@@ -32,14 +32,18 @@ struct WatchView: View {
                         if let notice = model.streamNotice {
                             Text(notice).font(.body).foregroundStyle(Palette.ink).multilineTextAlignment(.center).padding(20)
                         }
+                        if model.streamRetryTarget != nil {
+                            CapsuleButton(title: "Try again", kind: .white) { model.streamTryAgain() }
+                                .frame(maxWidth: 260).padding(.bottom, 16)
+                        }
                         RoundControl(icon: "xmark", label: "Leave") { if let onLeave { onLeave() } else { dismiss() } }.padding(.bottom, 16)
                     }
                 }
             }
         }
         .mobileRootNavigation()
-        .onAppear { if model.watch == nil { model.startWatching(row) } }
-        .onDisappear { if stopOnDisappear { model.watch?.stop() } }
+        .onAppear { model.watchScreenOpen = true; if model.watch == nil { model.startWatching(row) } }
+        .onDisappear { model.watchScreenOpen = false; if stopOnDisappear { model.watch?.stop() } }
     }
 }
 

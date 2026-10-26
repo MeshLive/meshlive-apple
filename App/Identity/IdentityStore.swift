@@ -274,6 +274,9 @@ struct AppSettings {
     /// Call and stream audio: when the output starts, audio that arrived while it was still starting is dropped down
     /// to the playout target, instead of staying as latency for the whole call (on). Control arm `-audioStartTrim NO`.
     static var audioStartTrim: Bool { d.object(forKey: "audioStartTrim") as? Bool ?? true }
+    /// Failed live joins say "Couldn't join <title>." with Try again and retry once by themselves when the stream is
+    /// listed again (Android `test_stream_join_retry`, on). Control arm `-streamJoinRetry NO`.
+    static var streamJoinRetry: Bool { d.object(forKey: "streamJoinRetry") as? Bool ?? true }
     /// Audio-only live streams (Android `audio_live`, on for everyone since 2026-10-17 with no Settings row). Off, Go
     /// live offers no audio-only stream, audio-only offers are not listed and a `BTL1` header is refused as unsupported.
     /// Control arm for tests only: launch argument `-audioLive NO`.

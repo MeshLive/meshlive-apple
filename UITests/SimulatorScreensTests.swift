@@ -445,6 +445,20 @@ final class SimulatorScreensTests: XCTestCase {
     /// First call: the system asks for the microphone; "Don't Allow" must leave the app usable and explain the next
     /// step (the fixture person is not on the radio, so the call itself ends with the "isn't nearby" notice).
     /// Needs reset privacy for the app (run-uitest.sh resets it before the run on a simulator).
+    /// A live join that never starts says so and offers Try again (Android StreamJoinRetry).
+    func testFailedJoinOffersTryAgain() {
+        let app = launch(["-NearbyWatchTimeout", "3"])
+        let stream = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'stream-'")).firstMatch
+        XCTAssertTrue(stream.waitForExistence(timeout: 5))
+        stream.tap()
+        let failed = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Couldn't join")).firstMatch
+        XCTAssertTrue(failed.waitForExistence(timeout: 25), "the failed join says so (after the one automatic retry)")
+        XCTAssertTrue(app.buttons["Try again"].exists)
+        shot("stream-join-failed")
+        app.buttons["Try again"].tap()
+        XCTAssertFalse(app.buttons["Try again"].waitForExistence(timeout: 1), "Try again is used up while the stream is looked for")
+    }
+
     /// A stuck Bluetooth stack gets plain restart guidance on Calls and Live (Android people_bluetooth_restart).
     func testStuckBluetoothExplainsTheRestart() {
         let app = launch(["-NearbyScreen", "people", "-NearbyBluetoothStuck", "1"])

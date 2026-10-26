@@ -509,6 +509,7 @@ final class AppModel: ObservableObject {
     // MARK: Lists
 
     private func rebuildLists() {
+        defer { takeStreamRetry() }
         #if DEBUG
         if debugFixtureActive { return } // keep the simulator fixture rows
         #endif
@@ -784,7 +785,45 @@ final class AppModel: ObservableObject {
     func watchFinished(_ controller: WatchController) {
         guard watch === controller else { return }
         watch = nil
+        let target = LogicalStreamTarget(controller.offer)
+        if controller.joined {
+            streamJoinRetry.onJoined(target)
+        } else if !controller.stoppedByUser {
+            // A join that never became active: say so, offer Try again, and retry once by itself (StreamJoinRetry).
+            let auto = streamJoinRetry.onJoinFailed(target, now: ConnectionDriver.now)
+            AppLog.event("stream_join", ["event": "failed", "autoRetry": "\(auto != nil)", "enabled": "\(AppSettings.streamJoinRetry)",
+                                         "title": "\(controller.signedTitle != nil)"])
+            if AppSettings.streamJoinRetry {
+                streamNotice = StreamJoinRetry<LogicalStreamTarget>.failureMessage(title: controller.signedTitle)
+                streamRetryTarget = target
+            }
+        }
         refreshAdvertising()
+        takeStreamRetry()
+    }
+
+    /// Failed live joins (StreamJoinRetry; on, control arm `-streamJoinRetry NO`).
+    let streamJoinRetry = StreamJoinRetry<LogicalStreamTarget>(enabled: { AppSettings.streamJoinRetry })
+    /// Try again on "Couldn't join ...".
+    @Published private(set) var streamRetryTarget: LogicalStreamTarget?
+    /// The watch screen that is open (a retry joins only while it shows, never in the background).
+    var watchScreenOpen = false { didSet { if !watchScreenOpen { streamJoinRetry.cancel(); streamRetryTarget = nil } } }
+
+    func streamTryAgain() {
+        guard let target = streamRetryTarget else { return }
+        AppLog.event("stream_join", ["event": "try_again"])
+        streamJoinRetry.onTryAgain(target, now: ConnectionDriver.now)
+        streamNotice = nil; streamRetryTarget = nil
+        takeStreamRetry()
+    }
+
+    /// Joins the pending retry's stream once it is listed (any route to the same logical stream).
+    private func takeStreamRetry() {
+        guard watchScreenOpen, watch == nil, call == nil, live == nil, streamJoinRetry.pending != nil else { return }
+        guard let row = streamJoinRetry.take(now: ConnectionDriver.now, listed: streams, matches: { $0.matches($1.announcement) }) else { return }
+        AppLog.event("stream_join", ["event": "retry", "route": row.route])
+        streamNotice = nil; streamRetryTarget = nil
+        startWatching(row)
     }
 
     // MARK: Going live
