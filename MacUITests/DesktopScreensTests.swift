@@ -131,9 +131,10 @@ final class DesktopScreensTests: XCTestCase {
             app.typeKey(key, modifierFlags: [.command, .shift])
             XCTAssertFalse(app.buttons[title].exists)
             // Preview cannot reach a real peer. This confirms the shortcut invokes the call action.
-            let notice = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Couldn't reach ")).firstMatch
+            let notice = app.staticTexts.matching(NSPredicate(format: "value BEGINSWITH %@ OR label BEGINSWITH %@", "Couldn't reach ", "Couldn't reach ")).firstMatch
             XCTAssertTrue(notice.waitForExistence(timeout: 5))
-            notice.click()
+            XCTAssertTrue(app.buttons["Call again"].exists, "a failed call offers Call again")
+            app.buttons["Dismiss"].firstMatch.click()
             if key == "a" {
                 app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "person-")).firstMatch.click()
                 XCTAssertTrue(app.buttons["Video call"].waitForExistence(timeout: 5))

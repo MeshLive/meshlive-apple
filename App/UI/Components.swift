@@ -450,9 +450,18 @@ struct TabHeader: View {
 /// Android's readiness states and wording (the header dot and, when something is wrong, a card on Live).
 struct RadioStatus {
     let title: String, detail: String, ok: Bool, action: String?
+    /// The action opens Bluetooth settings (Mac) rather than the app's settings.
+    var opensBluetooth = false
     init(model: AppModel) {
         if DesktopPreview.enabled {
             (title, detail, ok, action) = ("Preview", "Sample people and streams. Bluetooth and media are off.", false, nil)
+            return
+        }
+        if model.bluetoothRestartNeeded {
+            // iOS has no public link to Bluetooth settings; the Mac opens its Bluetooth pane.
+            (title, detail, ok, action) = (BluetoothGuidance.restartTitle, BluetoothGuidance.restartText(mac: AppPlatform.isMac), false,
+                                           AppPlatform.isMac ? "Open Bluetooth settings" : nil)
+            opensBluetooth = true
             return
         }
         switch model.radio.central?.state {

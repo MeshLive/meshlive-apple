@@ -221,7 +221,7 @@ struct StatusCard: View {
             }
             if let action = status.action {
                 CapsuleButton(title: action, kind: .dark) {
-                    AppPlatform.openSettings()
+                    if status.opensBluetooth { AppPlatform.openBluetoothSettings() } else { AppPlatform.openSettings() }
                 }
             }
         }
@@ -327,6 +327,7 @@ struct CallsTab: View {
                 Chip(title: "Recent", selected: showRecent) { showRecent = true }
             }
             .padding(.vertical, 8)
+            if !showRecent, model.bluetoothRestartNeeded { StatusCard(status: RadioStatus(model: model)) }
             CallNoticeCard()
             if showRecent { recent } else { nearby }
         }

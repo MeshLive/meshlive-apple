@@ -22,6 +22,14 @@ enum AppPlatform {
         return UIApplication.shared.applicationState == .active
         #endif
     }
+    /// The Mac's Bluetooth settings pane; on iPhone the app's own settings (iOS has no public Bluetooth link).
+    static func openBluetoothSettings() {
+        #if os(macOS)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings") { NSWorkspace.shared.open(url) }
+        #else
+        openSettings()
+        #endif
+    }
     static func openSettings(notifications: Bool = false) {
         #if os(macOS)
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))

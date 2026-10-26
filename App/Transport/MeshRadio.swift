@@ -60,6 +60,19 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     var acceptRotating = false
     let titleBoard = TitleBoard()
     var onState: ((String) -> Void)?
+    /// For BluetoothGuidance: when the central state last changed, and whether the stack refused to host the service.
+    private(set) var centralStateSince = ProcessInfo.processInfo.systemUptime
+    private(set) var hostingFailed = false
+    var guidanceState: BluetoothGuidance.State {
+        switch central?.state {
+        case .poweredOn?: return .poweredOn
+        case .poweredOff?: return .poweredOff
+        case .unauthorized?: return .unauthorized
+        case .unsupported?: return .unsupported
+        case .resetting?: return .resetting
+        default: return .unknown
+        }
+    }
     var onPeersChanged: (() -> Void)?
     var onIncomingLink: ((MeshLink) -> Void)?
     var onReady: (() -> Void)?
@@ -102,6 +115,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         }
         guard central == nil else { return }
         central = CBCentralManager(delegate: self, queue: .main)
+        centralStateSince = ProcessInfo.processInfo.systemUptime
         peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
     }
 
@@ -232,6 +246,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         AppLog.event("radio_state", ["role": "central", "state": "\(central.state.rawValue)"])
+        centralStateSince = ProcessInfo.processInfo.systemUptime
         switch central.state {
         case .poweredOn:
             if wantScan { setScanning(true) }
@@ -258,6 +273,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
             return
         }
         guard servicesAdded == 0 else { return }
+        hostingFailed = false
         peripheral.removeAllServices()
         let psmCharacteristic = CBMutableCharacteristic(type: CBUUID(string: MeshUUIDs.psmCharacteristic), properties: [.read], value: nil, permissions: [.readable])
         let control = CBMutableService(type: CBUUID(string: MeshUUIDs.controlService), primary: true)
@@ -272,13 +288,13 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
-        if let error { onState?("Could not host the Bluetooth service: \(error.localizedDescription)"); return }
+        if let error { hostingFailed = true; onState?("Could not host the Bluetooth service: \(error.localizedDescription)"); return }
         servicesAdded += 1
         if peripheralReady { applyAdvertisement(); onReady?() }
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didPublishL2CAPChannel PSM: CBL2CAPPSM, error: Error?) {
-        if let error { onState?("Could not open an L2CAP channel: \(error.localizedDescription)"); return }
+        if let error { hostingFailed = true; onState?("Could not open an L2CAP channel: \(error.localizedDescription)"); return }
         psm = PSM
         psmValue = (try? MeshUUIDs.encodePSM(PSM)) ?? Data()
         AppLog.event("l2cap_publish", ["psm": "\(PSM)"])

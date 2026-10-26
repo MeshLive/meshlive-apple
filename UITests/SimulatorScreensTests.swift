@@ -445,6 +445,17 @@ final class SimulatorScreensTests: XCTestCase {
     /// First call: the system asks for the microphone; "Don't Allow" must leave the app usable and explain the next
     /// step (the fixture person is not on the radio, so the call itself ends with the "isn't nearby" notice).
     /// Needs reset privacy for the app (run-uitest.sh resets it before the run on a simulator).
+    /// A stuck Bluetooth stack gets plain restart guidance on Calls and Live (Android people_bluetooth_restart).
+    func testStuckBluetoothExplainsTheRestart() {
+        let app = launch(["-NearbyScreen", "people", "-NearbyBluetoothStuck", "1"])
+        let title = app.staticTexts["Bluetooth needs a restart to find nearby people"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "Calls explains what helps")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "off and on")).firstMatch.exists)
+        shot("bluetooth-restart")
+        app.tabBars.buttons["Live"].tap()
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "Live shows the same card")
+    }
+
     /// A call that cannot reach the person leaves "Couldn't reach ..." with Call again, which tries once more.
     func testCouldNotReachOffersCallAgain() {
         let app = launch(["-NearbyScreen", "people"])

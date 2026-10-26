@@ -88,6 +88,19 @@ final class AppModel: ObservableObject {
     /// The app left or regained the front while a call may ring (inactive or background).
     func appActivityChanged() { CallNotifier.shared.update(for: call) }
     @Published var wiped = false
+    /// BluetoothGuidance: Bluetooth is allowed and on but stuck; the status card says to turn it off and on.
+    @Published var bluetoothRestartNeeded = false
+    func checkBluetoothGuidance() {
+        #if DEBUG
+        if RootView.debugArgument("-NearbyBluetoothStuck") == "1" { return }   // UI fixture: keep the guidance shown
+        #endif
+        let needed = BluetoothGuidance.needsRestart(state: radio.guidanceState,
+                                                    secondsInState: ProcessInfo.processInfo.systemUptime - radio.centralStateSince,
+                                                    hostingFailed: radio.hostingFailed)
+        guard needed != bluetoothRestartNeeded else { return }
+        bluetoothRestartNeeded = needed
+        AppLog.event("bluetooth_guidance", ["restart": "\(needed)", "state": "\(radio.guidanceState)", "hostingFailed": "\(radio.hostingFailed)"])
+    }
     /// "You appear as ..." (OwnNearbyName): what people nearby who have not added you see for this device now, or nil.
     var ownNearbyLine: String? {
         #if os(macOS)
@@ -433,7 +446,9 @@ final class AppModel: ObservableObject {
         radio.setScanning(true)
         #endif
         pruneTimer?.invalidate()
-        pruneTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.radio.prune(olderThan: 8) }
+        pruneTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.radio.prune(olderThan: 8); self?.checkBluetoothGuidance()
+        }
         refreshAdvertising()
     }
 
@@ -912,6 +927,7 @@ final class AppModel: ObservableObject {
         #endif
         guard name == "populated" else { return }
         debugFixtureActive = true
+        if RootView.debugArgument("-NearbyBluetoothStuck") == "1" { bluetoothRestartNeeded = true }
         let asha = Data(hex: "a1b2c3d4e5f6")!, ravi = Data(hex: "0102030405a8")!, stranger = Data(hex: "112233445566")!
         people = [
             PersonRow(id: UUID(), label: PeerLabel(prefix: asha, contactName: "Asha"), prefixHex: asha.hex, transport: .gatt, relays: 0, isIPhone: false),
