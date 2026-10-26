@@ -189,4 +189,32 @@ final class Bmh3BudgetTests: XCTestCase {
         XCTAssertNoThrow(try budget.spend())
         XCTAssertThrowsError(try budget.spend())
     }
+
+    /// Review PR3: a pseudonym-mode responder's replay cache and budget belong to one discovery epoch, so a msg1
+    /// replayed across a rotation (or a budget drained before it) cannot tell a prober "same phone".
+    func testPseudonymResponderGuardsArePerEpoch() throws {
+        let guards = Bmh3EpochGuards(newBudget: { Bmh3SigningBudget(capacity: 1, refill: 1_000, clock: { 0 }) })
+        var epoch: Int64 = 100
+        var options = Bmh3CallOptions(pseudonyms: true)
+        options.epoch = { epoch }; options.epochGuards = guards
+        let first = try XCTUnwrap(options.settings(role: .callee, openingEntries: nil))
+        let again = try XCTUnwrap(options.settings(role: .callee, openingEntries: nil))
+        XCTAssertTrue(first.replayCache === again.replayCache, "one cache per epoch")
+        XCTAssertTrue(try XCTUnwrap(first.replayCache).firstUse(Data([1])))
+        XCTAssertFalse(try XCTUnwrap(again.replayCache).firstUse(Data([1])), "a replay inside the epoch is refused")
+        XCTAssertNoThrow(try XCTUnwrap(first.budget).spend())
+        XCTAssertThrowsError(try XCTUnwrap(again.budget).spend(), "one budget per epoch")
+        epoch = 101
+        let next = try XCTUnwrap(options.settings(role: .callee, openingEntries: nil))
+        XCTAssertFalse(next.replayCache === first.replayCache)
+        XCTAssertTrue(try XCTUnwrap(next.replayCache).firstUse(Data([1])), "the replayed msg1 looks new after the boundary")
+        XCTAssertNoThrow(try XCTUnwrap(next.budget).spend(), "a drained budget does not carry over the boundary")
+        epoch = 103
+        _ = options.settings(role: .callee, openingEntries: nil)
+        XCTAssertEqual(guards.epochs, [103], "pairs older than the previous epoch are dropped")
+        // A responder that presents its real key (no pseudonyms) keeps the process-wide pair, as on Android.
+        var everyone = Bmh3CallOptions(pseudonyms: false)
+        everyone.epoch = { epoch }; everyone.epochGuards = guards
+        XCTAssertTrue(try XCTUnwrap(everyone.settings(role: .callee, openingEntries: nil)).replayCache === Bmh3CallSettings.sharedReplayCache)
+    }
 }

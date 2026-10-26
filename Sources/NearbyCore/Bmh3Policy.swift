@@ -123,7 +123,36 @@ public final class Bmh3CallSettings {
         }
     }
 
-    /// The process-wide replay cache and signing budget of call responders.
+    /// The process-wide replay cache and signing budget of call responders that present their real key.
     public static let sharedReplayCache = Bmh3ReplayCache()
     public static let sharedBudget = Bmh3SigningBudget()
+    /// Per-epoch replay caches and budgets of pseudonym-mode responders (Android `Bmh3Policy.epochGuards`).
+    public static let epochGuards = Bmh3EpochGuards()
+}
+
+/// The replay cache and the signing budget of stranger-facing (pseudonym-mode) responders, one pair per discovery
+/// epoch, dropped two epochs later (Android Bmh3EpochGuards, review PR3). A process-wide cache would let a prober
+/// replay one msg1 across an epoch boundary and read "same phone" from the silent close, linking two rotating IDs;
+/// a drained process-wide budget carries over the boundary the same way.
+public final class Bmh3EpochGuards {
+    public final class Guards {
+        public let replayCache: Bmh3ReplayCache
+        public let budget: Bmh3SigningBudget
+        init(replayCache: Bmh3ReplayCache, budget: Bmh3SigningBudget) { self.replayCache = replayCache; self.budget = budget }
+    }
+    private var byEpoch: [Int64: Guards] = [:]
+    private let newBudget: () -> Bmh3SigningBudget
+    private let lock = NSLock()
+    public init(newBudget: @escaping () -> Bmh3SigningBudget = { Bmh3SigningBudget() }) { self.newBudget = newBudget }
+
+    /// The guards of `epoch`; those of epochs before `epoch - 1` are dropped.
+    public func forEpoch(_ epoch: Int64) -> Guards {
+        lock.lock(); defer { lock.unlock() }
+        byEpoch = byEpoch.filter { $0.key >= epoch - 1 }
+        if let existing = byEpoch[epoch] { return existing }
+        let created = Guards(replayCache: Bmh3ReplayCache(), budget: newBudget())
+        byEpoch[epoch] = created
+        return created
+    }
+    var epochs: [Int64] { lock.lock(); defer { lock.unlock() }; return byEpoch.keys.sorted() }
 }

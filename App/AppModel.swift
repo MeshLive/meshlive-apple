@@ -183,6 +183,9 @@ final class AppModel: ObservableObject {
                     PresenceContactTags.responderChecks(entries: pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs)) { vault.ownDayKey(epoch: $0) }
                 }
                 options.admitTagged = { vault.deliveredTo($0) }
+                // Pseudonym mode: the responder's replay cache and signing budget follow the discovery epoch (PR3).
+                let runtime = rotating
+                options.epoch = { runtime.currentEpoch() }
             }
         }
         return options

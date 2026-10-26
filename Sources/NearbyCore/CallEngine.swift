@@ -71,6 +71,10 @@ public struct Bmh3CallOptions {
     /// Phase 2 (callee): this phone's tag checks for the adverts it has on air, and the lease recipients.
     public var tagChecks: (() -> [Bmh3ContactTag])?
     public var admitTagged: ((NodeId) -> Bool)?
+    /// Callee in pseudonym mode: this phone's current discovery epoch, which scopes the replay cache and the signing
+    /// budget (Android `epoch`, review PR3). Nil keeps the process-wide pair.
+    public var epoch: (() -> Int64)?
+    public var epochGuards: Bmh3EpochGuards = Bmh3CallSettings.epochGuards
     public init(pseudonyms: Bool, selected: DiscoveryAnnouncement? = nil, pins: Bmh3Pins? = nil,
                 budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
         self.pseudonyms = pseudonyms; self.selected = selected; self.pins = pins; self.budget = budget; self.wallEpoch = wallEpoch
@@ -94,9 +98,11 @@ public struct Bmh3CallOptions {
             return settings
         case .callee:
             // Rule P fails closed: in pseudonym mode every untagged connection meets a fresh throwaway for this connection.
+            // Its replay cache and budget belong to the current epoch, so nothing observable crosses a rotation (PR3).
+            let scoped = pseudonyms ? epoch.map { epochGuards.forEpoch($0()) } : nil
             let settings = Bmh3CallSettings(speak: false, acceptBmh2: !pseudonyms, stranger: pseudonyms ? SoftwareSigningIdentity() : nil,
                                             opening: { Bmh3CallSettings.openingValue(openingEntries?() ?? []) },
-                                            replayCache: Bmh3CallSettings.sharedReplayCache, budget: budget)
+                                            replayCache: scoped?.replayCache ?? Bmh3CallSettings.sharedReplayCache, budget: scoped?.budget ?? budget)
             if let tagChecks { settings.tagChecks = tagChecks }
             if let admitTagged { settings.admitTagged = admitTagged }
             return settings
