@@ -34,6 +34,9 @@ enum GattLinkSettings {
     static var gapFastFail: Bool { UserDefaults.standard.object(forKey: "gattGapFastFail") as? Bool ?? true }
     /// EXPERIMENTAL GR1 lost-chunk recovery (Android `test_gatt_chunk_recovery`, off): `-gattChunkRecovery YES`.
     static var chunkRecovery: Bool { UserDefaults.standard.bool(forKey: "gattChunkRecovery") }
+    /// EXPERIMENTAL aligned values (Android `test_gatt_aligned_writes`, off): ATT values of whole 251-octet LE data PDUs
+    /// (495 instead of 512). `-gattAlignedValues YES`; read when a link opens.
+    static var alignedValues: Bool { UserDefaults.standard.bool(forKey: "gattAlignedValues") }
 }
 
 /// GR1 for one GATT link: the recovery object, its 50 ms timer, and the shared receive/timer steps.
@@ -151,6 +154,7 @@ final class GattClientLink: MeshLink {
     let peripheral: CBPeripheral
     private let write: CBCharacteristic
     private var chunker = GattChunkWriter()
+    private let aligned = GattLinkSettings.alignedValues
     private var reader = GattChunkReader(failFast: GattLinkSettings.gapFastFail)
     private var gapCheckScheduled = false
     private var recovery: GattLinkRecovery?
@@ -171,6 +175,8 @@ final class GattClientLink: MeshLink {
 
     init(peripheral: CBPeripheral, write: CBCharacteristic, label: String) {
         self.peripheral = peripheral; self.write = write; self.label = label
+        let limit = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        AppLog.event("gatt_values", ["link": "client", "limit": "\(limit)", "value": "\(GattChunk.valueBytes(valueLimit: limit, aligned: aligned))", "aligned": "\(aligned)"])
         if let recovery = GattLinkRecovery.make(label: "client") {
             self.recovery = recovery; reader.recovery = recovery.core
             recovery.start(valueLimit: peripheral.maximumWriteValueLength(for: .withoutResponse)) { [weak self] in self?.recoveryTick() }
@@ -180,7 +186,7 @@ final class GattClientLink: MeshLink {
     func send(_ data: Data) {
         guard !closed else { return }
         let limit = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        for value in chunker.chunks(data, valueLimit: limit) { pending.append(value); pendingBytes += value.count }
+        for value in chunker.chunks(data, valueLimit: limit, aligned: aligned) { pending.append(value); pendingBytes += value.count }
         pump()
     }
 
@@ -250,6 +256,7 @@ final class GattServerLink: MeshLink {
     private let manager: CBPeripheralManager
     private let notify: CBMutableCharacteristic
     private var chunker = GattChunkWriter()
+    private let aligned = GattLinkSettings.alignedValues
     private var reader = GattChunkReader(failFast: GattLinkSettings.gapFastFail)
     private var gapCheckScheduled = false
     private var recovery: GattLinkRecovery?
@@ -270,6 +277,8 @@ final class GattServerLink: MeshLink {
 
     init(central: CBCentral, manager: CBPeripheralManager, notify: CBMutableCharacteristic, label: String) {
         self.central = central; self.manager = manager; self.notify = notify; self.label = label
+        let limit = central.maximumUpdateValueLength
+        AppLog.event("gatt_values", ["link": "server", "limit": "\(limit)", "value": "\(GattChunk.valueBytes(valueLimit: limit, aligned: aligned))", "aligned": "\(aligned)"])
         if let recovery = GattLinkRecovery.make(label: "server") {
             self.recovery = recovery; reader.recovery = recovery.core
             recovery.start(valueLimit: central.maximumUpdateValueLength) { [weak self] in self?.recoveryTick() }
@@ -278,7 +287,7 @@ final class GattServerLink: MeshLink {
 
     func send(_ data: Data) {
         guard !closed else { return }
-        for value in chunker.chunks(data, valueLimit: central.maximumUpdateValueLength) { pending.append(value); pendingBytes += value.count }
+        for value in chunker.chunks(data, valueLimit: central.maximumUpdateValueLength, aligned: aligned) { pending.append(value); pendingBytes += value.count }
         pump()
     }
 

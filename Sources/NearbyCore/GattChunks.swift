@@ -10,16 +10,29 @@ public enum GattChunk {
     public static let typeData: UInt8 = 1
     public static let typeIgnored: UInt8 = 2
     public static let maxAttributeBytes = 512
+    /// The largest LE data PDU payload (Data Length Extension) and the ATT + L2CAP headers in front of a value.
+    public static let leDataPduOctets = 251
+    static let attAndL2capHeaderBytes = 3 + 4
+    /// The ATT value size for a limit. `aligned` (Android `test_gatt_aligned_writes`, Experimental, off) rounds it down
+    /// to whole 251-octet LE data PDUs: 495 bytes fill exactly two (a 512-byte value is 251 + 251 + 17), 244 one.
+    public static func valueBytes(valueLimit: Int, aligned: Bool = false) -> Int {
+        let limit = max(1, min(valueLimit, maxAttributeBytes))
+        guard aligned else { return limit }
+        let wholePdus = (limit + attAndL2capHeaderBytes) / leDataPduOctets
+        return wholePdus >= 1 ? wholePdus * leDataPduOctets - attAndL2capHeaderBytes : limit
+    }
     /// Payload bytes per chunk for an ATT value limit (`maximumWriteValueLength` / `maximumUpdateValueLength`).
-    public static func payloadBytes(valueLimit: Int) -> Int { max(1, min(valueLimit, maxAttributeBytes) - headerBytes) }
+    public static func payloadBytes(valueLimit: Int, aligned: Bool = false) -> Int {
+        max(1, valueBytes(valueLimit: valueLimit, aligned: aligned) - headerBytes)
+    }
 }
 
 public struct GattChunkWriter {
     public private(set) var nextSequence: UInt32 = 0
     public init() {}
     /// Splits stream bytes into chunk values; the caller writes them strictly in order.
-    public mutating func chunks(_ bytes: Data, valueLimit: Int) -> [Data] {
-        let capacity = GattChunk.payloadBytes(valueLimit: valueLimit)
+    public mutating func chunks(_ bytes: Data, valueLimit: Int, aligned: Bool = false) -> [Data] {
+        let capacity = GattChunk.payloadBytes(valueLimit: valueLimit, aligned: aligned)
         var out: [Data] = []; var offset = bytes.startIndex
         while offset < bytes.endIndex {
             let end = min(offset + capacity, bytes.endIndex)

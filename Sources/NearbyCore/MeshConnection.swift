@@ -26,6 +26,13 @@ public struct OutboundItem {
 public struct OutboundQueues {
     public var audioCapacity = 150
     public var videoCapacity = 45
+    /// EXPERIMENTAL call audio coalescing (Android `test_call_audio_coalesce`, off): when an ordinary 20 ms Opus unit
+    /// leaves while more ordinary units already wait (audio that queued behind a slow write), they leave as one existing
+    /// BTA1 pair or BTA2 batch (at most 20 units, 1 s span). Nothing waits for audio not yet captured; with an empty
+    /// queue every record is as before. Every call receiver already splits pairs and batches: no wire change.
+    public var coalesceAudio = false
+    /// Units that left inside a pair or batch instead of their own record.
+    public private(set) var coalescedAudioUnits = 0
     var control: [OutboundItem] = []
     var audio: [OutboundItem] = []
     var video: [OutboundItem] = []
@@ -61,7 +68,7 @@ public struct OutboundQueues {
 
     mutating func pop() -> OutboundItem? {
         if !control.isEmpty { return control.removeFirst() }
-        if !audio.isEmpty { return audio.removeFirst() }
+        if !audio.isEmpty { return popAudio() }
         if !fragmentRemainder.isEmpty { return fragmentRemainder.removeFirst() }
         guard !video.isEmpty else { return nil }
         let item = video.removeFirst()
@@ -75,6 +82,35 @@ public struct OutboundQueues {
             return OutboundItem(kind: .content(.videoFragment, flags, parts.first ?? Data()), enqueuedAt: item.enqueuedAt, isKeyFrame: item.isKeyFrame, closeAfter: false)
         }
         return item
+    }
+
+    private static func ordinaryAudio(_ item: OutboundItem) -> MediaPacket? {
+        guard !item.closeAfter, case .content(.mediaPacket, let flags, let payload) = item.kind, flags == StreamProtocol.flagAudio,
+              let packet = try? MediaPacket(decoding: payload, authenticatedFlags: flags),
+              packet.flags == StreamProtocol.flagAudio, packet.payload.count <= StreamProtocol.maxAudioAccessUnitBytes else { return nil }
+        return packet
+    }
+
+    private mutating func popAudio() -> OutboundItem {
+        let first = audio.removeFirst()
+        guard coalesceAudio, let head = Self.ordinaryAudio(first) else { return first }
+        var units = [head]
+        while units.count < StreamProtocol.maxBatchPackets, let next = audio.first, let unit = Self.ordinaryAudio(next),
+              unit.presentationTimeUs >= units[units.count - 1].presentationTimeUs,
+              unit.presentationTimeUs - head.presentationTimeUs <= StreamProtocol.maxAudioGapUs {
+            units.append(unit); audio.removeFirst()
+        }
+        guard units.count > 1, let combined = try? MediaPacket.combineAudio(units) else {
+            // Nothing to merge (or not mergeable): put the taken units back unchanged.
+            if units.count > 1 {
+                audio.insert(contentsOf: units.dropFirst().map {
+                    OutboundItem(kind: .content(.mediaPacket, $0.flags, $0.encoded), enqueuedAt: first.enqueuedAt, isKeyFrame: false, closeAfter: false)
+                }, at: 0)
+            }
+            return first
+        }
+        coalescedAudioUnits += units.count - 1
+        return OutboundItem(kind: .content(.mediaPacket, combined.flags, combined.encoded), enqueuedAt: first.enqueuedAt, isKeyFrame: false, closeAfter: false)
     }
 
     /// Clears queued media; an unfinished fragmented frame is completed so the receiver never sees a gap.

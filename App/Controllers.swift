@@ -169,6 +169,8 @@ final class CallController: ObservableObject, Identifiable {
         remote.onNeedKeyFrame = { [weak self] in self?.engine.requestKeyFrame(); self?.pump() }
         relayed = relayHops > 0
         engine.acceptRelayedCalls = model.relayedCalls
+        // EXPERIMENTAL overhead trim (Android test_call_audio_coalesce, off): `-callAudioCoalesce YES`.
+        engine.queues.coalesceAudio = UserDefaults.standard.bool(forKey: "callAudioCoalesce")
         engine.acceptRelayedStrangerCalls = AppSettings.relayedStrangerCalls
         phaseText = role == .caller ? "Calling…" : "Connecting…"
     }
@@ -316,7 +318,7 @@ final class CallController: ObservableObject, Identifiable {
 
     func logStats(final: Bool = false) {
         var fields: [String: String] = ["final": "\(final)", "phase": "\(String(describing: phase))",
-            "audioFromEncoder": "\(audioFromEncoder)", "audioSent": "\(engine.sentAudioPackets)", "audioRx": "\(engine.receivedAudioPackets)",
+            "audioFromEncoder": "\(audioFromEncoder)", "audioSent": "\(engine.sentAudioPackets)", "audioCoalesced": "\(engine.queues.coalescedAudioUnits)", "audioRx": "\(engine.receivedAudioPackets)",
             "remoteAudioEvents": "\(remoteAudioEvents)", "remoteAudioNoPlayer": "\(remoteAudioWithoutPlayer)",
             "videoFromEncoder": "\(videoFromEncoder)", "videoSent": "\(engine.sentVideoPackets)", "videoShed": "\(videoShed)",
             "videoRx": "\(engine.receivedVideoPackets)", "remoteVideoEvents": "\(remoteVideoEvents)", "decoded": "\(remote.decodedFrames)", "decoder": remote.decoderName,

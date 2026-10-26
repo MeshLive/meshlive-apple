@@ -48,6 +48,39 @@ final class EngineTests: XCTestCase {
         return (caller, callee, Pipe(caller, callee, gatt: gatt), [], [])
     }
 
+    /// Overhead trim (Android test_call_audio_coalesce): audio that queued behind a slow link leaves as one BTA2 batch and
+    /// the callee plays the same units in order; with the switch off every unit is its own record.
+    func testQueuedCallAudioLeavesAsOneBatchAndArrivesAsTheSameUnits() throws {
+        for coalesce in [false, true] {
+            let (caller, callee, pipe, _, _) = try makeCall(gatt: true)
+            var heard: [MediaPacket] = []
+            callee.onEvent = { if case .remoteAudio(let unit) = $0 { heard.append(unit) } }
+            try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+            try callee.accept(as: .voice); try pipe.pump()
+            caller.queues.coalesceAudio = coalesce
+            let sentBefore = caller.sentBytes
+            for i in 0..<5 { caller.sendAudio(presentationTimeUs: Int64(i) * 20_000, opus: Data([0xfc]) + Data(repeating: UInt8(i), count: 79)) }
+            try pipe.pump()
+            XCTAssertEqual(heard.map(\.presentationTimeUs), [0, 20_000, 40_000, 60_000, 80_000], "coalesce \(coalesce)")
+            XCTAssertEqual(heard.map { $0.payload.last }, [0, 1, 2, 3, 4])
+            XCTAssertEqual(caller.queues.coalescedAudioUnits, coalesce ? 4 : 0)
+            if coalesce { XCTAssertLessThan(caller.sentBytes - sentBefore, 5 * 80 + 4 * 80, "per-record framing saved") }
+        }
+    }
+
+    func testAlignedGattValuesFillWholeLePdusAndStillReassemble() throws {
+        XCTAssertEqual(GattChunk.valueBytes(valueLimit: 514, aligned: true), 495)
+        XCTAssertEqual(GattChunk.valueBytes(valueLimit: 400, aligned: true), 244)
+        XCTAssertEqual(GattChunk.valueBytes(valueLimit: 182, aligned: true), 182, "below one PDU the limit stays")
+        XCTAssertEqual(GattChunk.valueBytes(valueLimit: 514, aligned: false), 512)
+        var writer = GattChunkWriter(), reader = GattChunkReader()
+        let bytes = Data((0..<5_000).map { UInt8($0 % 251) })
+        let values = writer.chunks(bytes, valueLimit: 514, aligned: true)
+        XCTAssertTrue(values.allSatisfy { $0.count <= 495 })
+        var out = Data(); for v in values { out.append(try reader.accept(v, now: 0)) }
+        XCTAssertEqual(out, bytes)
+    }
+
     /// Replays the stalled iPhone -> M31 video call: a video backlog (link stalled) must never delay audio or
     /// heartbeats. Records are pulled one at a time, as a slow GATT link would: the first record after the
     /// backlog forms must be the heartbeat, the next the audio packet, and the peer must not time out.
