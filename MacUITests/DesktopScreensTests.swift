@@ -385,9 +385,21 @@ final class DesktopScreensTests: XCTestCase {
 
     /// Each reachability switch flips, survives a relaunch and flips back (preview preferences only; Start at login
     /// uses the preview stand-in, never the real Login Items). Unit tests cover the off-by-default values.
-    func testReachabilitySwitchesToggleAndPersistAcrossRelaunch() {
-        for key in ["desktop-menu-bar", "desktop-start-at-login", "desktop-ring-window-setting", "desktop-activity-media",
-                    "desktop-no-app-nap", "desktop-keep-awake"] {
+    // Two switches per test: each round trip relaunches twice, and six in one test passed the 60 s per-test limit.
+    func testMenuBarAndLoginSwitchesToggleAndPersistAcrossRelaunch() {
+        checkSwitchesPersistAcrossRelaunch(["desktop-menu-bar", "desktop-start-at-login"])
+    }
+
+    func testRingWindowAndMediaActivitySwitchesToggleAndPersistAcrossRelaunch() {
+        checkSwitchesPersistAcrossRelaunch(["desktop-ring-window-setting", "desktop-activity-media"])
+    }
+
+    func testAppNapAndKeepAwakeSwitchesToggleAndPersistAcrossRelaunch() {
+        checkSwitchesPersistAcrossRelaunch(["desktop-no-app-nap", "desktop-keep-awake"])
+    }
+
+    private func checkSwitchesPersistAcrossRelaunch(_ keys: [String]) {
+        for key in keys {
             var app = launch(["-NearbyScreen", "settings"])
             var toggle = app.descendants(matching: .any).matching(identifier: key).firstMatch
             XCTAssertTrue(reveal(toggle, in: app), key)
