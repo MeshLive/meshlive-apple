@@ -31,6 +31,11 @@ enum KeychainItem {
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
     }
+    static func delete(_ account: String) throws {
+        if DesktopPreview.enabled { return }
+        let status = SecItemDelete(base(account) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+    }
     static func deleteAll() {
         if DesktopPreview.enabled { return }
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)

@@ -756,7 +756,7 @@ final class AppModel: ObservableObject {
     }
     /// "Reset presence key": a new generation; contacts recognise this phone again after the next mutual call.
     func resetPresenceKey() {
-        rotating.vault.newGeneration(epoch: rotating.currentEpoch(), reason: "reset")
+        rotating.vault.resetKey()
         presenceGeneration = rotating.vault.generation
         refreshAdvertising()
     }
@@ -770,7 +770,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func resetContacts() { VerifiedContactsStore.reset(); book.reset(); contacts = []; contactsUnreadable = nil }
+    func resetContacts() {
+        VerifiedContactsStore.reset(); book.reset(); contacts = []; contactsUnreadable = nil
+        // Former contacts must stop recognising this phone: their records go and any delivered lease is revoked
+        // (a new presence generation), as Android's reset of the verified contacts.
+        rotating.vault.resetContacts(epoch: RotatingDiscoveryIds.currentWallEpoch())
+        presenceGeneration = rotating.vault.generation
+    }
 
     private func loadContacts() {
         switch VerifiedContactsStore.load() {
@@ -779,6 +785,11 @@ final class AppModel: ObservableObject {
         case .unreadable(let reason): contactsUnreadable = reason
         }
         contacts = book.contacts
+        // A contact forgotten or reset while the vault could not run is no longer a lease holder (Android
+        // PresenceVault.reconcile). Only from a store that was read: an unreadable one says nothing about contacts.
+        if contactsUnreadable == nil {
+            rotating.vault.reconcile(verified: book.contacts.compactMap { nodeId(of: $0) }, epoch: RotatingDiscoveryIds.currentWallEpoch())
+        }
     }
 
     private func saveContacts() throws {

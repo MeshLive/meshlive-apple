@@ -1,137 +1,101 @@
 import Foundation
 import NearbyCore
 
-/// EXPERIMENTAL rotating discovery IDs, phase 2 (Android PresenceVault/PresenceStore): persists PresenceVaultState (the
-/// rules live there and are unit-tested) as one Keychain item, this device only, deleted by the emergency wipe.
+/// EXPERIMENTAL rotating discovery IDs, phase 2 (Android PresenceVault/PresenceStore): the app side of
+/// `PresenceVaultCore` (the rules and the storage discipline live there and are unit-tested). The vault is one
+/// Keychain item, this device only, deleted by the emergency wipe; the generation floor lives in the preferences.
+///
+/// A Keychain read error is never taken for "nothing stored": the phone then advertises from an in-memory window,
+/// sends no OFFER, recognises nobody and never writes over the stored vault until it can be read again.
 ///
 /// Reinstall: iOS keeps Keychain items when the app is deleted, but not the app's files (the verified contacts) or its
 /// preferences. The first launch of a fresh install therefore drops every contact record and starts a new generation
-/// (marker `presenceVaultInstalled` in UserDefaults), so no phone that held the old keys recognises this one.
+/// (marker `presenceVaultInstalled` in UserDefaults, set once the vault could be read), so no phone that held the old
+/// keys recognises this one.
 final class PresenceVault {
     private static let account = "presence-vault"
     private static let installMarker = "presenceVaultInstalled"
-    private var state: PresenceVaultState
-    private let lock = NSLock()
+    private static let floorKey = "presenceGenerationFloor"
+    private let core: PresenceVaultCore
     let recognition = RecognitionTable()
-    /// False when the Keychain could not be read or written: the phone then advertises from memory, sends no OFFER
-    /// and stores nothing (Android: never regenerate over an unreadable store, no lease from a non-persistent vault).
-    private(set) var persistent = true
 
-    init(epoch: () -> Int64) {
-        var loaded = PresenceVaultState()
-        let existing = try? KeychainItem.read(Self.account)
-        if let data = existing ?? nil {
-            if let decoded = try? JSONDecoder().decode(PresenceVaultState.self, from: data) { loaded = decoded } else { persistent = false }
-        }
-        state = loaded
-        if !DesktopPreview.preferences.bool(forKey: Self.installMarker) {
-            if (existing ?? nil) != nil, persistent {
-                state.freshInstall(epoch: epoch())
-                AppLog.event("rotid_presence", ["event": "generation", "reason": "fresh_install", "generation": "\(state.generation)"])
-                save()
-            }
-            DesktopPreview.preferences.set(true, forKey: Self.installMarker)
+    private final class KeychainStorage: PresenceVaultStorage {
+        func read() throws -> Data? { try KeychainItem.read(PresenceVault.account) }
+        func write(_ data: Data) throws { try KeychainItem.write(PresenceVault.account, data) }
+        func delete() throws { try KeychainItem.delete(PresenceVault.account) }
+    }
+
+    private final class PreferencesFloor: PresenceGenerationFloor {
+        var value: UInt32 { UInt32(clamping: DesktopPreview.preferences.integer(forKey: PresenceVault.floorKey)) }
+        func raise(to value: UInt32) {
+            guard value > self.value else { return }
+            DesktopPreview.preferences.set(Int(value), forKey: PresenceVault.floorKey)
         }
     }
 
-    private func save() {
-        do { try KeychainItem.write(Self.account, try JSONEncoder().encode(state)); persistent = true }
-        catch { persistent = false; AppLog.event("rotid_presence", ["event": "store", "result": "write_failed"]) }
+    init(epoch: @escaping () -> Int64) {
+        let defaults = DesktopPreview.preferences
+        core = PresenceVaultCore(storage: KeychainStorage(), floor: PreferencesFloor(), epoch: epoch,
+                                 freshInstall: !defaults.bool(forKey: Self.installMarker),
+                                 onFreshInstallHandled: { defaults.set(true, forKey: PresenceVault.installMarker) })
+        core.log = { event, fields in
+            var all = fields; all["event"] = event
+            AppLog.event("rotid_presence", all)
+        }
+        if !core.persistent { AppLog.event("rotid_presence", ["event": "store", "result": "\(core.loadState)"]) }
     }
 
-    private func rolled(_ epoch: Int64) -> [Int64: Data] {
-        let next = DayKeyWindow.roll(state.dayKeys, epoch: epoch)
-        if next != state.dayKeys { state.dayKeys = next; save() }
-        return next
-    }
+    /// False while the Keychain could not be read or written: no OFFER is sent and nothing is stored.
+    var persistent: Bool { core.persistent }
+    var generation: UInt32 { core.generation }
 
-    var generation: UInt32 { lock.lock(); defer { lock.unlock() }; return state.generation }
-
-    func entry(nodeId: NodeId, epoch: Int64, role: UInt8) -> OpeningEntry {
-        lock.lock(); defer { lock.unlock() }
-        let keys = rolled(epoch)
-        return PresenceLeases.ownEntry(dayKeys: keys, nodeId: nodeId.bytes, epoch: epoch, role: role)
-            ?? RotatingDiscoveryIds.entry(saltKey: randomBytes(32), nodeId: nodeId.bytes, epoch: epoch, role: role)
-    }
-
-    func ownDayKey(epoch: Int64) -> Data? {
-        lock.lock(); defer { lock.unlock() }
-        return state.dayKeys[PresenceLeases.dayOf(epoch)]
-    }
-
-    func newGeneration(epoch: Int64, reason: String) {
-        lock.lock(); defer { lock.unlock() }
-        state.newGeneration(epoch: epoch)
-        save()
-        AppLog.event("rotid_presence", ["event": "generation", "generation": "\(state.generation)", "reason": reason])
-    }
-
-    func canSeeMe(_ peer: NodeId) -> Bool { lock.lock(); defer { lock.unlock() }; return state.canSeeMe(peer.hex) }
-
+    func entry(nodeId: NodeId, epoch: Int64, role: UInt8) -> OpeningEntry { core.entry(nodeId: nodeId, epoch: epoch, role: role) }
+    func ownDayKey(epoch: Int64) -> Data? { core.dayKey(idEpoch: epoch, currentEpoch: epoch) }
+    func newGeneration(epoch: Int64, reason: String) { core.newGeneration(reason: reason) }
+    func canSeeMe(_ peer: NodeId) -> Bool { core.canSeeMe(peer) }
     func setCanSeeMe(_ peer: NodeId, _ on: Bool, epoch: Int64) {
-        lock.lock(); defer { lock.unlock() }
-        if state.setCanSeeMe(peer.hex, on, epoch: epoch) {
-            AppLog.event("rotid_presence", ["event": "generation", "generation": "\(state.generation)", "reason": "contact_switch_off"])
-        }
-        save()
+        core.setCanSeeMe(peer, on)
+        rebuildRecognition(myEpoch: epoch)
     }
 
     /// The lease for a verified contact, recorded as delivered before it is returned (RD1); nil when not eligible.
     func deliverLease(to peer: NodeId, epoch: Int64, verified: Bool) -> DiscoveryExchange.PresenceLease? {
-        lock.lock(); defer { lock.unlock() }
-        guard verified, persistent, state.canSeeMe(peer.hex) else { return nil }
-        let keys = rolled(epoch)
-        guard let lease = PresenceLeases.delivery(dayKeys: keys, generation: state.generation, epoch: epoch) else { return nil }
-        var record = state.contacts[peer.hex] ?? PresenceVaultState.ContactRecord()
-        record.deliveredGeneration = state.generation
-        state.contacts[peer.hex] = record
-        save()
-        guard persistent else { return nil }
-        return lease
+        core.deliverLease(to: peer, epoch: epoch, verified: verified)
     }
-
-    func deliveredTo(_ peer: NodeId) -> Bool { lock.lock(); defer { lock.unlock() }; return state.holdsCurrentLease(peer.hex) }
+    func deliveredTo(_ peer: NodeId) -> Bool { core.deliveredTo(peer) }
 
     func store(_ lease: DiscoveryExchange.PresenceLease, from peer: NodeId, myEpoch: Int64) {
-        lock.lock()
-        var record = state.contacts[peer.hex] ?? PresenceVaultState.ContactRecord()
-        let stored = record.leaseGeneration == 0 ? nil : ContactPresence(nodeId: peer.bytes, generation: record.leaseGeneration, leasesByDay: record.leases,
-                                                                        skewEpochs: record.leaseSkew, receivedAt: record.leaseReceivedAt)
-        let next = ContactPresence.receive(stored: stored, nodeId: peer.bytes, lease: lease, myEpoch: myEpoch, now: Date().timeIntervalSince1970)
-        record.leaseGeneration = next.generation; record.leaseSkew = next.skewEpochs
-        record.leaseReceivedAt = next.receivedAt; record.leases = next.leasesByDay
-        state.contacts[peer.hex] = record
-        save()
-        lock.unlock()
-        AppLog.event("rotid_presence", ["event": "lease_stored", "days": "\(next.leasesByDay.count)"])
+        if core.store(lease, from: peer, myEpoch: myEpoch, now: Date().timeIntervalSince1970) {
+            AppLog.event("rotid_presence", ["event": "lease_stored"])
+        }
         rebuildRecognition(myEpoch: myEpoch)
     }
 
-    func leaseKey(of contact: Data, day: Int64) -> Data? {
-        lock.lock(); defer { lock.unlock() }
-        return state.contacts[contact.hex]?.leases[day]
-    }
+    func leaseKey(of contact: Data, day: Int64) -> Data? { core.leaseKey(of: contact, day: day) }
 
     func forget(_ peer: NodeId, epoch: Int64) {
-        lock.lock()
-        if state.forget(peer.hex, epoch: epoch) {
-            AppLog.event("rotid_presence", ["event": "generation", "generation": "\(state.generation)", "reason": "forget"])
-        }
-        save()
-        lock.unlock()
+        core.forget(peer)
         rebuildRecognition(myEpoch: epoch)
     }
 
+    /// The verified contacts were reset: drop every contact record (revoking any delivered lease).
+    func resetContacts(epoch: Int64) {
+        core.resetContacts()
+        rebuildRecognition(myEpoch: epoch)
+    }
+
+    /// Drops the records of contacts that are no longer verified (a Forget or reset this vault did not see).
+    func reconcile(verified: [NodeId], epoch: Int64) {
+        core.reconcile(verified: Set(verified.map(\.hex)))
+        rebuildRecognition(myEpoch: epoch)
+    }
+
+    /// "Reset presence key" (also the recovery from a vault that no longer decodes).
+    func resetKey() { core.resetKey() }
+
+    /// Rolls the window, stores the pruned lease days, and rebuilds the recognition table for `myEpoch`.
     func rebuildRecognition(myEpoch: Int64) {
-        lock.lock()
-        var contacts: [ContactPresence] = []
-        for (hex, record) in state.contacts where record.leaseGeneration > 0 {
-            guard let id = Data(hex: hex) else { continue }
-            let presence = ContactPresence(nodeId: id, generation: record.leaseGeneration, leasesByDay: record.leases,
-                                           skewEpochs: record.leaseSkew, receivedAt: record.leaseReceivedAt)
-            if let kept = presence.pruned(myEpoch: myEpoch) { contacts.append(kept) }
-        }
-        lock.unlock()
-        recognition.rebuild(contacts, myEpoch: myEpoch, now: Date().timeIntervalSince1970)
+        core.maintain(epoch: myEpoch)
+        recognition.rebuild(core.leaseHolders(myEpoch: myEpoch), myEpoch: myEpoch, now: Date().timeIntervalSince1970)
     }
 }
