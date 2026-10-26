@@ -20,6 +20,8 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
     private let queue = DispatchQueue(label: "io.github.meshlive.app.camera", qos: .userInitiated)
     private var encoder: VP9Encoder?
     private var forceKeyFrame = true
+    /// First-frame check (LeadingBlankFrames); dropping is Experimental, `-dropLeadingBlankFrames YES`.
+    private var blankCheck = LeadingBlankFrames(dropBlank: UserDefaults.standard.bool(forKey: "dropLeadingBlankFrames"))
     private var lastFrameUptime: TimeInterval = 0
     private(set) var width: Int, height: Int, fps: Int, bitrateKbps: Int
     private(set) var front: Bool
@@ -182,6 +184,14 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         guard now - lastFrameUptime >= 1.0 / Double(fps) * 0.9, let encoder else { skippedFrames += 1; return }
         guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer),
               let picture = PixelConversion.i420(from: pixels, width: width, height: height) else { conversionFailures += 1; return }
+        // First-frame check: count (and with the experiment on, drop) the camera's leading black buffers.
+        let checking = !blankCheck.done
+        if blankCheck.shouldDrop(picture, now: now) { return }
+        if checking && blankCheck.done {
+            AppLog.event("camera_leading_blank", ["blank": "\(blankCheck.blankFrames)", "dropped": "\(blankCheck.droppedFrames)",
+                                                  "firstRealMs": blankCheck.firstRealAt.map { "\(Int(($0 - startUptime) * 1000))" } ?? "-",
+                                                  "enabled": "\(blankCheck.dropBlank)"])
+        }
         lastFrameUptime = now
         let pts = Int64((now - startUptime) * 1_000_000)
         do {
