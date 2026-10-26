@@ -210,6 +210,12 @@ struct AdvancedPrivacyView: View {
                 SettingsToggleRow(icon: "arrow.triangle.branch", title: "Relayed calls",
                                   info: "Experimental. Calls that reach you through another phone ring only with this on. A relaying phone cannot hear or see the call, but if you answer an unverified stranger, your identity is revealed to whoever holds the call, which may be a relaying phone.",
                                   isOn: $model.relayedCalls)
+                if model.relayedCalls {
+                    CardDivider()
+                    SettingsToggleRow(icon: "arrow.left.arrow.right", title: "Help calls nearby",
+                                      info: "Experimental. While this device is idle, it can pass one call between two people nearby. It cannot hear or see the call. It stops when you use it, and pauses on low battery or in Low Power Mode.",
+                                      isOn: $model.relayedCallsHelp)
+                }
             }
             .padding(.top, 8)
             Card {

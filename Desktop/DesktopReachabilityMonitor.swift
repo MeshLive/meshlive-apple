@@ -78,7 +78,7 @@ final class DesktopReachabilityMonitor: ObservableObject {
     }
 
     private func observeChildren(of model: AppModel) {
-        let children: [AnyObject?] = [model.call, model.watch, model.live, model.callRelay]
+        let children: [AnyObject?] = [model.call, model.watch, model.live, model.callRelay, model.relayDuty]
         let ids = children.compactMap { $0.map(ObjectIdentifier.init) }
         guard ids != observedChildren else { return }
         observedChildren = ids
@@ -101,7 +101,7 @@ final class DesktopReachabilityMonitor: ObservableObject {
         }
         if let live = model.live, live.running { p.liveSource = true; p.liveVideo = !live.audioOnly }
         if let watch = model.watch, watch.ended == nil { p.watching = true; p.watchVideo = !watch.isRadio }
-        p.relayingCall = model.callRelay != nil
+        p.relayingCall = model.callRelay != nil || model.relayDuty != nil
         p.appActive = NSApp.isActive
         return p
     }

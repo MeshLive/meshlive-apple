@@ -106,6 +106,18 @@ final class CallController: ObservableObject, Identifiable {
     /// Why the route failed before READY (a first hop that could not be connected or closed early counts as a timeout).
     var relayFailure: RelaySetupFailure? { engine.relaySetupFailure ?? (relayConnectFailed || engine.relayedRouteFailed ? .timeout : nil) }
     var userCancelled = false
+
+    /// Design C: this listener's link is taken over by a relay duty. The engine already stopped silently; the driver
+    /// stops without closing the link, timers stop, and nothing is shown or remembered. Returns the link.
+    func abandonForRelay() -> (link: MeshLink, engine: CallEngine)? {
+        guard let driver else { return nil }
+        driver.detach()
+        self.driver = nil
+        statsTimer?.invalidate(); statsTimer = nil
+        ringer.stop()
+        ended = ""
+        return (driver.link, engine)
+    }
     /// The stranger notice under a ring (nil for a contact): a relayed stranger call names the possible relay in the middle.
     @Published var ringNotice: String?
 
@@ -1252,6 +1264,84 @@ final class LiveController: ObservableObject {
 
 /// One relay hop for one call: child (callee or next relay) first as central, then one parent as peripheral.
 /// End-to-end records are copied unchanged; this phone never sees the call's audio or video.
+/// EXPERIMENTAL relayed calls (Design C): this phone helps one call (its listener's first record was SETUP).
+final class RelayDutyController: ObservableObject {
+    weak var model: AppModel?
+    let duty: RelayHelperDuty
+    @Published var state = "Connecting a call for a phone near you"
+    private var parentDriver: ConnectionDriver?
+    private var childDriver: ConnectionDriver?
+    private var timer: Timer?
+    private var done = false
+
+    init(model: AppModel, duty: RelayHelperDuty, parentLink: MeshLink) {
+        self.model = model; self.duty = duty
+        let driver = ConnectionDriver(engine: duty.parent, link: parentLink)
+        driver.onFinished = { [weak self] reason in self?.duty.close("Parent link: \(reason)") }
+        parentDriver = driver
+        duty.onStateChange = { [weak self] s in self?.stateChanged(s) }
+        duty.onIngressResumable = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, !self.done else { return }
+                self.duty.resumeIngress(now: ConnectionDriver.now)
+                self.childDriver?.pump(); self.parentDriver?.pump()
+            }
+        }
+        duty.parent.onRecordCopied = { [weak self] in self?.parentDriver?.pump() }
+        driver.start(adopted: true)
+        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.duty.tick(now: ConnectionDriver.now)
+            self.childDriver?.pump(); self.parentDriver?.pump()
+        }
+    }
+
+    /// Refused: FAIL goes out on the parent, then everything closes.
+    func refuse(_ reason: RelaySetupFailure) {
+        duty.refuse(reason); parentDriver?.pump()
+    }
+
+    /// The onward link opened: run the duty's child on it.
+    func attachChild(_ link: MeshLink, next: RelayHelperDuty.NextHop, bmh3: Bmh3CallSettings?) {
+        guard !done else { link.close(); return }
+        let child = duty.makeChildLink(next: next, bmh3: bmh3)
+        child.onRecordCopied = { [weak self] in self?.childDriver?.pump() }
+        let driver = ConnectionDriver(engine: child, link: link)
+        driver.onFinished = { [weak self] reason in self?.duty.close("Child link: \(reason)") }
+        childDriver = driver
+        driver.start()
+    }
+
+    func childConnectFailed(_ reason: String) { duty.childConnectFailed(reason); parentDriver?.pump() }
+
+    private func stateChanged(_ s: RelayHelperDuty.State) {
+        parentDriver?.pump(); childDriver?.pump()
+        switch s {
+        case .connectingNext, .waitingForNext: state = "Connecting a call for a phone near you"
+        case .relaying:
+            state = "Passing a call on"
+            AppLog.event("relayed_setup", ["role": "helper", "result": "ready", "relays": "\(duty.readyRelays ?? 0)"])
+        case .closed(let reason):
+            guard !done else { return }
+            done = true
+            timer?.invalidate(); timer = nil
+            if let failure = duty.failure {
+                AppLog.event("relayed_setup", ["role": "helper", "result": "failed", "reason": failure.label])
+            }
+            AppLog.event("relayed_helper", ["event": "relay_ended", "reason": reason, "copiedToCallee": "\(duty.child?.copiedRecords ?? 0)",
+                                            "copiedToCaller": "\(duty.parent.copiedRecords)"])
+            // Let a FAIL drain before the links go.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self else { return }
+                self.childDriver?.cancel(); self.parentDriver?.cancel()
+                self.model?.relayDutyFinished(self)
+            }
+        }
+    }
+
+    func preempt() { duty.close("This device is needed for something else") }
+}
+
 final class CallRelayController: ObservableObject {
     weak var model: AppModel?
     let row: UUID

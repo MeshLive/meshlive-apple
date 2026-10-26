@@ -368,9 +368,20 @@ final class ConnectionDriver {
         // The owner can leave while a graceful transport drain is blocked. Release its radio slot
         // and run-loop timer even when there will be no further writable callback.
         timer?.invalidate()
+        guard !detached else { return }
         link.onBytes = nil; link.onWritable = nil; link.onClosed = nil
         link.close()
         #endif
+    }
+
+    /// The link moves to another engine (a helper listener's link adopted by a relay duty): this driver stops
+    /// without closing it and without reporting a finish.
+    private var detached = false
+    func detach() {
+        detached = true; closing = true
+        timer?.invalidate(); timer = nil
+        link.onBytes = nil; link.onWritable = nil; link.onClosed = nil
+        onFinished = nil
     }
 
     init(engine: MeshConnection, link: MeshLink) {
@@ -400,8 +411,10 @@ final class ConnectionDriver {
     }
     #endif
 
-    func start() {
-        do { try engine.start(now: Self.now) } catch { engine.fail("\(error)") }
+    /// - Parameter adopted: the engine took over an already authenticated link (no start, parse what it buffered).
+    func start(adopted: Bool = false) {
+        if adopted { engine.processBufferedInput(now: Self.now) }
+        else { do { try engine.start(now: Self.now) } catch { engine.fail("\(error)") } }
         pump()
         #if os(macOS)
         // A synchronous setup/send failure may already have finished the driver in pump().

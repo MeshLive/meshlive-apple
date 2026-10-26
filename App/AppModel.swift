@@ -657,7 +657,7 @@ final class AppModel: ObservableObject {
                                                  streamBitrateKbps: offer.streamBitrateKbps)
         } else if let live, live.running {
             announcement = live.offerAnnouncement(prefix: prefix)
-        } else if availableForCalls, call == nil, watch == nil, callRelay == nil {
+        } else if availableForCalls, call == nil, watch == nil, callRelay == nil, relayDuty == nil {
             #if os(macOS)
             desktopCallPresence = .fixed
             #endif
@@ -677,7 +677,7 @@ final class AppModel: ObservableObject {
             }
             // Relayed calls: the consent bit (this phone may be found and called through other phones).
             if relayedCalls, let offer = announcement {
-                announcement = RelayedCalls.offerFor(offer, consentOn: true, helperActive: false, rotatingCompat: true)
+                announcement = RelayedCalls.offerFor(offer, consentOn: true, helperActive: relayHelperActive, rotatingCompat: true)
             }
         }
         #if os(macOS)
@@ -700,14 +700,16 @@ final class AppModel: ObservableObject {
     private func handleIncoming(_ link: MeshLink) {
         if let relay = callRelay, relay.awaitingParent { relay.attachParent(link); refreshAdvertising(); return }
         if let watch, watch.awaitingSource { watch.attach(link); refreshAdvertising(); return }
-        if (call != nil || placingCall), availableForCalls, let identity,
+        if (call != nil || placingCall || relayDuty != nil), availableForCalls, let identity,
            UserDefaults.standard.object(forKey: "callBusyDecline") as? Bool ?? true { declineBusy(link, identity: identity); return }
         guard call == nil, availableForCalls, let identity else { link.close(); return }
         let pins = rotating.pins
         let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
                                         identity: identity, transport: link.transport, type: .video, relayHops: 0,
                                         rotating: rotatingIds ? withPresence(RotatingCallOptions(entries: { pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) })) : nil,
-                                        bmh3: bmh3Options(selected: nil), relayed: relayedCalls ? RelayedCallOptions(featureOn: true) : nil)
+                                        bmh3: bmh3Options(selected: nil),
+                                        relayed: relayedCalls ? RelayedCallOptions(featureOn: true, helperActive: relayHelperActive,
+                                                                                   acceptRdi: rotatingIds) : nil)
         call = controller
         controller.attach(link)
         refreshAdvertising()
@@ -755,6 +757,7 @@ final class AppModel: ObservableObject {
     /// Asks for the microphone (and camera for video) first, so the system prompt never interrupts media.
     /// A call is just a call with Mute; while muted, holding Mute talks (no separate push-to-talk mode).
     func startCall(to person: PersonRow, type: CallType) {
+        relayDuty?.preempt()   // the user's own activity ends a relay at once (Design C, C5)
         guard call == nil, !placingCall, identity != nil else { return }
         placingCall = true; callNotice = nil
         let tappedAt = ProcessInfo.processInfo.systemUptime
@@ -897,11 +900,105 @@ final class AppModel: ObservableObject {
 
     // MARK: Experimental relayed calls (Design C), helper
 
-    /// A helper listener read SETUP as its first record. Helping is not switched on yet: no listener signs the helper
-    /// marks, so this cannot happen; refuse defensively by ending the connection.
+    @Published var relayedCallsHelp = AppSettings.relayedCallsHelp {
+        didSet { AppSettings.relayedCallsHelp = relayedCallsHelp; refreshAdvertising() }
+    }
+    /// The relayed call this device is passing on (at most one, PROTOCOL rule 7).
+    @Published var relayDuty: RelayDutyController?
+    private let relaySetupLimiter = RelaySetupRateLimiter()
+
+    /// Why helping is paused (battery or Low Power Mode, as Android RelayHelperPolicy), or nil.
+    var relayHelperPause: String? {
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return "low power mode" }
+        #if os(iOS)
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let level = UIDevice.current.batteryLevel
+        if level >= 0 && level < 0.2 && UIDevice.current.batteryState == .unplugged { return "low battery" }
+        #endif
+        return nil
+    }
+
+    /// This device helps right now: relayed calls and Help on, idle (no call, stream, relay or dial), not paused.
+    var relayHelperActive: Bool {
+        relayedCalls && relayedCallsHelp && relayHelperPause == nil && call == nil && watch == nil && live == nil
+            && callRelay == nil && relayDuty == nil && !placingCall
+    }
+
+    /// A helper listener read SETUP as its first record: admit it (PROTOCOL setup rule 2), take over the link and dial
+    /// the next hop from this device's own reach table, or answer FAIL.
     func relaySetupRequested(by controller: CallController, message: RelaySetupMessage) {
-        AppLog.event("relayed_setup", ["role": "helper", "result": "refused", "reason": "not_helping"])
-        controller.end()
+        guard case let .setup(target, budget, remaining, setupId, rotatingTarget) = message, let identity,
+              call === controller, let (link, engine) = controller.abandonForRelay() else { controller.end(); return }
+        #if os(macOS)
+        desktopCallLinkFinished(controller)
+        #endif
+        call = nil
+        let now = ConnectionDriver.now
+        let parent = CallRelayLink(adopting: engine)
+        let duty = RelayHelperDuty(identity: identity, transport: link.transport, parent: parent,
+                                   request: .init(target: target, budget: budget, remainingMs: remaining, setupId: setupId, rotating: rotatingTarget), now: now)
+        let relay = RelayDutyController(model: self, duty: duty, parentLink: link)
+        relayDuty = relay
+        refreshAdvertising()
+        // Admission, cheap checks first, table last.
+        let parentId = parent.peerLinkNodeId
+        let pseudonymousParent = parent.linkPeerPseudonymous
+        let limiterKey = RelaySetupRateLimiter.key(parentPrefixHex: parentId?.prefix.hex ?? "", pseudonymous: pseudonymousParent, remoteAddress: nil)
+        var inputs = RelaySetupInputs()
+        // SETUP only from a parent whose link hello signed bit 4 ("understands RELAY_SETUP").
+        inputs.featureOn = relayedCalls && parent.peerLinkCapabilities.map(RelayedCalls.linkUnderstandsSetup) == true
+        inputs.helperAllowed = relayedCallsHelp
+        inputs.paused = relayHelperPause != nil
+        inputs.busy = false   // this listener was idle when it signed the marks
+        inputs.rateLimited = !relaySetupLimiter.tryAdmit(limiterKey, nowMs: MeshRadio.reachClockMs)
+        let ownIds: [Data] = [identity.nodeId.prefix] + (rotatingIds ? [rotating.callEntry(nodeId: identity.nodeId).rdi] : [])
+        inputs.targetIsSelf = ownIds.contains(target)
+        inputs.parentIsSelf = parentId == identity.nodeId
+        inputs.parentIsTarget = !pseudonymousParent && parentId?.prefix == target
+        inputs.budget = budget
+        inputs.maxRelays = RelayedCalls.defaultMaxRelays
+        let table = rotatingTarget ? radio.reachRotating : radio.reachFixed
+        let sameBearer: (DiscoveryAnnouncement) -> Bool = { $0.transport == link.transport }
+        let route = table?.setupRoute(target, budget: budget, accept: sameBearer)
+        inputs.routeAvailable = route != nil
+        // Amendment CP: a rotating helper answers a fixed-prefix SETUP (message 1) with FAIL 5.
+        let refusal = RelaySetupAdmission.refusal(inputs)
+            ?? (rotatingIds && !rotatingTarget && AppSettings.relayedPseudonymousEdges ? .refused : nil)
+        if let refusal {
+            AppLog.event("relayed_setup", ["role": "helper", "result": "refused", "budget": "\(budget)", "reason": refusal.label])
+            relay.refuse(refusal); return
+        }
+        guard let route else { relay.refuse(.noRoute); return }
+        let next = RelayHelperDuty.NextHop(hopPrefix: route.nextHop, nextBudget: route.nextHop == nil ? 0 : budget - 1)
+        AppLog.event("relayed_setup", ["role": "helper", "result": "accepted", "budget": "\(budget)", "next_budget": "\(next.nextBudget)",
+                                       "next": route.nextHop == nil ? "target" : "helper"])
+        let onward = relayOnwardBmh3(hop: route.hop.announcement)
+        _ = radio.connect(to: route.hop.peer, transport: link.transport) { [weak relay] result in
+            guard let relay else { if case .success(let l) = result { l.close() }; return }
+            switch result {
+            case .success(let childLink): relay.attachChild(childLink, next: next, bmh3: onward)
+            case .failure(let error): relay.childConnectFailed("\(error)")
+            }
+        }
+    }
+
+    /// Amendment CP: an onward relay edge in pseudonym mode speaks BMH3 with a declared throwaway, fresh per
+    /// connection, no tag, nothing pinned; otherwise the direct-call choice with this device's real key.
+    private func relayOnwardBmh3(hop: DiscoveryAnnouncement) -> Bmh3CallSettings? {
+        guard hiddenIdentities else { return nil }
+        if bmh3Pseudonyms && rotatingIds && AppSettings.relayedPseudonymousEdges {
+            let settings = Bmh3CallSettings(speak: true, stranger: SoftwareSigningIdentity())
+            settings.linkTag = false
+            return settings
+        }
+        guard Bmh3Choice.decide(enabled: true, only: false, offer: hop, pinned: bmh3Pins.isPinned(hop.nodeIdPrefix)).bmh3 else { return nil }
+        return Bmh3CallSettings(speak: true)
+    }
+
+    func relayDutyFinished(_ relay: RelayDutyController) {
+        guard relayDuty === relay else { return }
+        relayDuty = nil
+        refreshAdvertising()
     }
 
     // MARK: Contact dial wait (relayed calls)
