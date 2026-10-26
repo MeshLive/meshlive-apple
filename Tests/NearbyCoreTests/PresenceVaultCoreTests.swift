@@ -7,12 +7,18 @@ import XCTest
 final class PresenceVaultCoreTests: XCTestCase {
     let epoch: Int64 = 1_990_656
 
+    /// The order of durable writes across the vault and its guard (to check what is stored before what).
+    final class WriteLog { var entries: [String] = [] }
     final class Storage: PresenceVaultStorage {
         var data: Data?
         var readFails = false, writeFails = false, deleteFails = false
         var writes = 0
+        var log: WriteLog?
         func read() throws -> Data? { if readFails { throw ProtocolError.state("locked") }; return data }
-        func write(_ value: Data) throws { if writeFails { throw ProtocolError.state("locked") }; data = value; writes += 1 }
+        func write(_ value: Data) throws {
+            if writeFails { throw ProtocolError.state("locked") }
+            data = value; writes += 1; log?.entries.append("vault")
+        }
         func delete() throws { if deleteFails { throw ProtocolError.state("locked") }; data = nil }
         var state: PresenceVaultState? { data.flatMap { try? JSONDecoder().decode(PresenceVaultState.self, from: $0) } }
     }
@@ -20,14 +26,23 @@ final class PresenceVaultCoreTests: XCTestCase {
         var data: Data?
         var readFails = false, writeFails = false
         func read() throws -> Data? { if readFails { throw ProtocolError.state("protected") }; return data }
-        func write(_ value: Data) throws { if writeFails { throw ProtocolError.state("protected") }; data = value }
+        var log: WriteLog?
+        func write(_ value: Data) throws {
+            if writeFails { throw ProtocolError.state("protected") }
+            data = value; log?.entries.append("guard")
+        }
         var record: PresenceVaultGuard? { data.flatMap { try? JSONDecoder().decode(PresenceVaultGuard.self, from: $0) } }
+        func set(_ record: PresenceVaultGuard) { data = try? JSONEncoder().encode(record) }
     }
+    static let secret = Data(repeating: 0x5a, count: PresenceVaultCore.guardSecretBytes)
     final class Clock { var now: TimeInterval = 100 }
 
     private func vault(_ storage: Storage, _ guardStore: GuardStore = GuardStore(), clock: Clock = Clock(), freshInstall: Bool = false,
+                       legacyFloor: UInt32? = nil, onLegacyImported: @escaping () -> Void = {},
                        onFresh: @escaping () -> Void = {}) -> PresenceVaultCore {
-        PresenceVaultCore(storage: storage, guardStorage: guardStore, epoch: { self.epoch }, uptime: { clock.now },
+        PresenceVaultCore(storage: storage, guardStorage: guardStore, guardSecret: { Self.secret },
+                          legacyFloor: { legacyFloor }, onLegacyFloorImported: onLegacyImported,
+                          epoch: { self.epoch }, uptime: { clock.now },
                           freshInstall: freshInstall, onFreshInstallHandled: onFresh)
     }
     private func node(_ byte: UInt8) throws -> NodeId { try NodeId(bytes: Data(repeating: byte, count: 16)) }
@@ -268,6 +283,102 @@ final class PresenceVaultCoreTests: XCTestCase {
         XCTAssertEqual(stored.state?.contacts[try node(1).hex]?.canSeeMe, false)
     }
 
+    /// A switch-off of a lease holder: the revocation and the switch-off reach the guard before the vault is written,
+    /// and every crash point leaves either the old window revoked or the new one stored with the contact switched off.
+    func testASwitchOffIsRecordedBeforeTheVaultAndNoCrashPointLeavesTheOldKeysValid() throws {
+        let stored = Storage(), guardStore = GuardStore(), log = WriteLog()
+        let mine = vault(stored, guardStore)
+        let contact = try node(1)
+        XCTAssertNotNil(mine.deliverLease(to: contact, epoch: epoch, verified: true))
+        let old = try XCTUnwrap(stored.state)
+        stored.log = log; guardStore.log = log
+        XCTAssertTrue(mine.setCanSeeMe(contact, false))
+        XCTAssertEqual(log.entries.first, "guard", "the guard is written first")
+        let vaultIndex = try XCTUnwrap(log.entries.firstIndex(of: "vault"))
+        XCTAssertTrue(log.entries[..<vaultIndex].contains("guard"))
+        XCTAssertEqual(stored.state?.contacts[contact.hex]?.canSeeMe, false, "switch-off and new window in one write")
+        XCTAssertGreaterThan(try XCTUnwrap(stored.state).generation, old.generation)
+
+        // Crash after the guard, before the vault: the old generation is revoked at the next load.
+        do {
+            let s = Storage(), g = GuardStore()
+            XCTAssertNotNil(vault(s, g).deliverLease(to: contact, epoch: epoch, verified: true))
+            let before = try XCTUnwrap(s.state)
+            s.writeFails = true
+            _ = vault(s, g).setCanSeeMe(contact, false)
+            XCTAssertEqual(g.record?.revokedThrough, before.generation)
+            s.writeFails = false
+            let restarted = vault(s, g)
+            XCTAssertGreaterThan(try XCTUnwrap(s.state).generation, before.generation)
+            XCTAssertFalse(restarted.canSeeMe(contact))
+            XCTAssertFalse(restarted.deliveredTo(contact))
+        }
+        // The state an earlier order could leave: the switch-off stored, the guard entry kept, but no revocation.
+        do {
+            let s = Storage(), g = GuardStore()
+            XCTAssertNotNil(vault(s, g).deliverLease(to: contact, epoch: epoch, verified: true))
+            var crashed = try XCTUnwrap(s.state)
+            crashed.contacts[contact.hex]?.canSeeMe = false
+            s.data = try JSONEncoder().encode(crashed)
+            var record = try XCTUnwrap(g.record)
+            record.switchOffPending = [PresenceVaultCore.guardKey(contact.hex, secret: Self.secret)]
+            g.set(record)
+            let restarted = vault(s, g)
+            XCTAssertGreaterThan(try XCTUnwrap(s.state).generation, crashed.generation, "the pending entry still revokes")
+            XCTAssertFalse(restarted.deliveredTo(contact))
+            XCTAssertEqual(g.record?.switchOffPending, [])
+        }
+        // Crash after the new window was stored, before the guard entry was cleared: nothing more to revoke.
+        do {
+            let s = Storage(), g = GuardStore()
+            let first = vault(s, g)
+            XCTAssertNotNil(first.deliverLease(to: contact, epoch: epoch, verified: true))
+            XCTAssertTrue(first.setCanSeeMe(contact, false))
+            let after = try XCTUnwrap(s.state)
+            var record = try XCTUnwrap(g.record)
+            record.switchOffPending = [PresenceVaultCore.guardKey(contact.hex, secret: Self.secret)]
+            g.set(record)
+            let restarted = vault(s, g)
+            XCTAssertEqual(s.state?.generation, after.generation)
+            XCTAssertFalse(restarted.canSeeMe(contact))
+            XCTAssertEqual(g.record?.switchOffPending, [], "settled")
+        }
+    }
+
+    /// An earlier build kept only a floor in the preferences, raised before a revocation it then failed to store.
+    func testTheLegacyFloorIsImportedSoAnEarlierFailedRevocationStillHolds() throws {
+        let stored = Storage()
+        XCTAssertNotNil(vault(stored, GuardStore()).deliverLease(to: try node(1), epoch: epoch, verified: true))
+        let old = try XCTUnwrap(stored.state)
+        let guardStore = GuardStore()                       // no guard file yet
+        var imported = 0
+        let upgraded = vault(stored, guardStore, legacyFloor: old.generation + 1) { imported += 1 }
+        XCTAssertEqual(imported, 1, "the old key is removed once the guard holds the floor")
+        XCTAssertGreaterThan(try XCTUnwrap(stored.state).generation, old.generation + 1, "the revoked window is not used")
+        XCTAssertFalse(upgraded.deliveredTo(try node(1)))
+        XCTAssertGreaterThanOrEqual(guardStore.record?.floor ?? 0, old.generation + 1)
+
+        let unwritable = GuardStore(); unwritable.writeFails = true
+        var importedAgain = 0
+        _ = vault(Storage(), unwritable, legacyFloor: 5) { importedAgain += 1 }
+        XCTAssertEqual(importedAgain, 0, "kept until the guard could be written")
+    }
+
+    func testGuardKeysAreKeyedByTheDeviceSecret() {
+        let peer = String(repeating: "ab", count: 16)
+        let other = Data(repeating: 1, count: PresenceVaultCore.guardSecretBytes)
+        XCTAssertNotEqual(PresenceVaultCore.guardKey(peer, secret: Self.secret), PresenceVaultCore.guardKey(peer, secret: other))
+        XCTAssertEqual(PresenceVaultCore.guardKey(peer, secret: Self.secret).count, 32)
+    }
+
+    func testWithoutItsSecretTheGuardIsUnusable() throws {
+        let stored = Storage()
+        let mine = PresenceVaultCore(storage: stored, guardStorage: GuardStore(), guardSecret: { throw ProtocolError.state("locked") },
+                                     epoch: { self.epoch })
+        XCTAssertFalse(mine.persistent)
+        XCTAssertNil(mine.deliverLease(to: try node(1), epoch: epoch, verified: true))
+    }
+
     func testAFreshInstallDropsContactsOnceTheVaultCanBeRead() throws {
         let stored = Storage()
         _ = vault(stored).deliverLease(to: try node(1), epoch: epoch, verified: true)
@@ -298,5 +409,20 @@ final class DurableFileTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: url), Data("two".utf8))
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), ["guard.json"])
         XCTAssertThrowsError(try DurableFile.write(Data("x".utf8), to: dir.appendingPathComponent("missing/guard.json")))
+    }
+
+    /// No silent fallback: a refused flush of the file or of the directory is a failed write.
+    func testAFailedFlushIsReportedAsNotStored() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("durable-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("guard.json")
+        try DurableFile.write(Data("old".utf8), to: url)
+        XCTAssertThrowsError(try DurableFile.write(Data("new".utf8), to: url, options: [], fullSync: { _ in -1 }))
+        XCTAssertEqual(try Data(contentsOf: url), Data("old".utf8), "a file that was not flushed never replaces the old one")
+        var calls = 0
+        XCTAssertThrowsError(try DurableFile.write(Data("new".utf8), to: url, options: [], fullSync: { _ in calls += 1; return calls == 1 ? 0 : -1 }),
+                             "the directory flush failing is a failure too")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), ["guard.json"])
     }
 }

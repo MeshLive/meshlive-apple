@@ -1,10 +1,11 @@
 import Foundation
+import Security
 import NearbyCore
 
 /// EXPERIMENTAL rotating discovery IDs, phase 2 (Android PresenceVault/PresenceStore): the app side of
 /// `PresenceVaultCore` (the rules and the storage discipline live there and are unit-tested). The vault is one
 /// Keychain item, this device only, deleted by the emergency wipe; its guard record (generation floor, revocations,
-/// pending switch-offs) is a durably written file.
+/// pending switch-offs) is a file replaced atomically and flushed (`DurableFile`).
 ///
 /// A Keychain read error is never taken for "nothing stored": the phone then advertises from an in-memory window,
 /// sends no OFFER, recognises nobody and never writes over the stored vault until it can be read again.
@@ -14,7 +15,12 @@ import NearbyCore
 /// (marker `presenceVaultInstalled` in UserDefaults, set once the vault could be read), so no phone that held the old
 /// keys recognises this one.
 final class PresenceVault {
-    private static let account = "presence-vault"
+    static let account = "presence-vault"
+    /// The random secret that keys the guard's contact hashes: readable after the first unlock, this device only.
+    static let guardSecretAccount = "presence-guard-key"
+    /// Where an earlier build kept the generation floor (imported into the guard once, then removed).
+    private static let legacyFloorKey = "presenceGenerationFloor"
+    static var guardURL: URL { GuardFile.url }
     private static let installMarker = "presenceVaultInstalled"
     private let core: PresenceVaultCore
     let recognition = RecognitionTable()
@@ -27,7 +33,7 @@ final class PresenceVault {
 
     /// The guard record (generation floor, revocations, pending switch-offs): a small file next to the verified
     /// contacts, excluded from backup, readable after the first unlock (when the Keychain may still be locked),
-    /// written durably before the vault changes, deleted by the emergency wipe.
+    /// written and flushed (`DurableFile`) before the vault changes, deleted by the emergency wipe.
     private final class GuardFile: PresenceVaultGuardStorage {
         static var url: URL { VerifiedContactsStore.url.deletingLastPathComponent().appendingPathComponent("presence-vault-guard.json") }
         func read() throws -> Data? {
@@ -37,7 +43,7 @@ final class PresenceVault {
         func write(_ data: Data) throws {
             var dir = Self.url.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            var values = URLResourceValues(); values.isExcludedFromBackup = true; try? dir.setResourceValues(values)
+            BackupExclusion.apply(&dir)
             try DurableFile.write(data, to: Self.url, options: [.completeFileProtectionUntilFirstUserAuthentication])
         }
     }
@@ -51,7 +57,16 @@ final class PresenceVault {
 
     init(epoch: @escaping () -> Int64) {
         let defaults = DesktopPreview.preferences
-        core = PresenceVaultCore(storage: KeychainStorage(), guardStorage: DesktopPreview.enabled ? MemoryGuard() : GuardFile(), epoch: epoch,
+        let preview = DesktopPreview.enabled
+        let previewSecret = randomBytes(PresenceVaultCore.guardSecretBytes)
+        core = PresenceVaultCore(storage: KeychainStorage(), guardStorage: preview ? MemoryGuard() : GuardFile(),
+                                 guardSecret: { preview ? previewSecret : try PresenceVault.guardSecret() },
+                                 legacyFloor: {
+                                     guard defaults.object(forKey: PresenceVault.legacyFloorKey) != nil else { return nil }
+                                     return UInt32(clamping: defaults.integer(forKey: PresenceVault.legacyFloorKey))
+                                 },
+                                 onLegacyFloorImported: { defaults.removeObject(forKey: PresenceVault.legacyFloorKey) },
+                                 epoch: epoch,
                                  freshInstall: !defaults.bool(forKey: Self.installMarker),
                                  onFreshInstallHandled: { defaults.set(true, forKey: PresenceVault.installMarker) })
         core.log = { event, fields in
@@ -59,6 +74,14 @@ final class PresenceVault {
             AppLog.event("rotid_presence", all)
         }
         if !core.persistent { AppLog.event("rotid_presence", ["event": "store", "result": "\(core.loadState)"]) }
+    }
+
+    /// The guard secret: read, or created once (32 random bytes). Throws while the Keychain cannot be used.
+    private static func guardSecret() throws -> Data {
+        if let existing = try KeychainItem.read(guardSecretAccount) { return existing }
+        let created = randomBytes(PresenceVaultCore.guardSecretBytes)
+        try KeychainItem.write(guardSecretAccount, created, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+        return created
     }
 
     /// False while the Keychain could not be read or written: no OFFER is sent and nothing is stored.

@@ -23,17 +23,17 @@ enum KeychainItem {
         guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
         return item as? Data
     }
-    static func write(_ account: String, _ data: Data) throws {
+    static func write(_ account: String, _ data: Data, accessible: CFString = kSecAttrAccessibleWhenUnlockedThisDeviceOnly) throws {
         if DesktopPreview.enabled { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)) }
         // Update in place (add only when missing): a failed write never leaves the account without its old value.
         let status = KeychainReplace.write(
             update: {
                 SecItemUpdate(base(account) as CFDictionary, [kSecValueData as String: data,
-                                                              kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly] as CFDictionary)
+                                                              kSecAttrAccessible as String: accessible] as CFDictionary)
             },
             add: {
                 var add = base(account); add[kSecValueData as String] = data
-                add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                add[kSecAttrAccessible as String] = accessible
                 return SecItemAdd(add as CFDictionary, nil)
             })
         guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
@@ -107,13 +107,21 @@ enum VerifiedContactsStore {
 
 /// BMH3 pins (Android `hidden-identity-pins.txt`): next to the verified contacts, excluded from backup, readable after
 /// the first unlock (an incoming call can arrive while the phone is locked), deleted by the emergency wipe.
+/// Excludes a directory of app data from backups; a failure is logged (status only, no path).
+enum BackupExclusion {
+    static func apply(_ dir: inout URL) {
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        do { try dir.setResourceValues(values) } catch { AppLog.event("storage", ["event": "backup_exclusion", "result": "failed"]) }
+    }
+}
+
 final class Bmh3PinFile: Bmh3PinStorage {
     static var url: URL { VerifiedContactsStore.url.deletingLastPathComponent().appendingPathComponent("hidden-identity-pins.txt") }
     func read() -> String? { try? String(contentsOf: Self.url, encoding: .utf8) }
     func write(_ value: String) {
         var dir = Self.url.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        var values = URLResourceValues(); values.isExcludedFromBackup = true; try? dir.setResourceValues(values)
+        BackupExclusion.apply(&dir)
         try? Data(value.utf8).write(to: Self.url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 }
@@ -136,7 +144,13 @@ enum EmergencyWipe {
         if let domain = Bundle.main.bundleIdentifier { DesktopPreview.preferences.removePersistentDomain(forName: domain) }
         sweep()
         KeychainItem.deleteAll()
-        let complete = (try? KeychainItem.read("identity-se")) == nil && (try? KeychainItem.read("identity-software")) == nil && !FileManager.default.fileExists(atPath: VerifiedContactsStore.url.path)
+        let fm = FileManager.default
+        // Done only when the identity, the contacts, the presence vault (and its guard secret), the vault guard and the
+        // BMH3 pins are all gone.
+        let complete = (try? KeychainItem.read("identity-se")) == nil && (try? KeychainItem.read("identity-software")) == nil
+            && (try? KeychainItem.read(PresenceVault.account)) == nil && (try? KeychainItem.read(PresenceVault.guardSecretAccount)) == nil
+            && !fm.fileExists(atPath: VerifiedContactsStore.url.path) && !fm.fileExists(atPath: PresenceVault.guardURL.path)
+            && !fm.fileExists(atPath: Bmh3PinFile.url.path)
         if complete { try? FileManager.default.removeItem(at: markerURL) }
         return complete
     }

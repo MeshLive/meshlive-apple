@@ -11,8 +11,8 @@ public protocol PresenceVaultStorage: AnyObject {
     func delete() throws
 }
 
-/// Where the vault's guard record is stored (the app: a small file written durably, outside backups). `write` returns
-/// only once the bytes are on disk (`DurableFile`); `read` returns nil when it was never written and throws when it
+/// Where the vault's guard record is stored (the app: a small file outside backups, replaced atomically and flushed with
+/// `F_FULLFSYNC` by `DurableFile`). `write` throws unless every flush succeeded; `read` returns nil when it was never written and throws when it
 /// exists but cannot be read now.
 public protocol PresenceVaultGuardStorage: AnyObject {
     func read() throws -> Data?
@@ -29,8 +29,9 @@ public struct PresenceVaultGuard: Codable, Equatable {
     /// A revocation was requested while the vault's generation was unknown (unreadable): the next vault loaded is
     /// revoked whatever its generation.
     public var revokePending = false
-    /// Contacts switched off ("Can see when I'm nearby") whose switch-off is not yet stored in the vault, as keyed
-    /// hashes of their node IDs (`PresenceVaultCore.guardKey`). No lease goes to them while it is pending.
+    /// Contacts switched off ("Can see when I'm nearby") whose switch-off and revocation are not yet stored in the
+    /// vault, as HMAC-SHA256 of their node IDs under a random per-device secret (`PresenceVaultCore.guardKey`), so the
+    /// file does not reveal which node IDs are contacts. No lease goes to them while it is pending.
     public var switchOffPending: [String] = []
     public init() {}
 }
@@ -41,7 +42,7 @@ public struct PresenceVaultGuard: Codable, Equatable {
 /// - A store that cannot be read is never overwritten: the vault runs with an in-memory **ephemeral** window (fresh
 ///   IDs nobody recognises), delivers no lease, recognises nobody and retries the read at most every 5 s.
 /// - A store that does not decode is latched as corrupt; only "Reset presence key" replaces it.
-/// - A revocation is recorded in the guard (durably, before the vault changes): the revoked generation, or a pending
+/// - A revocation is recorded in the guard (stored and flushed before the vault changes): the revoked generation, or a pending
 ///   revocation when the generation is unknown. A stored vault at or below the revoked generation, below the floor,
 ///   or loaded while a revocation is pending, is replaced by a fresh window under a new generation; its contacts stay.
 ///   If neither the guard nor the vault can be written, the stored vault is deleted rather than left valid.
@@ -53,6 +54,7 @@ public final class PresenceVaultCore {
     public enum LoadState: Equatable { case loaded, unreadable, corrupt }
     public static let retryInterval: TimeInterval = 5
     private static let guardDomain = Data("MeshLive/PresenceVaultGuard/1".utf8) + Data([0])
+    public static let guardSecretBytes = 32
 
     private let storage: PresenceVaultStorage
     private let guardStorage: PresenceVaultGuardStorage
@@ -75,22 +77,37 @@ public final class PresenceVaultCore {
     private var pendingFreshInstall: Bool
     /// Guard changes made while the guard could not be read, merged into it once it can be.
     private var overlayRevoke = false
+    /// Switch-off changes by node ID hex (memory only, until the guard and its secret can be read).
     private var overlaySwitchOffs: [String: Bool] = [:]
+    private let guardSecretSource: () throws -> Data
+    private var guardSecret: Data?
+    /// The generation floor an earlier build kept elsewhere (the app: preferences), imported once into the guard.
+    private let legacyFloor: () -> UInt32?
+    private let onLegacyFloorImported: () -> Void
     private let onFreshInstallHandled: () -> Void
     public var log: (String, [String: String]) -> Void = { _, _ in }
 
-    public init(storage: PresenceVaultStorage, guardStorage: PresenceVaultGuardStorage, epoch: @escaping () -> Int64,
+    /// - Parameter guardSecret: the device's random 32-byte secret keying `guardKey` (the app: a Keychain item readable
+    ///   after the first unlock, this device only); it is read with the guard, which is unusable without it.
+    public init(storage: PresenceVaultStorage, guardStorage: PresenceVaultGuardStorage, guardSecret: @escaping () throws -> Data,
+                legacyFloor: @escaping () -> UInt32? = { nil }, onLegacyFloorImported: @escaping () -> Void = {},
+                epoch: @escaping () -> Int64,
                 uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
                 newKey: @escaping () -> Data = { randomBytes(32) },
                 freshInstall: Bool = false, onFreshInstallHandled: @escaping () -> Void = {}) {
-        self.storage = storage; self.guardStorage = guardStorage; epochSource = epoch; self.uptime = uptime; self.newKey = newKey
+        self.storage = storage; self.guardStorage = guardStorage; guardSecretSource = guardSecret
+        self.legacyFloor = legacyFloor; self.onLegacyFloorImported = onLegacyFloorImported; epochSource = epoch; self.uptime = uptime; self.newKey = newKey
         pendingFreshInstall = freshInstall; self.onFreshInstallHandled = onFreshInstallHandled
         lock.lock(); _ = ensureLoadedLocked(); lock.unlock()
     }
 
-    /// The guard's key for a contact: a keyed hash, so the guard file does not list contacts' node IDs.
-    static func guardKey(_ peerHex: String) -> String {
-        Data(SHA256.hash(data: guardDomain + (Data(hex: peerHex) ?? Data()))).prefix(16).hex
+    /// The guard's key for a contact: HMAC-SHA256 under the device secret, truncated to 16 bytes. Only called while
+    /// the guard is loaded (the secret is then known).
+    func guardKey(_ peerHex: String) -> String {
+        Self.guardKey(peerHex, secret: guardSecret ?? Data())
+    }
+    static func guardKey(_ peerHex: String, secret: Data) -> String {
+        Data(HMAC<SHA256>.authenticationCode(for: guardDomain + (Data(hex: peerHex) ?? Data()), using: SymmetricKey(data: secret))).prefix(16).hex
     }
 
     // MARK: Loading
@@ -156,13 +173,23 @@ public final class PresenceVaultCore {
     private func loadGuardLocked() -> Bool {
         if guardRecord != nil { return true }
         do {
+            let secret = try guardSecretSource()
+            guard secret.count == Self.guardSecretBytes else { throw ProtocolError.state("guard secret") }
+            guardSecret = secret
             if let data = try guardStorage.read() {
                 // A guard that does not decode says nothing reliable: revoke whatever vault is loaded.
                 guardRecord = (try? JSONDecoder().decode(PresenceVaultGuard.self, from: data)) ?? {
                     var unknown = PresenceVaultGuard(); unknown.revokePending = true; return unknown
                 }()
             } else {
-                guardRecord = PresenceVaultGuard()
+                var fresh = PresenceVaultGuard()
+                if let floor = legacyFloor() {
+                    // An earlier build kept only the floor (a revocation raised it before writing the vault): import it.
+                    fresh.floor = floor
+                    if writeGuard(fresh) { onLegacyFloorImported() }
+                    log("store", ["result": "legacy_floor_imported", "floor": "\(floor)"])
+                }
+                guardRecord = fresh
             }
         } catch {
             log("store", ["result": "guard_unreadable"])
@@ -170,7 +197,7 @@ public final class PresenceVaultCore {
         }
         if overlayRevoke || !overlaySwitchOffs.isEmpty, var record = guardRecord {
             if overlayRevoke { record.revokePending = true }
-            for (key, pending) in overlaySwitchOffs { Self.setSwitchOff(&record, key, pending) }
+            for (peer, pending) in overlaySwitchOffs { Self.setSwitchOff(&record, guardKey(peer), pending) }
             overlayRevoke = false; overlaySwitchOffs = [:]
             _ = writeGuard(record)
         }
@@ -182,16 +209,18 @@ public final class PresenceVaultCore {
         if pending { record.switchOffPending.append(key) }
     }
 
-    /// Records a revocation whose generation is unknown, or a switch-off change, in the guard (durably when it can be
+    /// Records a revocation whose generation is unknown, or a switch-off change, in the guard (stored and flushed when it can be
     /// read; otherwise in memory until it can).
-    private func updateGuard(revoke: Bool = false, switchOff: (key: String, pending: Bool)? = nil) -> Bool {
+    private func updateGuard(revoke: Bool = false, revokeGeneration: UInt32? = nil,
+                             switchOff: (peerHex: String, pending: Bool)? = nil) -> Bool {
         guard loadGuardLocked(), var record = guardRecord else {
-            if revoke { overlayRevoke = true }
-            if let switchOff { overlaySwitchOffs[switchOff.key] = switchOff.pending }
+            if revoke || revokeGeneration != nil { overlayRevoke = true }
+            if let switchOff { overlaySwitchOffs[switchOff.peerHex] = switchOff.pending }
             return false
         }
         if revoke { record.revokePending = true }
-        if let switchOff { Self.setSwitchOff(&record, switchOff.key, switchOff.pending) }
+        if let revokeGeneration { record.revokedThrough = max(record.revokedThrough, revokeGeneration) }
+        if let switchOff { Self.setSwitchOff(&record, guardKey(switchOff.peerHex), switchOff.pending) }
         return record == guardRecord ? true : writeGuard(record)
     }
 
@@ -215,7 +244,7 @@ public final class PresenceVaultCore {
         _ = ensureLoadedLocked()
     }
 
-    /// Writes the guard durably; the in-memory record changes either way (it still applies in this process).
+    /// Writes and flushes the guard (false when the flush failed); the in-memory record changes either way (it still applies in this process).
     private func writeGuard(_ record: PresenceVaultGuard) -> Bool {
         guardRecord = record
         do { try guardStorage.write(try JSONEncoder().encode(record)); return true }
@@ -246,13 +275,13 @@ public final class PresenceVaultCore {
     /// contact still visible).
     private func applySwitchOffs(_ next: inout PresenceVaultState) {
         guard let pending = guardRecord?.switchOffPending, !pending.isEmpty else { return }
-        for peer in next.contacts.keys where pending.contains(Self.guardKey(peer)) { next.contacts[peer]?.canSeeMe = false }
+        for peer in next.contacts.keys where pending.contains(guardKey(peer)) { next.contacts[peer]?.canSeeMe = false }
     }
 
-    /// Switch-offs now stored in the vault leave the guard.
+    /// Switch-offs fully stored in the vault (visible off, and no current lease left to revoke) leave the guard.
     private func clearStoredSwitchOffs() {
         guard let record = guardRecord, !record.switchOffPending.isEmpty, let current = state else { return }
-        let stored = Set(current.contacts.filter { !$0.value.canSeeMe }.keys.map(Self.guardKey))
+        let stored = Set(current.contacts.filter { !$0.value.canSeeMe && !current.holdsCurrentLease($0.key) }.keys.map(guardKey))
         let remaining = record.switchOffPending.filter { !stored.contains($0) }
         guard remaining != record.switchOffPending else { return }
         var cleared = record; cleared.switchOffPending = remaining
@@ -272,7 +301,7 @@ public final class PresenceVaultCore {
         if let verified = pendingReconcile { stale.formUnion(next.contacts.keys.filter { !verified.contains($0) }) }
         let switchOffs = guardRecord?.switchOffPending ?? []
         let revoke = stale.contains { next.holdsCurrentLease($0) }
-            || next.contacts.contains { switchOffs.contains(Self.guardKey($0.key)) && $0.value.canSeeMe && next.holdsCurrentLease($0.key) }
+            || next.contacts.keys.contains { switchOffs.contains(guardKey($0)) && next.holdsCurrentLease($0) }
         for peer in stale { next.contacts.removeValue(forKey: peer) }
         applySwitchOffs(&next)
         state = next
@@ -353,8 +382,9 @@ public final class PresenceVaultCore {
     // MARK: Contacts
 
     private func switchOffPending(_ peerHex: String) -> Bool {
-        let key = Self.guardKey(peerHex)
-        return overlaySwitchOffs[key] ?? guardRecord?.switchOffPending.contains(key) ?? false
+        if let overlay = overlaySwitchOffs[peerHex] { return overlay }
+        guard let record = guardRecord else { return false }
+        return record.switchOffPending.contains(guardKey(peerHex))
     }
 
     public func canSeeMe(_ peer: NodeId) -> Bool {
@@ -421,15 +451,17 @@ public final class PresenceVaultCore {
         return current.contacts.compactMap { Self.presence($0.key, $0.value)?.pruned(myEpoch: myEpoch) }
     }
 
-    /// "Can see when I'm nearby". Turning it off is recorded in the guard first, so a vault write that fails cannot
-    /// lose it; off for a contact that holds a current lease revokes it (true).
+    /// "Can see when I'm nearby". Turning it off for a contact that holds a current lease revokes it (true). The
+    /// switch-off and the revocation of the current generation are recorded in the guard before the vault is touched,
+    /// and the new window is stored with the switch-off in one write, so no crash point leaves the old keys valid; the
+    /// guard entry goes only once that is stored.
     @discardableResult
     public func setCanSeeMe(_ peer: NodeId, _ on: Bool) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        // Off is recorded before the vault is touched; on clears it (the vault then holds the new value).
-        _ = updateGuard(switchOff: (Self.guardKey(peer.hex), !on))
+        let revoke = !on && (state?.holdsCurrentLease(peer.hex) ?? false)
+        _ = updateGuard(revokeGeneration: revoke ? state?.generation : nil, switchOff: (peer.hex, !on))
         guard let current = state else { return failClosed(revoke: !on) }
-        let revoke = !on && current.holdsCurrentLease(peer.hex)
+        if revoke { return bumpLocked(reason: "contact_switch_off") }
         if current.canSeeMe(peer.hex) != on {
             _ = mutate { s in
                 var record = s.contacts[peer.hex] ?? PresenceVaultState.ContactRecord()
@@ -437,7 +469,7 @@ public final class PresenceVaultCore {
                 s.contacts[peer.hex] = record
             }
         }
-        return revoke ? bumpLocked(reason: "contact_switch_off") : false
+        return false
     }
 
     /// Forgets a contact: revokes first when it holds a current lease, then drops its record. While the vault cannot
