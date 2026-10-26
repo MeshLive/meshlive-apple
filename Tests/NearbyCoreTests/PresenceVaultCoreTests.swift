@@ -352,7 +352,7 @@ final class PresenceVaultCoreTests: XCTestCase {
         let old = try XCTUnwrap(stored.state)
         let guardStore = GuardStore()                       // no guard file yet
         var imported = 0
-        let upgraded = vault(stored, guardStore, legacyFloor: old.generation + 1) { imported += 1 }
+        let upgraded = vault(stored, guardStore, legacyFloor: old.generation + 1, onLegacyImported: { imported += 1 })
         XCTAssertEqual(imported, 1, "the old key is removed once the guard holds the floor")
         XCTAssertGreaterThan(try XCTUnwrap(stored.state).generation, old.generation + 1, "the revoked window is not used")
         XCTAssertFalse(upgraded.deliveredTo(try node(1)))
@@ -360,7 +360,7 @@ final class PresenceVaultCoreTests: XCTestCase {
 
         let unwritable = GuardStore(); unwritable.writeFails = true
         var importedAgain = 0
-        _ = vault(Storage(), unwritable, legacyFloor: 5) { importedAgain += 1 }
+        _ = vault(Storage(), unwritable, legacyFloor: 5, onLegacyImported: { importedAgain += 1 })
         XCTAssertEqual(importedAgain, 0, "kept until the guard could be written")
     }
 
@@ -386,7 +386,7 @@ final class PresenceVaultCoreTests: XCTestCase {
         stored.readFails = true
         var handled = 0
         let clock = Clock()
-        let fresh = vault(stored, clock: clock, freshInstall: true) { handled += 1 }
+        let fresh = vault(stored, clock: clock, freshInstall: true, onFresh: { handled += 1 })
         XCTAssertEqual(handled, 0, "an unreadable vault is not marked as handled")
         stored.readFails = false
         clock.now += PresenceVaultCore.retryInterval
