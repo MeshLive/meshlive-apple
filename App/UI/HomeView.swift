@@ -294,7 +294,7 @@ struct GoLiveSheet: View {
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("Audio only quality")
-                Text(AppPlatform.isMac ? "Audio only uses less bandwidth and can keep playing with the display off while this Mac is awake. Listeners learn your ID." : "Audio only reaches further and keeps playing with the screen off. Listeners learn your ID.")
+                Text(AppPlatform.isMac ? "Audio only uses less Bluetooth capacity and keeps playing with the display off while this Mac is awake. Listeners learn your ID." : "Audio only uses less Bluetooth capacity and keeps playing with the screen off. Listeners learn your ID.")
                     .font(.subheadline).foregroundStyle(Palette.dimInk)
             }
           }

@@ -120,7 +120,7 @@ struct CallView: View {
 
     private var mismatchBanner: some View {
         Button { showInfo = true } label: {
-            Label("Identity does not match. Someone may be pretending to be this person. Tap for details.", systemImage: "exclamationmark.octagon.fill")
+            Label("This contact's ID has changed. Tap for details.", systemImage: "exclamationmark.octagon.fill")
                 .font(Typo.secondary.weight(.semibold)).foregroundStyle(.black).padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // Inverted (white on black screen) instead of red: red is reserved for live.
@@ -205,8 +205,8 @@ struct CallInfoSheet: View {
                 case .verified:
                     InfoLine(icon: "checkmark.shield.fill", tint: Palette.connected, title: "Verified", detail: "You checked this person's code in person.")
                 case .mismatch:
-                    InfoLine(icon: "exclamationmark.octagon.fill", tint: Palette.ink, title: "Identity does not match",
-                             detail: "This phone's identity differs from the one you verified for this person. Do not share anything sensitive. End the call and check in person.")
+                    InfoLine(icon: "exclamationmark.octagon.fill", tint: Palette.ink, title: "This contact's ID has changed",
+                             detail: "This phone no longer matches the ID saved for this contact. End the call and check with them in person before sharing anything private.")
                 case .unverified:
                     InfoLine(icon: "questionmark.circle", tint: Palette.dimInk, title: "Not verified yet", detail: "Compare the safety code below to be sure who you are talking to.")
                 }

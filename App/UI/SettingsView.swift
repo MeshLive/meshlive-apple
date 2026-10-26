@@ -177,7 +177,7 @@ struct AdvancedPrivacyView: View {
         SettingsPage(title: "Advanced privacy") {
             Card {
                 SettingsToggleRow(icon: "arrow.triangle.2.circlepath", title: "Rotating discovery IDs",
-                                  info: AppPlatform.isMac ? "Experimental. Nearby devices see a new ID every 15 minutes instead of your fixed one; contacts still recognise you after connecting. macOS may expose this Mac's system Bluetooth name to connected devices. Use a neutral computer name if it is personal." : "Experimental. Phones nearby see a new ID every 15 minutes instead of your fixed one; contacts still recognise you after connecting. While rotating, the name in Settings > General > About > Name can still identify this iPhone to phones that connect.",
+                                  info: AppPlatform.isMac ? "Experimental. Changes your nearby Bluetooth ID every 15 minutes to make this Mac harder to recognise. This doesn't make you anonymous. Contacts you allow can still recognise you, and older app versions may not connect. macOS may show this Mac's name to devices that connect; use a neutral computer name if yours is personal." : "Experimental. Changes your nearby Bluetooth ID every 15 minutes to make your phone harder to recognise. This doesn't make you anonymous. Contacts you allow can still recognise you, and older app versions may not connect. The name in Settings > General > About > Name can still identify this iPhone to phones that connect.",
                                   isOn: $model.rotatingIds)
                 if model.rotatingIds {
                     CardDivider()
@@ -186,7 +186,7 @@ struct AdvancedPrivacyView: View {
                     }.buttonStyle(.plain)
                     CardDivider()
                     Button { confirmPresenceReset = true } label: {
-                        SettingsRowLabel(icon: "key", title: "Reset presence key", chevron: false)
+                        SettingsRowLabel(icon: "key", title: "Reset nearby recognition", chevron: false)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("resetPresenceKey")
@@ -198,12 +198,12 @@ struct AdvancedPrivacyView: View {
             }
             Card {
                 SettingsToggleRow(icon: "eye.slash", title: "Hidden identities",
-                                  info: "Experimental. Calls use the BMH3 handshake, so a radio listener cannot read who is calling whom. Needed to call Android phones with their default settings.",
+                                  info: "Experimental. Adds privacy protection when connecting to other phones, and is needed to call Android phones with their default settings. Older versions or phones with this protection turned off may not connect. Accepting a call can still let the other person recognise your phone.",
                                   isOn: $model.hiddenIdentities)
                 if model.hiddenIdentities {
                     CardDivider()
                     SettingsToggleRow(icon: "theatermasks", title: "Pseudonymous toward strangers",
-                                      info: "Experimental. Needs rotating discovery IDs. Strangers meet a one-time key; your real ID is shown only to someone whose call you answer or whom you call. Phones without hidden identities can then not call you.",
+                                      info: "Experimental. Needs rotating discovery IDs. Uses a temporary ID with people you haven't verified. Verified contacts, and people whose calls you accept or whom you call, receive your usual ID. Both phones need compatible settings.",
                                       isOn: $model.bmh3Pseudonyms)
                 }
             }
@@ -216,10 +216,10 @@ struct AdvancedPrivacyView: View {
             }
             .padding(.top, 8)
         }
-        .alert("Reset presence key?", isPresented: $confirmPresenceReset) {
+        .alert("Reset nearby recognition?", isPresented: $confirmPresenceReset) {
             Button("Reset") { model.resetPresenceKey() }
             Button("Cancel", role: .cancel) {}
-        } message: { Text("Contacts who could see when you are nearby stop recognising this phone until your next call with each of them.") }
+        } message: { Text("Contacts will need to reconnect with you to recognise your phone nearby again. Your saved contacts and call verification stay the same.") }
     }
 }
 

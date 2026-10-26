@@ -16,7 +16,7 @@ struct VerifyView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                CardNote("Meet in person. Scan each other's code, or compare the safety code on both screens during a call. If they match, no one is in the middle.")
+                CardNote("Scan each other's codes in person to add a contact. During a call, you can also compare safety codes to confirm the connection.")
                     .padding(.bottom, 4)
                 if let line = model.ownNearbyLine { OwnNearbyNameLine(text: line).padding(.horizontal, 6) }
                 if let text = model.myQrText(), let image = qrImage(text) {

@@ -116,7 +116,7 @@ final class SimulatorScreensTests: XCTestCase {
         ("call-incoming-video", ["-NearbyScreen", "call-incoming"], "Accept"),
         ("call-incoming-voice", ["-NearbyScreen", "call-incoming-voice"], "Accept"),
         ("call-active", ["-NearbyScreen", "call-active"], "End"),
-        ("call-mismatch", ["-NearbyScreen", "call-mismatch"], "Identity does not match"),
+        ("call-mismatch", ["-NearbyScreen", "call-mismatch"], "This contact's ID has changed"),
         ("call-ended", ["-NearbyScreen", "call-ended"], "Call ended"),
     ]
 
@@ -376,7 +376,7 @@ final class SimulatorScreensTests: XCTestCase {
         let reset = app.buttons["resetPresenceKey"].firstMatch
         XCTAssertTrue(reveal(reset, in: app, timeout: 5), "Reset presence key")
         reset.tap()
-        let alert = app.alerts["Reset presence key?"]
+        let alert = app.alerts["Reset nearby recognition?"]
         XCTAssertTrue(alert.waitForExistence(timeout: 4), "asks first")
         shot("presence-reset-confirm")
         alert.buttons["Reset"].tap()

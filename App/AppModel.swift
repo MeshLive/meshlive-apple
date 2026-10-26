@@ -415,7 +415,7 @@ final class AppModel: ObservableObject {
         book.policy = AppSettings.mismatchPolicyWarnOnly ? .warn : .refuse
         book.onMismatch = { [weak self] _, _, contact in
             DispatchQueue.main.async {
-                self?.mismatchWarning = "This phone's identity is different from the one you verified for \(contact.displayName). Someone may be pretending to be them. Do not share anything sensitive. End the call and check in person."
+                self?.mismatchWarning = "This phone no longer matches the ID saved for \(contact.displayName). End the call and check with them in person before sharing anything private."
             }
         }
         radio.onPeersChanged = { [weak self] in self?.rebuildLists() }
