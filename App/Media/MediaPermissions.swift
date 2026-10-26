@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreBluetooth
 
 /// Microphone and camera permission, requested explicitly when a call starts or is answered (like Android's
 /// runtime permission request at call start), so the system prompt appears before media begins and the
@@ -30,6 +31,17 @@ enum MediaPermissions {
         @unknown default: return "unknown"
         }
         #endif
+    }
+
+    /// Read-only (never prompts); logged at launch so a rebuild shows whether macOS kept the Bluetooth permission.
+    static var bluetooth: String {
+        switch CBManager.authorization {
+        case .allowedAlways: return "granted"
+        case .denied: return "denied"
+        case .restricted: return "restricted"
+        case .notDetermined: return "undetermined"
+        @unknown default: return "unknown"
+        }
     }
 
     static var camera: String {

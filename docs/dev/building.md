@@ -11,7 +11,8 @@ yourself. This page is the developer view; the [user guide](../user-guide.md#ins
   ([third-party notices](../../THIRD_PARTY_NOTICES.md), [Vendor/README.md](../../Vendor/README.md)).
 - For a phone: an iPhone on iOS 16 or newer and an Apple developer team (a free personal team works) to sign it.
 - For the native Mac app: an Apple Silicon Mac on macOS 14 or later. Local builds are ad-hoc signed and need no
-  account.
+  account; to keep the app's permissions across rebuilds, sign with your own certificate
+  ([below](#keep-mac-permissions-across-rebuilds)).
 
 ## iPhone app and package tests
 
@@ -44,8 +45,8 @@ transport. To prepare only the Mac dependencies:
 bash Scripts/prepare-opus-macos.sh      # pinned Opus for macOS arm64 under .build/opus (iOS artifacts untouched)
 bash Scripts/prepare-libvpx.sh macos-only   # Vendor/VPX-macos.xcframework
 python3 Scripts/project.py
-xcodebuild -project MeshLive.xcodeproj -scheme MeshLive -destination "platform=macOS" build
-xcodebuild -project MeshLive.xcodeproj -scheme MeshLive -configuration Release -destination "platform=macOS" build
+bash Scripts/build-macos.sh             # Debug app in .build/dd-mac/Build/Products/Debug/MeshLive.app
+bash Scripts/build-macos.sh Release     # Release app
 bash Scripts/check-macos-media.sh       # offline Opus bridge check with ASan/UBSan
 bash Scripts/run-macos-uitest.sh        # native UI tests in DEBUG preview mode
 ```
@@ -54,6 +55,27 @@ The UI tests need an unlocked desktop and the macOS UI-testing (automation) perm
 `-NearbyPreview` mode: an ephemeral identity, isolated preferences and no Bluetooth, camera or microphone. Never
 reset privacy permissions to run tests; grant Bluetooth, camera, microphone and notifications yourself when the app
 asks.
+
+### Keep Mac permissions across rebuilds
+
+An ad-hoc signed app is identified only by the hash of its code, and macOS remembers the Bluetooth, camera and
+microphone permissions (and Keychain access) for exactly that hash. Every rebuild therefore looks like a new app and
+asks again. Signing with your own certificate gives every build the same code identity, so a permission granted
+once stays granted:
+
+```sh
+security find-identity -v -p codesigning        # pick your "Apple Development" identity (a free team works)
+export MESHLIVE_SIGN_IDENTITY=<its SHA-1 or full name>
+export MESHLIVE_TEAM=<team ID>                  # optional, only if Xcode asks for a team
+bash Scripts/build-macos.sh                     # also used by Scripts/run-macos-uitest.sh
+```
+
+The script prints the app's designated requirement: a `cdhash` means ad-hoc, a requirement naming your certificate
+means permissions will survive rebuilds. The first launch of the newly signed app asks once more; later builds do
+not. Keep your identity and team in your shell environment, never in the project. Without the variables the build
+stays ad-hoc. Over SSH the login keychain is locked, so `codesign` fails with `errSecInternalComponent`; run the build
+from the logged-in desktop, or from SSH with `bash Scripts/gui-run.sh mac-build [Debug|Release]` (or `mac-uitest`),
+which runs it in that session and passes these variables along.
 
 ## Test on phones
 

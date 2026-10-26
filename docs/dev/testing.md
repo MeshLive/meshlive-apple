@@ -30,7 +30,7 @@ None of this shows radio, microphone, speaker, camera or battery behaviour.
 ## Scripted device runs (an iPhone connected to a Mac)
 
 1. **Install:** `bash Scripts/gui-run.sh install`. This builds, signs (team and bundle in `device-gui.command`), installs and launches through the logged-in GUI session; SSH sessions cannot open the login keychain. Output goes to `.build/device-logs/<stamp>-install/`.
-2. **Before a run:** the iPhone must be unlocked with the screen on and Auto-Lock off; a locked phone refuses the launch. Microphone and camera permission must already be granted. `app_start` logs both, and `-NearbyRequestPermissions 1` asks once at launch.
+2. **Before a run:** the iPhone must be unlocked with the screen on and Auto-Lock off; a locked phone refuses the launch. Microphone and camera permission must already be granted. `app_start` logs them and the Bluetooth permission, and `-NearbyRequestPermissions 1` asks once at launch.
 3. **Run:** `bash Scripts/run-scenario.sh call ABCDE-FGHIJ voice 30` (iPhone calls; video works the same), or `bash Scripts/run-scenario.sh answer voice 180` (the iPhone auto-answers). It prints the BENCHMARK summary and the pulled log path. `Scripts/pull-logs.sh` copies all logs.
 4. **Measured on 2026-10-10 (M31, GATT):** voice after the microphone fix: 1476/1476 and 1492/1481 packets each way. Video (before rate control): both directions decoded; iPhone -> M31 was limited to about 125-135 kbps, so the iPhone's video queued. Rerun with `VideoRateController`.
 

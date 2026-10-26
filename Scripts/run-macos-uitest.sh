@@ -3,6 +3,8 @@
 # Needs an unlocked desktop and the macOS UI-testing (automation) permission. Output stays inside this checkout.
 # DERIVED: derived data folder (default .build/dd-mac).
 # Uses DEBUG -NearbyPreview: no Bluetooth/media requests or production identity/preferences.
+# Signing: ad-hoc unless MESHLIVE_SIGN_IDENTITY is set (Scripts/macos-signing.sh); a stable identity keeps the
+# UI-testing permission of the test runner across rebuilds.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 if [[ "$#" -gt 0 ]]; then out="$1"; else out=".build/mac-uitests-$(date +%Y%m%d-%H%M%S)"; fi
@@ -16,7 +18,8 @@ PY
 )" || exit 1
 [[ ! -e "$out/result.xcresult" ]] || { echo "Choose a fresh output for this execution" >&2; exit 1; }
 mkdir -p "$out"
-xcodebuild test -project MeshLive.xcodeproj -scheme MeshLive -destination 'platform=macOS' -derivedDataPath "${DERIVED:-.build/dd-mac}" -resultBundlePath "$out/result.xcresult" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 45 -maximum-test-execution-time-allowance 60 >"$out/xcodebuild.log" 2>&1 &
+source Scripts/macos-signing.sh || exit 1
+xcodebuild test -project MeshLive.xcodeproj -scheme MeshLive -destination 'platform=macOS' -derivedDataPath "${DERIVED:-.build/dd-mac}" -resultBundlePath "$out/result.xcresult" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 45 -maximum-test-execution-time-allowance 60 ${MAC_SIGNING[@]+"${MAC_SIGNING[@]}"} >"$out/xcodebuild.log" 2>&1 &
 pid=$!
 cleanup() { if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid"; wait "$pid"; fi; }
 trap cleanup EXIT

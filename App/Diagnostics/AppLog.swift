@@ -42,12 +42,12 @@ enum AppLog {
         event("app_start", ["version": "\(info["CFBundleShortVersionString"] ?? "?")", "build": "\(info["CFBundleVersion"] ?? "?")",
                             "device": "Mac", "macos": ProcessInfo.processInfo.operatingSystemVersionString,
                             "args": ProcessInfo.processInfo.arguments.dropFirst().joined(separator: " "),
-                            "microphone": MediaPermissions.microphone, "camera": MediaPermissions.camera])
+                            "bluetooth": MediaPermissions.bluetooth, "microphone": MediaPermissions.microphone, "camera": MediaPermissions.camera])
         #else
         event("app_start", ["version": "\(info["CFBundleShortVersionString"] ?? "?")", "build": "\(info["CFBundleVersion"] ?? "?")",
                             "device": UIDevice.current.model, "ios": UIDevice.current.systemVersion,
                             "args": ProcessInfo.processInfo.arguments.dropFirst().joined(separator: " "),
-                            "microphone": MediaPermissions.microphone, "camera": MediaPermissions.camera])
+                            "bluetooth": MediaPermissions.bluetooth, "microphone": MediaPermissions.microphone, "camera": MediaPermissions.camera])
         #endif
     }
 
