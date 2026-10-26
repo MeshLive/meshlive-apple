@@ -127,10 +127,8 @@ open class MeshConnection {
     /// Age of the oldest video frame still waiting for the transport.
     public func videoQueueAge(now: TimeInterval) -> TimeInterval { queues.videoAge(now: now) }
     public private(set) var closeRequested = false
-    #if os(macOS)
-    /// Fatal closure discards queued output; native transports must release even if their pipe is blocked.
+    /// Fatal closure discards queued output; transports must release even if their pipe is blocked.
     public private(set) var closedWithError = false
-    #endif
     /// EXPERIMENTAL rotating discovery IDs: this side's BDO1 entries (a callee's pinned role-0 IDs; a caller none).
     public var discoveryOpeningEntries: (() -> [OpeningEntry])?
     /// The peer's BDO1 entries arrived (the caller's RV15 check); throw to refuse the link.
@@ -423,9 +421,7 @@ open class MeshConnection {
     public func finish(_ reason: String, error: Bool) {
         guard phase != .closed else { return }
         phase = .closed; closeReason = reason
-        #if os(macOS)
         closedWithError = error
-        #endif
         if error { queues = OutboundQueues() }
         didClose(reason: reason, error: error)
     }

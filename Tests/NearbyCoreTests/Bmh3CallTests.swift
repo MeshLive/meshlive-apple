@@ -145,6 +145,23 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertEqual(caller.phase, .closed)
     }
 
+    /// Review 2026-10-27: media from the peer before the call was answered ends the call, for either role (the caller
+    /// never decodes a callee's video while it rings, before any reveal).
+    func testMediaBeforeTheAnswerEndsTheCallOnEitherSide() throws {
+        let (caller, callee, box) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true)
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging)
+        callee.testingSendHeaderEarly(); pump(caller, callee)
+        XCTAssertEqual(caller.phase, .closed, "the caller refused the callee's header while it rang")
+        XCTAssertFalse(box.caller.contains { if case .remoteHeader = $0 { return true }; return false }, "nothing was decoded")
+
+        let (caller2, callee2, box2) = rotatingCall(callerPseudonyms: nil, calleePseudonyms: nil)
+        try caller2.start(now: 0); try callee2.start(now: 0); pump(caller2, callee2)
+        caller2.testingSendHeaderEarly(); pump(caller2, callee2)
+        XCTAssertEqual(callee2.phase, .closed, "the callee refused the caller's header before answering")
+        XCTAssertFalse(box2.callee.contains { if case .remoteHeader = $0 { return true }; return false })
+    }
+
     /// Runs both engines to `t`: timers, then every queued record each way.
     private func step(_ a: CallEngine, _ b: CallEngine, _ t: TimeInterval) {
         a.tick(now: t); b.tick(now: t)

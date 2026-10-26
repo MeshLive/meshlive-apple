@@ -51,16 +51,70 @@ enum CallHistory {
 }
 
 /// The records key in the Keychain (this device only, readable after the first unlock: a call can arrive while the
-/// phone is locked). Created add-only; a key that appeared meanwhile is read back.
+/// phone is locked). Created add-only; a key that appeared meanwhile is read back. On the Mac it lives in the
+/// data-protection keychain (review 2026-10-27), where accessibility and device binding apply as on iOS; a build without
+/// the entitlement for it (`errSecMissingEntitlement`) falls back to the login keychain, and the log says which.
 final class KeychainRecordKeyStore: SealedRecordKeyStore {
     static let account = "records-key"
-    func readKey() throws -> Data? { try KeychainItem.read(Self.account) }
+    #if os(macOS)
+    private var useDataProtection: Bool {
+        #if DEBUG
+        if KeychainItem.ephemeral { return false }
+        #endif
+        return !DesktopPreview.enabled
+    }
+    private func dpQuery() -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: KeychainServices.current,
+         kSecAttrAccount as String: Self.account, kSecUseDataProtectionKeychain as String: true]
+    }
+    #endif
+
+    func readKey() throws -> Data? {
+        #if os(macOS)
+        if useDataProtection {
+            var query = dpQuery(); query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            if status == errSecSuccess { return item as? Data }
+            guard status == errSecItemNotFound || status == errSecMissingEntitlement else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+        }
+        #endif
+        return try KeychainItem.read(Self.account)
+    }
+
     func addKey(_ key: Data) throws {
+        #if os(macOS)
+        if useDataProtection {
+            var add = dpQuery(); add[kSecValueData as String] = key
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            let status = SecItemAdd(add as CFDictionary, nil)
+            if status == errSecDuplicateItem { throw SealedRecordKeyError.duplicate }
+            if status == errSecSuccess { logActual(); return }
+            guard status == errSecMissingEntitlement else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+            AppLog.event("storage", ["event": "records_key", "keychain": "login", "reason": "missing_entitlement"])
+        }
+        #endif
         try KeychainItem.addOnly(Self.account, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     }
+
     func replaceKey(_ key: Data) throws {
-        try KeychainItem.write(Self.account, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+        #if os(macOS)
+        if useDataProtection { SecItemDelete(dpQuery() as CFDictionary) }
+        #endif
+        try? KeychainItem.delete(Self.account)
+        try addKey(key)
     }
+
+    #if os(macOS)
+    /// Logs the keychain and protection class the key actually got (read back, not assumed).
+    private func logActual() {
+        var query = dpQuery(); query[kSecReturnAttributes as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let accessible = (item as? [String: Any])?[kSecAttrAccessible as String] as? String ?? "unknown"
+        AppLog.event("storage", ["event": "records_key", "keychain": "data_protection", "status": "\(status)", "accessible": accessible])
+    }
+    #endif
 }
 
 /// Small local records sealed at rest (recent calls, BMH3 pins): `SealedRecordFiles` next to the verified contacts.

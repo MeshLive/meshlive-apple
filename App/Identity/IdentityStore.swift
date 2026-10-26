@@ -101,6 +101,40 @@ enum KeychainItem {
         #endif
         return KeychainServices.deleteAll(store: store)
     }
+    /// The Mac's data-protection keychain (the records key lives there): one deletion status per service. Without the
+    /// entitlement for it nothing can be stored there, so `errSecMissingEntitlement` counts as nothing found.
+    static func deleteAllDataProtection() -> [OSStatus] {
+        #if os(macOS)
+        if DesktopPreview.enabled { return [] }
+        #if DEBUG
+        if ephemeral { return [] }
+        #endif
+        return KeychainServices.all.map { service in
+            let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                        kSecUseDataProtectionKeychain as String: true] as CFDictionary)
+            return status == errSecMissingEntitlement ? errSecItemNotFound : status
+        }
+        #else
+        return []
+        #endif
+    }
+    static func verifyDataProtectionDeleted() -> [OSStatus] {
+        #if os(macOS)
+        if DesktopPreview.enabled { return [] }
+        #if DEBUG
+        if ephemeral { return [] }
+        #endif
+        return KeychainServices.all.map { service in
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                              kSecUseDataProtectionKeychain as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
+                                              kSecReturnAttributes as String: true] as CFDictionary, &item)
+            return status == errSecMissingEntitlement ? errSecItemNotFound : status
+        }
+        #else
+        return []
+        #endif
+    }
     /// One query per service: `errSecItemNotFound` only when no item of it remains; an error is not absence.
     static func verifyAllDeleted() -> [OSStatus] {
         #if os(macOS) && DEBUG
@@ -218,19 +252,22 @@ enum EmergencyWipe {
             latch.withLock { $0 = true }
             AppLog.stopFileLogging()
             CallNotifier.shared.removeAllForWipe()
+            CrashReports.shared.wipe()
         }
         try? Data().write(to: markerURL, options: .atomic)
-        var deletions = KeychainItem.deleteAll()
+        var deletions = KeychainItem.deleteAll() + KeychainItem.deleteAllDataProtection()
         sweep()
         if let domain = Bundle.main.bundleIdentifier { DesktopPreview.preferences.removePersistentDomain(forName: domain) }
         sweep()
-        deletions += KeychainItem.deleteAll()
+        deletions += KeychainItem.deleteAll() + KeychainItem.deleteAllDataProtection()
         let fm = FileManager.default
         // The directory holding the contacts, the vault guard (and its temporary files) and the pins: gone or empty.
         let identityDir = VerifiedContactsStore.url.deletingLastPathComponent()
         let filesLeft = [VerifiedContactsStore.url, PresenceVault.guardURL, Bmh3PinFile.url, Bmh3PinFile.legacyURL].filter { fm.fileExists(atPath: $0.path) }.count
             + ((try? fm.contentsOfDirectory(atPath: identityDir.path))?.count ?? 0)
-        let complete = WipeVerification.complete(deletions: deletions, verifications: KeychainItem.verifyAllDeleted(), filesLeft: filesLeft)
+        let complete = WipeVerification.complete(deletions: deletions,
+                                                 verifications: KeychainItem.verifyAllDeleted() + KeychainItem.verifyDataProtectionDeleted(),
+                                                 filesLeft: filesLeft)
         if complete { try? FileManager.default.removeItem(at: markerURL) }
         return complete
     }

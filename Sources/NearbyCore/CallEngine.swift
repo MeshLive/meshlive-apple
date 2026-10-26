@@ -252,6 +252,12 @@ public final class CallEngine: MeshConnection {
     var testingWithholdInvite = false
     /// Test seam: a peer that never sends its stream header or media.
     var testingWithholdLocalMedia = false
+    /// Test seam: a peer that sends its stream header before the call was answered (a misbehaving peer).
+    func testingSendHeaderEarly() {
+        let header = StreamHeader(width: settings.width, height: settings.height, fps: settings.fps, codecId: StreamProtocol.codecVP9,
+                                  includeAudio: true)
+        if let encoded = try? header.encoded() { enqueue(.content(.streamHeader, 0, encoded), .control) }
+    }
     /// Test seam: a caller that withheld its reveal sends it now (late).
     func testingSendHeldReveal() throws {
         guard let session = endpoint?.reveal, session.callerMayReveal else { return }
@@ -260,6 +266,20 @@ public final class CallEngine: MeshConnection {
     /// When the secure setup finished (the first open tick), for the Invite deadline.
     private var openSince: TimeInterval?
     private var callerRevealPending: Bool { callRole == .callee && endpoint?.reveal?.peerRevealRequired == true }
+
+    /// Header and media from the peer (review 2026-10-27, both roles; Android CallMediaGate): allowed once the call was
+    /// answered and the peer's required reveal verified; late media after the end is dropped; anything else ends the
+    /// call. The caller thus never decodes or shows a pseudonymous callee's video before its reveal, and nobody's
+    /// media plays before the answer.
+    private func admitMedia() throws -> Bool {
+        switch state?.phase {
+        case .negotiatingMedia?, .active?: break
+        case .ended?: return false
+        default: throw ProtocolError.state("Media before the call was answered")
+        }
+        if endpoint?.reveal?.peerRevealRequired == true { throw ProtocolError.authentication }
+        return true
+    }
     /// True while the peer is a stranger behind a throwaway key.
     public var peerIsStranger: Bool { endpoint?.peerPseudonymous == true && revealedPeer == nil }
     /// The key this phone signs labels with (a pseudonym in a stranger session).
@@ -475,8 +495,8 @@ public final class CallEngine: MeshConnection {
         case .privateCallSignal:
             try handleSignal(try PrivateCallSignalMessage(decoding: content.payload))
         case .streamHeader:
-            // CallerRevealGate: a pseudonymous caller reveals itself before its header; media before that ends the call.
-            if callerRevealPending { throw ProtocolError.authentication }
+            // CallerRevealGate: a pseudonymous peer reveals itself before its header; media before that ends the call.
+            guard try admitMedia() else { return }
             try reassembler.requireIdle("A call stream header")
             let header = try StreamHeader(decoding: content.payload)
             guard endpointCapabilities.decodeCodecMask & StreamProtocol.capabilityMask(codecId: header.codecId) != 0 else {
@@ -489,14 +509,14 @@ public final class CallEngine: MeshConnection {
             onEvent?(.remoteHeader(header))
             if state?.phase == .negotiatingMedia { try transition(.mediaReady) }
         case .mediaPacket:
-            if callerRevealPending { throw ProtocolError.authentication }
+            guard try admitMedia() else { return }
             guard remoteHeader != nil else { throw ProtocolError.state("Peer sent media before its call header") }
             let packet = try MediaPacket(decoding: content.payload, authenticatedFlags: content.flags)
             if packet.flags & StreamProtocol.flagDisplayRotation == 0 { countReceived(packet.payload.count) }
             if !packet.isAudio { try reassembler.requireIdle("A whole call video packet") }
             try deliver(packet)
         case .videoFragment:
-            if callerRevealPending { throw ProtocolError.authentication }
+            guard try admitMedia() else { return }
             guard fragmentsEnabled, remoteHeader != nil else { throw ProtocolError.state("Unexpected call video fragment") }
             countReceived(content.payload.count - CallVideoFragments.headerBytes)
             if let whole = try reassembler.accept(flags: content.flags, fragment: content.payload) {

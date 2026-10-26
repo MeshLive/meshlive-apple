@@ -315,9 +315,7 @@ final class ConnectionDriver {
 
     func pump() {
         guard !closing else { return }
-        #if os(macOS)
         guard !releaseFailedEngine() else { return }
-        #endif
         // Stop reading while the engine holds input (call relay backpressure); resume once it parsed it.
         if let pausable = link as? PausableMeshLink, pausable.readingPaused != engine.ingressHeld {
             pausable.readingPaused = engine.ingressHeld
@@ -328,10 +326,8 @@ final class ConnectionDriver {
             guard !closing else { return }
             #endif
         }
-        #if os(macOS)
         // Sealing or send() can synchronously fail after the initial check.
         guard !releaseFailedEngine() else { return }
-        #endif
         if engine.phase == .closed && !engine.hasPendingOutput && link.queuedBytes == 0 {
             closing = true
             // Give the final record (hang-up, END_ACK, route ack) time to reach the peer, as Android waits for it.
@@ -342,7 +338,8 @@ final class ConnectionDriver {
         }
     }
 
-    #if os(macOS)
+    /// A fatal engine close (an error, a missed deadline such as the Invite deadline) releases the transport at once,
+    /// even when its queue is blocked: nothing more will be sent on it.
     private func releaseFailedEngine() -> Bool {
         guard engine.phase == .closed, engine.closedWithError else { return false }
         closing = true
@@ -350,7 +347,6 @@ final class ConnectionDriver {
         finish(engine.closeReason ?? "Closed")
         return true
     }
-    #endif
 
     private func finish(_ reason: String) {
         #if os(macOS)

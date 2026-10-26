@@ -35,6 +35,7 @@ final class CrashReports: NSObject, ObservableObject, MXMetricManagerSubscriber 
     }
 
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
+        guard !EmergencyWipe.happened else { return }
         store(payloads)
         DispatchQueue.main.async { self.refresh() }
     }
@@ -64,7 +65,16 @@ final class CrashReports: NSObject, ObservableObject, MXMetricManagerSubscriber 
 
     /// One file per report, named by its content hash so a payload delivered twice is kept once; a report already
     /// answered is not kept again.
+    /// The emergency wipe: stop receiving and delete every kept report (the sweep would too; this also stops later
+    /// deliveries in this run).
+    func wipe() {
+        MXMetricManager.shared.remove(self)
+        try? FileManager.default.removeItem(at: Self.directory)
+        DispatchQueue.main.async { self.pending = nil }
+    }
+
     private func keep(_ text: String) {
+        guard !EmergencyWipe.happened else { return }
         let hash = SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
         var seen = defaults.stringArray(forKey: "crashReportsSeen") ?? []
         guard !seen.contains(hash) else { return }
