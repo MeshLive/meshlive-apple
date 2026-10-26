@@ -72,7 +72,8 @@ final class CallAlertUITests: XCTestCase {
         waitForExpectations(timeout: 10)
     }
 
-    /// A call that stops ringing unanswered leaves a missed-call notification with Call back (Android parity).
+    /// A call that stops ringing unanswered leaves a missed-call notification. The fixture caller is not a verified
+    /// contact, so (review 2026-10-27) it is neither named nor offered Call back.
     func testUnansweredCallLeavesAMissedCallNotificationWithCallBack() throws {
         guard env["NEARBY_ALERT_ANSWER"] == "allow" else { throw XCTSkip("needs NEARBY_ALERT_ANSWER=allow") }
         var app = openSettings()
@@ -85,10 +86,10 @@ final class CallAlertUITests: XCTestCase {
         XCUIDevice.shared.press(.home)
         let missed = springboard.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", "Missed call")).firstMatch
         XCTAssertTrue(missed.waitForExistence(timeout: 25), "the missed call is announced after the ringing stops")
-        XCTAssertTrue(missed.label.contains("Asha"), "a known caller is named")
+        XCTAssertFalse(missed.label.contains("Asha"), "a caller who is not a verified contact is not named")
         shot("missed-call")
         missed.press(forDuration: 1.2)
-        XCTAssertTrue(springboard.buttons["Call back"].waitForExistence(timeout: 8), "the notification offers Call back")
+        XCTAssertFalse(springboard.buttons["Call back"].waitForExistence(timeout: 4), "no Call back for a non-contact")
         shot("missed-call-actions")
     }
 }

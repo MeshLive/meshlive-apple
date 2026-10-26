@@ -31,7 +31,9 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
         let callBack = UNNotificationAction(identifier: MissedCallAlert.callBackAction, title: "Call back", options: [.foreground])
         let missed = UNNotificationCategory(identifier: MissedCallAlert.categoryIdentifier, actions: [callBack], intentIdentifiers: [],
                                             hiddenPreviewsBodyPlaceholder: MissedCallAlert.lockedPlaceholder, options: [])
-        center.setNotificationCategories([category, missed])
+        let missedPlain = UNNotificationCategory(identifier: MissedCallAlert.plainCategoryIdentifier, actions: [], intentIdentifiers: [],
+                                                 hiddenPreviewsBodyPlaceholder: MissedCallAlert.lockedPlaceholder, options: [])
+        center.setNotificationCategories([category, missed, missedPlain])
         refreshAuthorization()
     }
 
@@ -97,7 +99,8 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
             let count = MissedCallAlert.nextCount(stillShowing: previous != nil, previous: previous ?? 0)
             let content = UNMutableNotificationContent()
             content.title = MissedCallAlert.title(peerName: peerName, stranger: stranger, count: count)
-            content.categoryIdentifier = MissedCallAlert.categoryIdentifier
+            // Call back only when there is a verified contact to call.
+            content.categoryIdentifier = prefixHex != nil && !stranger ? MissedCallAlert.categoryIdentifier : MissedCallAlert.plainCategoryIdentifier
             content.threadIdentifier = "missed-calls"
             content.sound = .default
             var info: [String: Any] = [MissedCallAlert.countKey: count, MissedCallAlert.videoKey: video]
@@ -128,7 +131,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         // Frontmost, the call screen and ringer already show the call. Inactive (Control Center, Notification Center, a
         // system alert over the app, or on the way to the background) the alert must show, or it would be swallowed.
-        let missed = notification.request.content.categoryIdentifier == MissedCallAlert.categoryIdentifier
+        let missed = MissedCallAlert.isMissedCategory(notification.request.content.categoryIdentifier)
         DispatchQueue.main.async {
             // A missed call stays in the list even while MeshLive is frontmost (the call screen already said so).
             if missed { completionHandler(AppPlatform.active ? [.list] : [.banner, .list, .sound]); return }
@@ -140,7 +143,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let action = response.actionIdentifier
         let content = response.notification.request.content
-        if content.categoryIdentifier == MissedCallAlert.categoryIdentifier {
+        if MissedCallAlert.isMissedCategory(content.categoryIdentifier) {
             let prefix = content.userInfo[MissedCallAlert.prefixKey] as? String
             let video = content.userInfo[MissedCallAlert.videoKey] as? Bool ?? false
             DispatchQueue.main.async {

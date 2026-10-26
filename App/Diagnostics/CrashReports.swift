@@ -107,7 +107,7 @@ final class CrashReports: NSObject, ObservableObject, MXMetricManagerSubscriber 
     /// UI-test sample (`-NearbyCrashReportFixture 1`), made by the same parser from a made-up payload.
     static var fixture: String {
         let json: [String: Any] = ["crashDiagnostics": [[
-            "diagnosticMetaData": ["appVersion": "0.0.0", "appBuildVersion": "0", "osVersion": "Test OS \(Int(Date().timeIntervalSince1970))", "deviceType": "Test device",
+            "diagnosticMetaData": ["appVersion": "0.0.0", "osVersion": "Test OS", "appBuildVersion": "\(Int.random(in: 1..<99_999))", "deviceType": "Test device",
                                    "exceptionType": 1, "signal": 11, "terminationReason": "Namespace SIGNAL, Code 11"],
             "callStackTree": ["callStacks": [["threadAttributed": true, "callStackRootFrames": [[
                 "binaryName": "MeshLive", "offsetIntoBinaryTextSegment": 4660, "binaryUUID": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"]]]]],

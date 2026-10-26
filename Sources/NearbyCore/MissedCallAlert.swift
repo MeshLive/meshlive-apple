@@ -6,6 +6,9 @@ import Foundation
 /// not "missed". Nothing is sent anywhere; it needs the same notification permission as call alerts.
 public enum MissedCallAlert {
     public static let categoryIdentifier = "MISSED_CALL"
+    /// A missed call from someone who is not a verified contact: no Call back action (nothing to call by).
+    public static let plainCategoryIdentifier = "MISSED_CALL_PLAIN"
+    public static func isMissedCategory(_ identifier: String) -> Bool { identifier == categoryIdentifier || identifier == plainCategoryIdentifier }
     public static let callBackAction = "CALL_BACK"
     /// What a locked device shows instead of the text (Android `NotificationPrivacy.publicText(MISSED_CALL)`).
     public static let lockedPlaceholder = "Missed call"
