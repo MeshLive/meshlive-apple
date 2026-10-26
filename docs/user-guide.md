@@ -10,7 +10,7 @@ There is no App Store, TestFlight or other download yet. We will publish a build
 real devices and the results are public. Until then you build it yourself on a Mac:
 
 1. Install Xcode 26 or later and Python 3.
-2. Get the source: `git clone https://github.com/MeshLive/meshlive-ios.git`.
+2. Get the source: `git clone https://github.com/MeshLive/meshlive-apple.git`.
 3. Follow [Building from source](dev/building.md): prepare the pinned codecs, generate the Xcode project, then
    - **iPhone:** open `MeshLive.xcodeproj`, choose your Apple developer team (a free personal team works) and
      run the **MeshLive-iOS** scheme on your iPhone (iOS 16 or newer);
@@ -63,7 +63,7 @@ MeshLive device is there. See [Privacy](privacy.md).
 
 ## Contact us
 
-- Something did not work: the [bug form](https://github.com/MeshLive/meshlive-ios/issues/new?template=bug_report.yml).
+- Something did not work: the [bug form](https://github.com/MeshLive/meshlive-apple/issues/new?template=bug_report.yml).
 - It worked, or partly worked, on your device: the
-  [device test report](https://github.com/MeshLive/meshlive-ios/issues/new?template=device-report.yml).
+  [device test report](https://github.com/MeshLive/meshlive-apple/issues/new?template=device-report.yml).
 - A security problem: report it privately as described in [SECURITY.md](../SECURITY.md), never in a public issue.

@@ -21,7 +21,7 @@ iPhone and Mac models, and iPhone-to-Mac calls.
 
 ## Add your device
 
-Fill in the [device test report](https://github.com/MeshLive/meshlive-ios/issues/new?template=device-report.yml)
+Fill in the [device test report](https://github.com/MeshLive/meshlive-apple/issues/new?template=device-report.yml)
 (about two minutes) for an iPhone or a Mac. Reports where everything worked are as useful as failures. The Android
 phones that MeshLive is tested on are listed in the
 [Android device page](https://github.com/MeshLive/meshlive-android/blob/main/docs/devices.md).

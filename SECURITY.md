@@ -19,7 +19,7 @@ MeshLive for iPhone and Mac is early, pre-release software with no published bin
 Report it privately through GitHub Security Advisories:
 
 1. Open the repository's **Security** tab and choose **Report a vulnerability**, or go straight to
-   <https://github.com/MeshLive/meshlive-ios/security/advisories/new>.
+   <https://github.com/MeshLive/meshlive-apple/security/advisories/new>.
 2. Describe the problem as below and submit. Only the maintainers can see the report.
 
 If you cannot use GitHub Security Advisories, open a public issue that says only "security report" with no details,

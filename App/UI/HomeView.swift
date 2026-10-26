@@ -231,13 +231,28 @@ struct StatusCard: View {
     }
 }
 
-/// One stream row: a consistent leading camera or radio icon, title and route.
+/// Android's round call button on a Calls row: voice on a dark disc, video on a white one.
+struct RoundCallButton: View {
+    let icon: String, label: String, white: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 20, weight: .medium)).foregroundStyle(white ? Color.black : Palette.ink)
+                .frame(width: 48, height: 48).background(white ? Color.white : Palette.chip, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+}
+
+/// One stream row: a consistent leading camera or radio icon (plain, as Android), title and route.
 struct StreamRowView: View {
     let row: StreamRow
     @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
         HStack(spacing: 16) {
-            IconDisc(icon: row.audioOnly ? "radio" : "video", size: 48)
+            Image(systemName: row.audioOnly ? "radio" : "video").font(.system(size: 24)).foregroundStyle(Palette.ink)
+                .frame(width: 48, height: 48).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.listTitle).font(.body.weight(.medium)).foregroundStyle(Palette.ink).lineLimit(typeSize.isAccessibilitySize ? nil : 2)
                     .multilineTextAlignment(.leading)
@@ -351,7 +366,11 @@ struct CallsTab: View {
         } else {
             ForEach(Array(model.people.enumerated()), id: \.element.id) { index, person in
                 if index > 0 { ListDivider() }
-                Button { picked = person } label: { PersonRowView(person: person) }
+                Button { picked = person } label: {
+                    PersonRowView(person: person,
+                                  voice: { model.startCall(to: person, type: .voice) },
+                                  video: { model.startCall(to: person, type: .video) })
+                }
                     .buttonStyle(.plain)
                     .disabled(model.call != nil)
             }
@@ -370,11 +389,15 @@ struct CallsTab: View {
     }
 }
 
-/// One person nearby: name (check mark only for a verified contact), where they are, chevron.
+/// One person nearby: name (check mark only for a verified contact), where they are, and Android's two round call
+/// buttons (voice dark, video white). Tapping the row still offers both calls.
 struct PersonRowView: View {
     let person: PersonRow
+    var voice: (() -> Void)?
+    var video: (() -> Void)?
     var body: some View {
         HStack(spacing: 12) {
+            if voice != nil { IconDisc(icon: "person", size: 48) }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(person.label.title).font(.body.weight(.medium)).foregroundStyle(Palette.ink)
@@ -387,11 +410,16 @@ struct PersonRowView: View {
                 Text(person.routeText).font(.subheadline).foregroundStyle(Palette.dimInk)
             }
             Spacer(minLength: 8)
-            Image(systemName: "chevron.right").font(.body.weight(.semibold)).foregroundStyle(Palette.dimInk).accessibilityHidden(true)
+            if let voice, let video {
+                RoundCallButton(icon: "phone", label: "Voice call \(person.label.title)", white: false, action: voice)
+                RoundCallButton(icon: "video", label: "Video call \(person.label.title)", white: true, action: video)
+            } else {
+                Image(systemName: "chevron.right").font(.body.weight(.semibold)).foregroundStyle(Palette.dimInk).accessibilityHidden(true)
+            }
         }
         .padding(.vertical, 12).frame(minHeight: 72)
         .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: voice == nil ? .combine : .contain)
         .accessibilityIdentifier("person-\(person.prefixHex)")
         .accessibilityHint("Shows voice and video call")
     }

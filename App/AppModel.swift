@@ -432,7 +432,12 @@ final class AppModel: ObservableObject {
     var nodePrefixHex: String { identity?.nodeId.prefix.hex ?? "" }
     var identityPrefix: Data? { identity?.nodeId.prefix }
     /// Your handle (Crockford Base32 of your prefix), never raw hex.
-    var handle: String { identity.flatMap { IdentityHandle.handle(prefix: $0.nodeId.prefix) } ?? "" }
+    var handle: String {
+        #if DEBUG
+        if debugReadme { return "K7Q2M-X4PLA" }   // README fixture: an invented ID, never this device's
+        #endif
+        return identity.flatMap { IdentityHandle.handle(prefix: $0.nodeId.prefix) } ?? ""
+    }
     var decodeMask: UInt8 { VideoDecoderSupport.decodeMask }
     var encodeMask: UInt8 { VideoDecoderSupport.encodeMask }
 
@@ -1306,6 +1311,7 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
+        if name == "readme" { applyReadmeFixture(); return }
         guard name == "populated" else { return }
         debugFixtureActive = true
         if RootView.debugArgument("-NearbyBluetoothStuck") == "1" { bluetoothRestartNeeded = true }
@@ -1338,6 +1344,31 @@ final class AppModel: ObservableObject {
             CallRecord(prefixHex: ravi.hex, direction: .missed, video: false, at: Date().addingTimeInterval(-3_600), seconds: 0),
             CallRecord(prefixHex: asha.hex, direction: .incoming, video: false, at: Date().addingTimeInterval(-86_400), seconds: 3_725),
         ]
+    }
+
+    /// README screenshots (`-NearbyFixture readme`): the same invented people and streams as Android's store
+    /// screenshots, a ready radio and an invented ID. Nothing is written; nothing from this device is shown.
+    private(set) var debugReadme = false
+    private func applyReadmeFixture() {
+        debugFixtureActive = true
+        debugReadme = true
+        func rdi(_ hex: String) -> Data { Data(hex: hex)! }
+        people = [("44e69c0a7a7d", "artsy cascade"), ("67aba670e65a", "boxy rapids")].map { hex, name in
+            PersonRow(id: UUID(), label: PeerLabel.generated(name, seed: rdi(hex)), prefixHex: hex, transport: .gatt, relays: 0, isIPhone: false)
+        }
+        let streamFlags = DiscoveryAnnouncement.flagStreamAvailable | DiscoveryAnnouncement.flagGattTransport
+        streams = [
+            StreamRow(id: UUID(), label: PeerLabel.generated("tidy harbour", seed: rdi("5a5a5a5a5a5a")),
+                      announcement: DiscoveryAnnouncement(nodeIdPrefix: rdi("5a5a5a5a5a5a"), flags: streamFlags, capabilitySummary: AudioLive.summaryAudioOnly,
+                                                          streamToken: 0x8555_1234, routeCost: 0, sequence: 1, streamBitrateKbps: 25),
+                      advertisedTitle: "Ward 12 updates"),
+            StreamRow(id: UUID(), label: PeerLabel.generated("calm meadow", seed: rdi("6b6b6b6b6b6b")),
+                      announcement: DiscoveryAnnouncement(nodeIdPrefix: rdi("6b6b6b6b6b6b"), flags: streamFlags, capabilitySummary: 1, streamToken: 0x8123_4567,
+                                                          routeCost: 0, sequence: 1, streamWidth: 640, streamHeight: 360, streamFps: 15, streamBitrateKbps: 300),
+                      advertisedTitle: "Village meeting"),
+        ]
+        contacts = []
+        recentCalls = []
     }
 
     /// Screenshot aid only: `-NearbyScreen call` (outgoing, ringing), `call-incoming`, `call-incoming-voice`,

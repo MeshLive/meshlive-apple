@@ -81,4 +81,4 @@ which runs it in that session and passes these variables along.
 
 Calls and streams can only be proven on real devices. The physical steps and what has been checked so far are in
 [testing](testing.md). Please send what you find with the
-[device test report](https://github.com/MeshLive/meshlive-ios/issues/new?template=device-report.yml).
+[device test report](https://github.com/MeshLive/meshlive-apple/issues/new?template=device-report.yml).
