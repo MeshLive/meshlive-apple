@@ -68,6 +68,27 @@ final class EngineTests: XCTestCase {
         }
     }
 
+    /// Busy rule (Android F14): a phone already in a call answers an Invite with Decline BUSY and never rings.
+    func testABusyPhoneDeclinesWithBusyBeforeRinging() throws {
+        let (caller, callee, pipe, _, _) = try makeCall()
+        var calleeEvents: [CallEngine.Event] = []
+        callee.onEvent = { calleeEvents.append($0) }
+        callee.declineAsBusy = true
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        XCTAssertTrue(callee.declinedBusy)
+        XCTAssertFalse(calleeEvents.contains { if case .incomingCall = $0 { return true }; return false }, "it never rang")
+        XCTAssertEqual(caller.phase, .closed)
+        XCTAssertTrue(caller.closeReason?.contains("busy") == true, caller.closeReason ?? "-")
+    }
+
+    /// The end-to-end hello never signs transport bit 4 (0x10, Android's in-call link renewal), whatever is on.
+    func testCallHellosNeverSignTheRenewalBit() throws {
+        let (caller, callee, pipe, _, _) = try makeCall(type: .video, fragments: true)
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        XCTAssertEqual((caller.endpoint?.peerCapabilities.transportMask ?? 0x10) & 0x10, 0)
+        XCTAssertEqual((callee.endpoint?.peerCapabilities.transportMask ?? 0x10) & 0x10, 0)
+    }
+
     func testAlignedGattValuesFillWholeLePdusAndStillReassemble() throws {
         XCTAssertEqual(GattChunk.valueBytes(valueLimit: 514, aligned: true), 495)
         XCTAssertEqual(GattChunk.valueBytes(valueLimit: 400, aligned: true), 244)

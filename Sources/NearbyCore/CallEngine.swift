@@ -259,6 +259,10 @@ public final class CallEngine: MeshConnection {
     public var acceptRelayedStrangerCalls = true
     /// Why an incoming call was declined before it rang, or nil.
     public private(set) var relayedDecline: RelayedCallPolicy.Incoming?
+    /// Android F14 busy rule: this phone is already in a call or dialling, so an Invite is declined with BUSY (wire
+    /// value 2) before it rings; the caller shows "Busy" instead of a dropped link.
+    public var declineAsBusy = false
+    public private(set) var declinedBusy = false
     /// True when this call passes through at least one relay: the Invite says so (the caller's claim, which can only
     /// make a call count as relayed), or the authenticated link peer is not the authenticated call peer (a direct call
     /// uses the same key at both layers).
@@ -606,6 +610,13 @@ public final class CallEngine: MeshConnection {
                 try transition(.localDecline)
                 try sendSignal(.decline, reason: .rejected, closeAfter: true)
                 finish("Relayed call declined (\(decision.rawValue))", error: false)
+                return
+            }
+            if declineAsBusy {
+                declinedBusy = true
+                try transition(.localDecline)
+                try sendSignal(.decline, reason: .busy, closeAfter: true)
+                finish("Declined as busy (already in a call)", error: false)
                 return
             }
             ringingSince = now

@@ -627,6 +627,8 @@ final class AppModel: ObservableObject {
     private func handleIncoming(_ link: MeshLink) {
         if let relay = callRelay, relay.awaitingParent { relay.attachParent(link); refreshAdvertising(); return }
         if let watch, watch.awaitingSource { watch.attach(link); refreshAdvertising(); return }
+        if (call != nil || placingCall), availableForCalls, let identity,
+           UserDefaults.standard.object(forKey: "callBusyDecline") as? Bool ?? true { declineBusy(link, identity: identity); return }
         guard call == nil, availableForCalls, let identity else { link.close(); return }
         let pins = rotating.pins
         let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
@@ -636,6 +638,25 @@ final class AppModel: ObservableObject {
         call = controller
         controller.attach(link)
         refreshAdvertising()
+    }
+
+    /// Busy rule (Android F14): an incoming call while this phone is in a call or dialling finishes its handshake and
+    /// is declined with BUSY before it rings; nothing is shown. (Android's glare exception, letting the person this
+    /// phone is dialling ring, needs a second call controller and is not ported.)
+    private var busyDrivers: [ObjectIdentifier: ConnectionDriver] = [:]
+    private func declineBusy(_ link: MeshLink, identity: SigningIdentity) {
+        let engine = CallEngine(role: .callee, transport: link.transport, identity: identity, requestedType: .voice,
+                                encodeMask: VideoDecoderSupport.encodeMask, decodeMask: VideoDecoderSupport.decodeMask,
+                                bmh3: bmh3Options(selected: nil))
+        engine.declineAsBusy = true
+        let driver = ConnectionDriver(engine: engine, link: link)
+        let key = ObjectIdentifier(driver)
+        driver.onFinished = { [weak self] reason in
+            AppLog.event("call_collision", ["action": engine.declinedBusy ? "declined_busy" : "closed", "reason": reason])
+            self?.busyDrivers[key] = nil
+        }
+        busyDrivers[key] = driver
+        driver.start()
     }
 
     // MARK: Calls
