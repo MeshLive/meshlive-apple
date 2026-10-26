@@ -52,6 +52,9 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
     func start() {
         guard !DesktopPreview.enabled else { return }
         MediaPermissions.requestCamera { granted in
+            // Video off (or the call ending) can stop this camera before the permission answer arrives on the main
+            // queue; starting it afterwards would leave a running capture session that nothing can stop.
+            guard !self.stopped else { AppLog.event("camera_start", ["result": "skipped_after_stop"]); return }
             AppLog.event("camera_start", ["permission": granted ? "granted" : "denied", "size": "\(self.width)x\(self.height)", "fps": "\(self.fps)", "kbps": "\(self.bitrateKbps)"])
             guard granted else { self.onFailure?("Camera is off for MeshLive. Turn it on in Settings to send video."); return }
             self.observe()
@@ -161,9 +164,16 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
     }
     func flip() { queue.async { self.front.toggle(); self.forceKeyFrame = true; self.configure() } }
 
+    /// Set on the main queue by `stop()`; a stopped camera is never started again.
+    private var stopped = false
+
     func stop() {
+        stopped = true
         observers.forEach(NotificationCenter.default.removeObserver); observers.removeAll()
-        queue.async { self.session.stopRunning(); self.encoder = nil; self.running = false }
+        queue.async {
+            self.session.stopRunning(); self.encoder = nil; self.running = false
+            AppLog.event("camera_stopped", ["sessionRunning": "\(self.session.isRunning)"])
+        }
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
