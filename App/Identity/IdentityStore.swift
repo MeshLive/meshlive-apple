@@ -350,6 +350,9 @@ struct AppSettings {
     static var relayedStrangerCalls: Bool { d.object(forKey: "relayedStrangerCalls") as? Bool ?? true }
     /// Amendment CP pseudonymous relay edges (Android `test_relayed_pseudonymous_edges`, on). Control arm for tests only:
     /// launch argument `-relayedPseudonymousEdges NO`; no Settings switch.
+    /// DEBUG lab mask (Android `test_relayed_calls_no_direct`, off): the reach tables ignore every target's own offer,
+    /// as if no target were in direct range (needed for a co-located chain test). Launch argument `-relayedNoDirect YES`.
+    static var relayedNoDirect: Bool { d.bool(forKey: "relayedNoDirect") }
     static var relayedPseudonymousEdges: Bool { d.object(forKey: "relayedPseudonymousEdges") as? Bool ?? true }
     /// Stream link pacing (Android LinkPacer, on) and the on-time seed raise (on since 2026-10-16). Control arms for
     /// tests only: launch arguments `-linkPacing NO`, `-onTimeSeedRaise NO`; there is no Settings switch.

@@ -99,6 +99,13 @@ final class CallController: ObservableObject, Identifiable {
     @Published var remoteMuted = false
     @Published var ended: String?
     @Published var relayed = false
+    /// Design C: the on-demand route this caller dialled, and how it went.
+    var relayRoute: RelayRoute?
+    var relayConnectFailed = false
+    var relayReady: Bool { engine.relayReadyRelays != nil }
+    /// Why the route failed before READY (a first hop that could not be connected or closed early counts as a timeout).
+    var relayFailure: RelaySetupFailure? { engine.relaySetupFailure ?? (relayConnectFailed || engine.relayedRouteFailed ? .timeout : nil) }
+    var userCancelled = false
     /// The stranger notice under a ring (nil for a contact): a relayed stranger call names the possible relay in the middle.
     @Published var ringNotice: String?
 
@@ -138,7 +145,8 @@ final class CallController: ObservableObject, Identifiable {
     #endif
 
     init(model: AppModel, role: PrivateCallRole, peerName: String, peerPrefixHex: String?, identity: SigningIdentity,
-         transport: MeshTransport, type: CallType, relayHops: UInt8, rotating: RotatingCallOptions? = nil, bmh3: Bmh3CallOptions? = nil) {
+         transport: MeshTransport, type: CallType, relayHops: UInt8, rotating: RotatingCallOptions? = nil, bmh3: Bmh3CallOptions? = nil,
+         relayed relayedOptions: RelayedCallOptions? = nil) {
         self.model = model; self.role = role; self.transport = transport; self.peerName = peerName; self.peerPrefixHex = peerPrefixHex
         callType = type; cameraOn = type == .video
         #if os(macOS)
@@ -153,7 +161,7 @@ final class CallController: ObservableObject, Identifiable {
                                          videoBitrate: MediaDefaults.videoKbps * 1000, audioBitrate: 24_000)
         engine = CallEngine(role: role, transport: transport, identity: identity, requestedType: type, encodeMask: VideoDecoderSupport.encodeMask,
                             decodeMask: VideoDecoderSupport.decodeMask, settings: settings, expectedPeerPrefix: expected, relayHops: relayHops,
-                            labels: model.callLabelOptions(), rotating: rotating, bmh3: bmh3)
+                            labels: model.callLabelOptions(), rotating: rotating, bmh3: bmh3, relayed: relayedOptions)
         if rotating != nil, role == .callee {
             // RV8 tarpit: strangers' link hellos wait 2^(n-6) s per epoch; verified contacts never wait.
             let runtime = model.rotating
@@ -468,6 +476,7 @@ final class CallController: ObservableObject, Identifiable {
     /// This call's outgoing connect, cancelled when the user ends the call before its link exists.
     var connectHandle: ConnectHandle?
     func end() {
+        userCancelled = true
         // Still connecting (no link yet): this is the user's cancel. Mark it first, then stop the radio attempt, so
         // the attempt's "stopped" completion is not reported as "Couldn't reach" and nothing stays connecting.
         if driver == nil, role == .caller, ended == nil {

@@ -533,7 +533,14 @@ struct ContactRow: View {
     private var names: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(contact.displayName).font(.body.weight(.medium)).foregroundStyle(Palette.ink)
-            if nearbyPerson != nil { Text("Nearby now").font(.subheadline).foregroundStyle(Palette.dimInk) }
+            if model.contactDialWait?.contact == contact {
+                HStack(spacing: 8) {
+                    Text("Looking nearby\u{2026}").font(.subheadline).foregroundStyle(Palette.dimInk)
+                    Button("Cancel") { model.cancelContactDialWait() }.font(.subheadline)
+                }
+            } else if let person = nearbyPerson {
+                Text(person.relayRoute == nil ? "Nearby now" : person.routeText).font(.subheadline).foregroundStyle(Palette.dimInk)
+            }
         }
         .accessibilityElement(children: .combine)
     }
@@ -551,6 +558,7 @@ struct ContactRow: View {
     }
     private func call(_ type: CallType) {
         if let person = nearbyPerson { model.startCall(to: person, type: type) }
+        else if model.relayedCalls { model.waitForContact(contact, type: type) }   // up to 45 s, direct or relayed
         else { notFound = true }
     }
 }

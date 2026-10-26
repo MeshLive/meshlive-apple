@@ -54,6 +54,29 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     private var serverLinks: [UUID: GattServerLink] = [:]
     private var knownPeripherals: [UUID: CBPeripheral] = [:]
 
+    /// EXPERIMENTAL relayed calls (Design C): reach tables fed from this phone's own scans (call offers and reach
+    /// pages), one per population (fixed prefixes; role-0 RDIs with rotating IDs). Nil while the switch is off, so
+    /// nothing is read or kept. Peers are discovery row IDs.
+    private(set) var reachFixed: ReachTable<UUID>?
+    private(set) var reachRotating: ReachTable<UUID>?
+    var reachPagesSeen = 0
+
+    static var reachClockMs: Int64 { Int64((ProcessInfo.processInfo.systemUptime * 1000).rounded()) }
+
+    /// Turns the relayed-call tables on or off (off clears them). `ownRdis` are this phone's current role-0 RDIs.
+    func configureRelayedCalls(on: Bool, rotating: Bool, ownPrefix: Data, ownRdis: @escaping () -> [Data], maxRelays: Int = RelayedCalls.defaultMaxRelays,
+                               directSightings: @escaping () -> Bool = { true }) {
+        guard on else { reachFixed = nil; reachRotating = nil; return }
+        var config = ReachConfig(); config.maxRelays = maxRelays
+        if reachFixed == nil {
+            reachFixed = ReachTable(ownPrefix: ownPrefix, config: config, clock: { MeshRadio.reachClockMs }, directSightings: directSightings)
+        }
+        if rotating, reachRotating == nil {
+            reachRotating = ReachTable(ownPrefix: ownPrefix, config: config, clock: { MeshRadio.reachClockMs }, rotating: true,
+                                       ownIds: ownRdis, directSightings: directSightings)
+        } else if !rotating { reachRotating = nil }
+    }
+
     /// Experimental labels: read public title pages (version-3 manufacturer data) into this board.
     var titlePages = false
     /// Experimental rotating IDs: accept compact v2 / announcement version 5 ("Nearby phone").
@@ -184,6 +207,16 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         var announcement: DiscoveryAnnouncement?
         var iPhone = false
         if let mfr = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+            if reachFixed != nil || reachRotating != nil, mfr.count > 3, mfr.prefix(2) == Data([0xff, 0xff]),
+               ReachPageCodec.isReachPage(mfr.dropFirst(2).rebased) {
+                // Reach pages take their own path before any per-device dedup (a relay rotates its pages).
+                if let page = try? ReachPageCodec.decode(mfr.dropFirst(2).rebased) {
+                    reachPagesSeen += 1
+                    (page.rotating ? reachRotating : reachFixed)?.observePage(page, address: peripheral.identifier.uuidString)
+                    onPeersChanged?()
+                }
+                return
+            }
             if titlePages, mfr.count > 3, mfr.prefix(2) == Data([0xff, 0xff]), TitlePageCodec.isTitlePage(mfr.dropFirst(2).rebased) {
                 // Title pages take their own path before any per-device dedup (rotated pages must all be seen).
                 if let page = try? TitlePageCodec.decode(mfr.dropFirst(2).rebased), titleBoard.add(page) != nil { onPeersChanged?() }
@@ -208,6 +241,12 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
                                             "kind": kind, "transport": announcement.transport?.rawValue ?? "classic", "iphone": "\(iPhone)",
                                             "routeCost": "\(announcement.routeCost)", "rssi": "\(RSSI.intValue)", "new": "\(change.isNew)",
                                             "addressChanged": "\(change.handleReplaced)", "rows": "\(table.entries.count)"])
+        }
+        if announcement.isPrivateCallOffer, announcement.routeCost == 0, let reach = announcement.rotating ? reachRotating : reachFixed,
+           let row = table.entries.values.first(where: { $0.handle == peripheral.identifier && $0.announcement.nodeIdPrefix == announcement.nodeIdPrefix })?.rowId {
+            reach.observeOffer(peer: row, announcement: announcement, address: peripheral.identifier.uuidString, rssi: RSSI.intValue)
+            // A routed row can appear or change without the direct list changing.
+            if !change.listChanged, reach.size > 0 { onPeersChanged?() }
         }
         if change.listChanged { onPeersChanged?() }
     }

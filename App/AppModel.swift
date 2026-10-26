@@ -12,8 +12,15 @@ struct PersonRow: Identifiable, Equatable {
     let transport: MeshTransport
     let relays: Int
     let isIPhone: Bool
+    /// Experimental relayed calls (Design C): an on-demand route through helpers, dialled at `hopRowId`.
+    var relayRoute: RelayRoute? = nil
+    var hopRowId: UUID? = nil
     /// One plain sentence: where the person is, never technical words.
     var routeText: String {
+        if let relayRoute {
+            // A reach page is a hint, not proof of identity (Android people_reach_relayed).
+            return relayRoute.relays == 1 ? "Via 1 phone \u{00B7} not confirmed" : "Via \(relayRoute.relays) phones \u{00B7} not confirmed"
+        }
         let place = relays == 0 ? "Nearby" : relays == 1 ? "Through 1 other phone" : "Through \(relays) other phones"
         return label.handle.isEmpty ? place : "\(place), ID \(label.shortHandle)"
     }
@@ -149,6 +156,7 @@ final class AppModel: ObservableObject {
     #endif
 
     private func updateDiscoveryCompatibility() {
+        configureRelayedCalls()
         #if os(macOS)
         radio.acceptRotating = desktopCallCompatibility.acceptsRotating
         rebuildLists()
@@ -193,7 +201,50 @@ final class AppModel: ObservableObject {
     /// EXPERIMENTAL BMH3 (Settings > Advanced "Hidden identities" and its child "Pseudonymous toward strangers").
     @Published var hiddenIdentities = AppSettings.hiddenIdentities { didSet { AppSettings.hiddenIdentities = hiddenIdentities } }
     @Published var bmh3Pseudonyms = AppSettings.bmh3Pseudonyms { didSet { AppSettings.bmh3Pseudonyms = bmh3Pseudonyms } }
-    @Published var relayedCalls = AppSettings.relayedCalls { didSet { AppSettings.relayedCalls = relayedCalls } }
+    @Published var relayedCalls = AppSettings.relayedCalls {
+        didSet { AppSettings.relayedCalls = relayedCalls; configureRelayedCalls(); refreshAdvertising(); rebuildLists() }
+    }
+
+    /// Design C reach tables while "Relayed calls" is on; the rotating population only with rotating IDs on.
+    func configureRelayedCalls() {
+        guard let identity else { radio.configureRelayedCalls(on: false, rotating: false, ownPrefix: Data(), ownRdis: { [] }); return }
+        let nodeId = identity.nodeId
+        radio.configureRelayedCalls(on: relayedCalls, rotating: rotatingIds, ownPrefix: nodeId.prefix,
+                                    ownRdis: { [weak self] in self.map { [$0.rotating.callEntry(nodeId: nodeId).rdi] } ?? [] },
+                                    directSightings: { !AppSettings.relayedNoDirect })
+        AppLog.event("relayed_calls", ["enabled": "\(relayedCalls)", "rotating": "\(relayedCalls && rotatingIds)", "consent": "\(relayedCalls)",
+                                       "help": "false", "maxRelays": "\(RelayedCalls.defaultMaxRelays)"])
+    }
+
+    /// Relayed calls: routed rows for saved contacts with no direct offer, from the reach tables (only contacts are
+    /// listed, as Android's default; a stranger several phones away is never shown).
+    private func routedRows(direct: [PersonRow]) -> [PersonRow] {
+        guard relayedCalls else { return [] }
+        var rows: [PersonRow] = []
+        let le: (DiscoveryAnnouncement) -> Bool = { $0.transport != nil && !$0.usesClassic }
+        for (table, rotatingTable) in [(radio.reachFixed, false), (radio.reachRotating, true)] {
+            guard let table else { continue }
+            for target in table.relayedTargets(accept: le) {
+                let contact: VerifiedContact?
+                if rotatingTable {
+                    let hits = rotating.vault.recognition.lookup(target)
+                    contact = hits.count == 1 && hits[0].role == RotatingDiscoveryIds.roleCallOffer
+                        ? contacts.first { $0.fingerprintHex.hasPrefix(hits[0].contact.hex) } : nil
+                } else {
+                    contact = contacts.first { $0.nodePrefixHex == target.hex }
+                }
+                guard let contact, !direct.contains(where: { $0.prefixHex == contact.nodePrefixHex }),
+                      !rows.contains(where: { $0.prefixHex == contact.nodePrefixHex }),
+                      let route = table.callerRoutes(target, accept: le).first(where: { $0.nextHop != nil }), let helper = route.nextHop,
+                      let rowId = UUID(uuidString: "00000000-0000-000\(rotatingTable ? 1 : 0)-0000-\(target.hex)") else { continue }
+                rows.append(PersonRow(id: rowId, label: PeerLabel(prefix: Data(hex: contact.nodePrefixHex) ?? target, contactName: contact.displayName),
+                                      prefixHex: contact.nodePrefixHex, transport: route.hop.announcement.transport ?? .gatt, relays: route.relays,
+                                      isIPhone: false, relayRoute: RelayRoute(target: target, helperPrefix: helper, relays: route.relays, rotating: rotatingTable),
+                                      hopRowId: route.hop.peer))
+            }
+        }
+        return rows
+    }
     /// Kept for 30 days across restarts, as Android (a stripped hint cannot downgrade a pinned peer to BMH2).
     let bmh3Pins = Bmh3Pins(storage: DesktopPreview.enabled ? nil : Bmh3PinFile())
     /// The BMH3 options of one call, or nil (BMH2 only). Mac compatibility can use a per-attempt
@@ -543,6 +594,8 @@ final class AppModel: ObservableObject {
                         : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex)),
                       prefixHex: p.prefixHex, transport: p.announcement.transport ?? .gatt, relays: Int(p.announcement.routeCost), isIPhone: p.isIPhone)
         }
+        people += routedRows(direct: people)
+        resumeContactDialWait()
         // A malformed audio-only marker is never listed (Android StreamOfferKind.MALFORMED; Android lists it as video
         // with its switch off, this app refuses it either way). Audio-only offers are listed only with audio live on.
         let audioLive = AppSettings.audioLive
@@ -622,6 +675,10 @@ final class AppModel: ObservableObject {
                 advertisedEpoch = entry.epoch
                 #endif
             }
+            // Relayed calls: the consent bit (this phone may be found and called through other phones).
+            if relayedCalls, let offer = announcement {
+                announcement = RelayedCalls.offerFor(offer, consentOn: true, helperActive: false, rotatingCompat: true)
+            }
         }
         #if os(macOS)
         if desktopCallPresence != nil, !desktopWindowOpen,
@@ -650,7 +707,7 @@ final class AppModel: ObservableObject {
         let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
                                         identity: identity, transport: link.transport, type: .video, relayHops: 0,
                                         rotating: rotatingIds ? withPresence(RotatingCallOptions(entries: { pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) })) : nil,
-                                        bmh3: bmh3Options(selected: nil))
+                                        bmh3: bmh3Options(selected: nil), relayed: relayedCalls ? RelayedCallOptions(featureOn: true) : nil)
         call = controller
         controller.attach(link)
         refreshAdvertising()
@@ -710,6 +767,7 @@ final class AppModel: ObservableObject {
 
     private func placeCall(to person: PersonRow, type: CallType, tappedAt: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard call == nil, let identity else { return }
+        if person.relayRoute != nil { placeRelayedCall(to: person, type: type, tappedAt: tappedAt, identity: identity); return }
         let retry = CallRetry(personId: person.id, prefixHex: person.prefixHex, video: type == .video, name: person.label.title)
         lastOutgoing = retry
         guard let peer = radio.peers[person.id], !(peer.announcement.rotating && peer.announcement.routeCost > 0) else {
@@ -727,7 +785,8 @@ final class AppModel: ObservableObject {
                                         peerPrefixHex: peer.announcement.rotating ? nil : person.prefixHex, identity: identity, transport: person.transport, type: type,
                                         relayHops: UInt8(min(Int(peer.announcement.routeCost), 15)),
                                         rotating: outgoingRotatingOptions(selected: peer.announcement),
-                                        bmh3: bmh3Options(selected: peer.announcement))
+                                        bmh3: bmh3Options(selected: peer.announcement),
+                                        relayed: relayedCalls ? RelayedCallOptions(featureOn: true) : nil)
         call = controller
         controller.startTimeline(origin: tappedAt)
         controller.markStage("permissions")
@@ -752,6 +811,117 @@ final class AppModel: ObservableObject {
             self?.refreshAdvertising()
         }
         controller.connectHandle?.onStage = { [weak controller] stage in controller?.markStage(stage) }
+    }
+
+    // MARK: Experimental relayed calls (Design C), caller
+
+    /// One relayed dial's candidate routes (Android RelayCandidates): at most 3 helpers within 60 s of the tap.
+    private struct RelayCandidates { var person: PersonRow; let type: CallType; let tappedAt: TimeInterval; var tried: [Data] }
+    private var relayCandidates: RelayCandidates?
+
+    private func placeRelayedCall(to person: PersonRow, type: CallType, tappedAt: TimeInterval, identity: SigningIdentity) {
+        guard relayedCalls, let route = person.relayRoute, let hopRow = person.hopRowId, let hop = radio.peers[hopRow]?.announcement,
+              RelayedCalls.isRelayHelperOffer(hop, rotating: route.rotating) else {
+            callNotice = "Couldn't reach \(person.label.title) \u{2013} the phone that could pass the call on has moved away."
+            AppLog.event("relayed_setup", ["role": "caller", "result": "failed", "reason": "no_helper_offer"]); return
+        }
+        if relayCandidates?.person.prefixHex != person.prefixHex || relayCandidates?.tappedAt != tappedAt {
+            relayCandidates = RelayCandidates(person: person, type: type, tappedAt: tappedAt, tried: [])
+        }
+        relayCandidates?.tried.append(route.helperPrefix)
+        let selected = RelayedCalls.routedAnnouncement(target: route.target, cost: route.relays, hop: hop)
+        var bmh3 = bmh3Options(selected: selected)
+        bmh3?.relayHop = hop
+        let controller = CallController(model: self, role: .caller, peerName: person.label.title,
+                                        peerPrefixHex: route.rotating ? nil : route.target.hex, identity: identity, transport: hop.transport ?? .gatt,
+                                        type: type, relayHops: UInt8(route.relays),
+                                        rotating: route.rotating ? outgoingRotatingOptions(selected: selected) : nil, bmh3: bmh3,
+                                        relayed: RelayedCallOptions(featureOn: true, route: route, pseudonymousEdges: AppSettings.relayedPseudonymousEdges,
+                                                                    setupStartedAt: tappedAt))
+        controller.relayRoute = route
+        lastOutgoing = CallRetry(personId: person.id, prefixHex: person.prefixHex, video: type == .video, name: person.label.title)
+        call = controller
+        controller.startTimeline(origin: tappedAt)
+        refreshAdvertising()
+        controller.phaseText = "Calling…"
+        AppLog.event("relayed_setup", ["role": "caller", "result": "dialing", "budget": "\(route.relays)", "rotating": "\(route.rotating)",
+                                       "attempt": "\(relayCandidates?.tried.count ?? 1)"])
+        controller.markStage("connect")
+        controller.connectHandle = radio.connect(to: hopRow, transport: hop.transport ?? .gatt) { [weak self, weak controller] result in
+            let stopped = { if case .failure(let error) = result { return (error as? RadioError)?.stage == "stopped" }; return false }()
+            guard let controller, controller.ended == nil, !stopped else {
+                if case .success(let link) = result { link.close() }
+                self?.refreshAdvertising(); return
+            }
+            switch result {
+            case .success(let link): controller.attach(link)
+            case .failure(let error):
+                controller.relayConnectFailed = true
+                controller.failed("Couldn't reach \(person.label.title) \u{2013} the phone that could pass the call on did not answer.",
+                                  stage: (error as? RadioError)?.stage ?? "connect", detail: "\(error)")
+            }
+            self?.refreshAdvertising()
+        }
+        controller.connectHandle?.onStage = { [weak controller] stage in controller?.markStage(stage) }
+    }
+
+    /// A relayed route's outcome feeds the reach table; a route that failed before READY hands over to the next
+    /// candidate (at most 3 helpers within 60 s of the tap). Returns true when another route was dialled.
+    private func relayedOutcome(_ controller: CallController) -> Bool {
+        guard let route = controller.relayRoute else { return false }
+        let table = route.rotating ? radio.reachRotating : radio.reachFixed
+        if controller.relayReady {
+            table?.markUsed(relay: route.helperPrefix, target: route.target)
+            relayCandidates = nil
+            return false
+        }
+        let failure = controller.relayFailure
+        table?.markFailed(relay: route.helperPrefix, target: route.target, noRoute: failure == .noRoute)
+        AppLog.event("relayed_setup", ["role": "caller", "result": "failed", "budget": "\(route.relays)", "reason": failure?.label ?? "invalid"])
+        guard var candidates = relayCandidates, controller.userCancelled == false, candidates.tried.count < RelayedCalls.maxCandidates,
+              ProcessInfo.processInfo.systemUptime - candidates.tappedAt < TimeInterval(RelayedCalls.candidateWindowMs) / 1000,
+              let identity, let table else { relayCandidates = nil; return false }
+        let le: (DiscoveryAnnouncement) -> Bool = { $0.transport != nil && !$0.usesClassic }
+        guard let next = table.callerRoutes(route.target, accept: le).first(where: { r in r.nextHop.map { h in !candidates.tried.contains(h) } ?? false }),
+              let helper = next.nextHop else { relayCandidates = nil; return false }
+        var person = candidates.person
+        person.relayRoute = RelayRoute(target: route.target, helperPrefix: helper, relays: next.relays, rotating: route.rotating)
+        person.hopRowId = next.hop.peer
+        candidates.person = person
+        relayCandidates = candidates
+        AppLog.event("relayed_setup", ["role": "caller", "result": "next_candidate", "attempt": "\(candidates.tried.count + 1)"])
+        call = nil
+        placeRelayedCall(to: person, type: candidates.type, tappedAt: candidates.tappedAt, identity: identity)
+        return true
+    }
+
+    // MARK: Contact dial wait (relayed calls)
+
+    /// A contact called from Contacts while not listed: with relayed calls on, wait up to 45 s for a direct or relayed
+    /// row (Android RELAYED_CONTACT_WAIT_MS); the call starts from that row.
+    struct ContactDialWait: Equatable { let contact: VerifiedContact; let type: CallType; let deadline: TimeInterval }
+    @Published private(set) var contactDialWait: ContactDialWait?
+    static let relayedContactWait: TimeInterval = 45
+
+    func waitForContact(_ contact: VerifiedContact, type: CallType) {
+        let wait = ContactDialWait(contact: contact, type: type, deadline: ProcessInfo.processInfo.systemUptime + Self.relayedContactWait)
+        contactDialWait = wait
+        AppLog.event("call_invite", ["state": "waiting", "reason": "contact_not_listed", "timeoutMs": "\(Int(Self.relayedContactWait * 1000))"])
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.relayedContactWait) { [weak self] in
+            guard let self, self.contactDialWait == wait else { return }
+            self.contactDialWait = nil
+            AppLog.event("call_invite", ["state": "expired", "reason": "peer_not_seen"])
+            self.callNotice = "\(contact.displayName) was not found nearby, directly or through other phones. Try again when they appear."
+        }
+    }
+
+    func cancelContactDialWait() { contactDialWait = nil }
+
+    private func resumeContactDialWait() {
+        guard let wait = contactDialWait, call == nil, let person = nearbyPerson(for: wait.contact) else { return }
+        contactDialWait = nil
+        AppLog.event("call_invite", ["state": "resumed", "relayed": "\(person.relayRoute != nil)"])
+        startCall(to: person, type: wait.type)
     }
 
     /// Records the finished call in the local history (outgoing / incoming / missed).
@@ -800,6 +970,7 @@ final class AppModel: ObservableObject {
     func callFinished(_ controller: CallController) {
         // An older call's delayed dismissal must not clear a newer call's ringing alert.
         guard call === controller else { return }
+        if relayedOutcome(controller) { return }
         CallNotifier.shared.clear()
         if controller.activeSince != nil { CallNotifier.shared.requestIfAppropriate(.callEnded) }
         remember(controller)
