@@ -193,6 +193,7 @@ final class AppModel: ObservableObject {
     /// EXPERIMENTAL BMH3 (Settings > Advanced "Hidden identities" and its child "Pseudonymous toward strangers").
     @Published var hiddenIdentities = AppSettings.hiddenIdentities { didSet { AppSettings.hiddenIdentities = hiddenIdentities } }
     @Published var bmh3Pseudonyms = AppSettings.bmh3Pseudonyms { didSet { AppSettings.bmh3Pseudonyms = bmh3Pseudonyms } }
+    @Published var relayedCalls = AppSettings.relayedCalls { didSet { AppSettings.relayedCalls = relayedCalls } }
     /// Kept for 30 days across restarts, as Android (a stripped hint cannot downgrade a pinned peer to BMH2).
     let bmh3Pins = Bmh3Pins(storage: DesktopPreview.enabled ? nil : Bmh3PinFile())
     /// The BMH3 options of one call, or nil (BMH2 only). Mac compatibility can use a per-attempt
@@ -203,6 +204,7 @@ final class AppModel: ObservableObject {
         #else
         guard hiddenIdentities else { return nil }
         var options = Bmh3CallOptions(pseudonyms: bmh3Pseudonyms && rotatingIds, selected: selected, pins: bmh3Pins)
+        options.pseudonymousRelayEdges = AppSettings.relayedPseudonymousEdges
         #endif
         if rotatingIds {
             // Phase 2: real keys between contacts through the lease-derived contact tag (PROTOCOL "Real lease keys").

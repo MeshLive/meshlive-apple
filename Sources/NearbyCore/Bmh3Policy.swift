@@ -146,6 +146,9 @@ public final class Bmh3CallSettings {
     public var contactTag: Bmh3ContactTag?
     /// Initiator: the tag applies at the link layer only toward the advert's owner (route cost 0), never a relay.
     public var linkTag: Bool = true
+    /// Initiator (Amendment CP): the link override is presented as a declared throwaway (extension PSEUDONYM), so a
+    /// pseudonym-mode answerer may answer with its own throwaway; false presents it as an undeclared key.
+    public var declareLinkOverride = false
     /// Responder (phase 2): `K_tag` checks of this phone's own day keys against the adverts it has on air or just left.
     public var tagChecks: () -> [Bmh3ContactTag] = { [] }
     /// Responder: a matched tag must come from a contact this phone delivered its current lease to (else a lease leaked).

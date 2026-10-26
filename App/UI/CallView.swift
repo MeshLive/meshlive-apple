@@ -90,6 +90,9 @@ struct CallView: View {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                     Text(stateLine).font(Typo.timer).foregroundStyle(.white.opacity(0.75))
                 }
+                if call.phase == .incomingRinging, let notice = call.ringNotice {
+                    Text(notice).font(Typo.caption).foregroundStyle(Palette.dimInk).fixedSize(horizontal: false, vertical: true)
+                }
                 if call.remoteMuted && call.phase == .active {
                     Label("Their microphone is off", systemImage: "mic.slash.fill").font(Typo.caption).foregroundStyle(Palette.dimInk)
                 }

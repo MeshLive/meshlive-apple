@@ -63,8 +63,10 @@ public final class SecureLink {
         if let bmh3, bmh3.speak {
             // Toward a relay (route cost above 0) a throwaway key replaces the real one; a stranger presentation is for
             // the advert's owner only.
-            let linkIdentity = bmh3.linkIdentityOverride ?? identity
-            let stranger = bmh3.linkIdentityOverride == nil ? bmh3.stranger : nil
+            let declared = bmh3.declareLinkOverride ? bmh3.linkIdentityOverride : nil
+            let linkIdentity = declared == nil ? (bmh3.linkIdentityOverride ?? identity) : identity
+            // Without a tag the initiator presents its stranger presentation, never `identity` (rule P).
+            let stranger = declared ?? (bmh3.linkIdentityOverride == nil ? bmh3.stranger : nil)
             let config = try Bmh3Config(purpose: .link, identity: linkIdentity, capabilities: capabilities, entropy: bmh3.entropy,
                                         stranger: try stranger.map { try Bmh3Presentation(identity: $0, capabilities: capabilities, pseudonym: true) })
             let tag = bmh3.linkTag && bmh3.linkIdentityOverride == nil ? bmh3.contactTag : nil

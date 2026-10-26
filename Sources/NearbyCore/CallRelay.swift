@@ -159,12 +159,26 @@ public final class CallRelayHop {
     public let hiddenIdentities: Bool
     private let pins: Bmh3Pins?
 
+    /// Amendment CP (pseudonym mode with `test_relayed_pseudonymous_edges` on): the child hop always speaks BMH3 with a
+    /// declared throwaway, fresh for this connection, no tag and nothing pinned. A child that answers with a real key
+    /// must be the callee at route cost 0; a child that declared a throwaway is not bound (the caller's end-to-end check
+    /// authenticates the callee).
+    public let pseudonymousEdges: Bool
+
     public init(identity: SigningIdentity, transport: MeshTransport, childOffer: DiscoveryAnnouncement,
-                hiddenIdentities: Bool = false, pins: Bmh3Pins? = nil, budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget) {
+                hiddenIdentities: Bool = false, pins: Bmh3Pins? = nil, budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget,
+                pseudonymousEdges: Bool = false) {
         self.identity = identity; self.transport = transport; self.childOffer = childOffer
         self.hiddenIdentities = hiddenIdentities; self.pins = pins; self.budget = budget
+        self.pseudonymousEdges = hiddenIdentities && pseudonymousEdges
         var childSettings: Bmh3CallSettings?
-        if hiddenIdentities, Bmh3Choice.decide(enabled: true, only: false, offer: childOffer, pinned: pins?.isPinned(childOffer.nodeIdPrefix) ?? false).bmh3 {
+        if self.pseudonymousEdges {
+            let settings = Bmh3CallSettings(speak: true, stranger: SoftwareSigningIdentity(), checkResponder: { peer, _ in
+                if !peer.pseudonymous, childOffer.routeCost == 0, peer.nodeId.prefix != childOffer.nodeIdPrefix { throw ProtocolError.authentication }
+            })
+            settings.linkTag = false
+            childSettings = settings
+        } else if hiddenIdentities, Bmh3Choice.decide(enabled: true, only: false, offer: childOffer, pinned: pins?.isPinned(childOffer.nodeIdPrefix) ?? false).bmh3 {
             // A relay presents its real key. At route cost 0 the child must be the callee (the prefix, checked before this
             // relay reveals itself); a pseudonymous answerer is refused by the engine (a real key never answers a throwaway).
             let settings = Bmh3CallSettings(speak: true, checkResponder: { peer, _ in
@@ -175,6 +189,14 @@ public final class CallRelayHop {
         }
         child = CallRelayLink(role: .initiator, transport: transport, identity: identity, bmh3: childSettings)
         child.onAuthenticated = { [unowned self] id, caps in
+            if self.pseudonymousEdges, child.linkPeerPseudonymous {
+                // A declared throwaway is only acceptable as the callee itself (route cost 0); a next relay answers real.
+                guard childOffer.routeCost == 0, id != identity.nodeId else { throw ProtocolError.state("A next relay must answer with its real key") }
+                childNodeId = id
+                childAuthenticatedAt = child.lastReceiveAt
+                set(.waitingForParent)
+                return
+            }
             if let problem = CallRelayChain.childProblem(childRouteCost: childOffer.routeCost, calleePrefix: childOffer.nodeIdPrefix,
                                                           ownNodeId: identity.nodeId, child: id, caps: caps) {
                 throw ProtocolError.state(problem)

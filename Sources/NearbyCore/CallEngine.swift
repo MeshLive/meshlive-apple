@@ -75,6 +75,9 @@ public struct Bmh3CallOptions {
     /// budget (Android `epoch`, review PR3). Nil keeps the process-wide pair.
     public var epoch: (() -> Int64)?
     public var epochGuards: Bmh3EpochGuards = Bmh3CallSettings.epochGuards
+    /// Amendment CP (Android `test_relayed_pseudonymous_edges`, on; false is the control arm): toward a relay the caller's
+    /// fresh link throwaway declares PSEUDONYM instead of posing as a real key.
+    public var pseudonymousRelayEdges = true
     public init(pseudonyms: Bool, selected: DiscoveryAnnouncement? = nil, pins: Bmh3Pins? = nil,
                 budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
         self.pseudonyms = pseudonyms; self.selected = selected; self.pins = pins; self.budget = budget; self.wallEpoch = wallEpoch
@@ -95,6 +98,7 @@ public struct Bmh3CallOptions {
             if let pins, !towardRelay { settings.onRealResponder = { peer in pins.pin(peer.nodeId.prefix) } }
             settings.contactTag = contactTag
             settings.linkTag = !towardRelay
+            settings.declareLinkOverride = towardRelay && pseudonymousRelayEdges
             return settings
         case .callee:
             // Rule P fails closed: in pseudonym mode every untagged connection meets a fresh throwaway for this connection.
@@ -248,6 +252,19 @@ public final class CallEngine: MeshConnection {
     private var callerRevealDeadlineStart: TimeInterval?
     /// Test seam: a caller that never reveals itself (a misbehaving peer).
     var testingWithholdOwnReveal = false
+    /// Target-side rules for relayed calls (Android Design C target rule, Amendment CP): a relayed call is declined
+    /// before it rings unless this phone's relayed calls are on, and a relayed stranger call also needs
+    /// `acceptRelayedStrangerCalls`. The app sets both; they default to true only for the engine's own tests.
+    public var acceptRelayedCalls = true
+    public var acceptRelayedStrangerCalls = true
+    /// Why an incoming call was declined before it rang, or nil.
+    public private(set) var relayedDecline: RelayedCallPolicy.Incoming?
+    /// True when this call passes through at least one relay: the Invite says so (the caller's claim, which can only
+    /// make a call count as relayed), or the authenticated link peer is not the authenticated call peer (a direct call
+    /// uses the same key at both layers).
+    public var isRelayed: Bool {
+        relayHops > 0 || (endpoint.map { session in peerLinkNodeId.map { $0 != session.peerNodeId } ?? false } ?? false)
+    }
     /// Test seam: a caller that opens the link but never sends its Invite.
     var testingWithholdInvite = false
     /// Test seam: a peer that never sends its stream header or media.
@@ -580,6 +597,17 @@ public final class CallEngine: MeshConnection {
             relayHops = message.relayHops
             let incoming = PrivateCallState.incoming(callId: message.callId)
             state = incoming
+            let decision = RelayedCallPolicy.incoming(viaRelay: isRelayed, relayedCallsOn: acceptRelayedCalls,
+                                                      callerPseudonymous: endpoint?.peerPseudonymous == true,
+                                                      strangerCallsOn: acceptRelayedStrangerCalls)
+            if decision != .ring {
+                // Declined before it rings and before any opening or label leaves this phone.
+                relayedDecline = decision
+                try transition(.localDecline)
+                try sendSignal(.decline, reason: .rejected, closeAfter: true)
+                finish("Relayed call declined (\(decision.rawValue))", error: false)
+                return
+            }
             ringingSince = now
             onEvent?(.phase(incoming.phase))
             // Rotating IDs phase 1b: the OPENING goes first, ahead of any label or answer (RD6). A pseudonymous callee

@@ -162,6 +162,42 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertFalse(box2.callee.contains { if case .remoteHeader = $0 { return true }; return false })
     }
 
+    /// A relayed call is declined before it rings unless the target consented (Design C target rule, Amendment CP).
+    func testARelayedCallIsDeclinedBeforeRingingWithoutConsent() throws {
+        func call(consent: Bool) throws -> CallEngine {
+            let callerId = SoftwareSigningIdentity(), calleeId = SoftwareSigningIdentity()
+            let caller = CallEngine(role: .caller, transport: .l2cap, identity: callerId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                    expectedPeerPrefix: calleeId.nodeId.prefix, relayHops: 1)
+            let callee = CallEngine(role: .callee, transport: .l2cap, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9)
+            callee.acceptRelayedCalls = consent
+            try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+            return callee
+        }
+        let refused = try call(consent: false)
+        XCTAssertEqual(refused.phase, .closed)
+        XCTAssertNotEqual(refused.state?.phase, .incomingRinging, "it never rang")
+        XCTAssertEqual(refused.relayedDecline, .declineRelayingOff)
+        let allowed = try call(consent: true)
+        XCTAssertEqual(allowed.state?.phase, .incomingRinging)
+    }
+
+    /// A direct pseudonym call uses one key at both layers, so it is not taken for a relayed call and still rings.
+    func testADirectPseudonymCallIsNotTakenForARelayedCall() throws {
+        let (caller, callee, _) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true)
+        callee.acceptRelayedCalls = false; callee.acceptRelayedStrangerCalls = false
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertFalse(callee.isRelayed)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, callee.closeReason ?? "")
+    }
+
+    func testRelayedCallRules() {
+        XCTAssertEqual(RelayedCallPolicy.incoming(viaRelay: false, relayedCallsOn: false, callerPseudonymous: true, strangerCallsOn: false), .ring)
+        XCTAssertEqual(RelayedCallPolicy.incoming(viaRelay: true, relayedCallsOn: false, callerPseudonymous: false, strangerCallsOn: true), .declineRelayingOff)
+        XCTAssertEqual(RelayedCallPolicy.incoming(viaRelay: true, relayedCallsOn: true, callerPseudonymous: true, strangerCallsOn: false), .declineStranger)
+        XCTAssertEqual(RelayedCallPolicy.incoming(viaRelay: true, relayedCallsOn: true, callerPseudonymous: true, strangerCallsOn: true), .ring)
+        XCTAssertTrue(RelayedCallPolicy.strangerRingStatus(viaRelay: true).contains("via a phone nearby"))
+    }
+
     /// Runs both engines to `t`: timers, then every queued record each way.
     private func step(_ a: CallEngine, _ b: CallEngine, _ t: TimeInterval) {
         a.tick(now: t); b.tick(now: t)

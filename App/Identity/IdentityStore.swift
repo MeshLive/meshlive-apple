@@ -339,6 +339,18 @@ struct AppSettings {
         get { d.bool(forKey: "experimentalBmh3Pseudonyms") }
         set { d.set(newValue, forKey: "experimentalBmh3Pseudonyms") }
     }
+    /// Experimental "Relayed calls" (Android `test_relayed_calls`, off): a call that reaches this phone through another
+    /// phone rings only with this on; otherwise it is declined before it rings (Amendment CP target rule).
+    static var relayedCalls: Bool {
+        get { d.bool(forKey: "experimentalRelayedCalls") }
+        set { d.set(newValue, forKey: "experimentalRelayedCalls") }
+    }
+    /// Relayed calls from unverified strangers ring (Android `test_relayed_stranger_calls`, on). Control arm for tests
+    /// only: launch argument `-relayedStrangerCalls NO` (relayed calls from contacts only); no Settings switch.
+    static var relayedStrangerCalls: Bool { d.object(forKey: "relayedStrangerCalls") as? Bool ?? true }
+    /// Amendment CP pseudonymous relay edges (Android `test_relayed_pseudonymous_edges`, on). Control arm for tests only:
+    /// launch argument `-relayedPseudonymousEdges NO`; no Settings switch.
+    static var relayedPseudonymousEdges: Bool { d.object(forKey: "relayedPseudonymousEdges") as? Bool ?? true }
     /// Stream link pacing (Android LinkPacer, on) and the on-time seed raise (on since 2026-10-16). Control arms for
     /// tests only: launch arguments `-linkPacing NO`, `-onTimeSeedRaise NO`; there is no Settings switch.
     static var linkPacing: Bool { d.object(forKey: "linkPacing") as? Bool ?? true }

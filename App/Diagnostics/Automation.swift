@@ -19,6 +19,9 @@ import NearbyMedia
 /// - `-NearbyAvailable 1|0`: be reachable for calls (default unchanged).
 /// - `-NearbyRequestPermissions 1`: ask for microphone and camera at launch (one human tap each, first time only).
 /// - `-NearbyRelay 1`: experimental "Help pass streams and calls to others nearby" on for this run.
+/// - `-experimentalRelayedCalls YES`: relayed calls ring on this phone (target rule; otherwise declined before ringing).
+///   Control arms: `-relayedStrangerCalls NO` (relayed calls from contacts only), `-relayedPseudonymousEdges NO` (relay
+///   edges without declared throwaways, the pre-Amendment-CP behaviour).
 /// - `-NearbyRelayCallee <handle|first>`: EXPERIMENTAL call relay hop for that callee (like Android's test_private_call_relay).
 /// - `-NearbyAutoWatch first|<handle>` and `-NearbyWatchSeconds N`: watch a stream.
 /// - `-NearbyAutoRadio <title>`: go live audio only (title signed only with `-NearbyLabels 1`), `-NearbyRadioPreset

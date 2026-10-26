@@ -272,6 +272,56 @@ final class CallRelayTests: XCTestCase {
         }
     }
 
+    // MARK: Amendment CP: pseudonymous relay edges
+
+    private func pseudonymousCalleeChain(edges: Bool, consent: Bool = true) throws -> (caller: CallEngine, callee: CallEngine, hop: CallRelayHop,
+                                                                                         pairs: [(MeshConnection, MeshConnection)]) {
+        let budget = Bmh3SigningBudget(capacity: 100)
+        let calleeId = SoftwareSigningIdentity()
+        // Pseudonym mode runs with rotating discovery IDs on both ends: the callee's reveal travels in BDX1.
+        let callee = CallEngine(role: .callee, transport: .gatt, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                rotating: RotatingCallOptions(entries: { [] }), bmh3: Bmh3CallOptions(pseudonyms: true, budget: budget))
+        callee.acceptRelayedCalls = consent
+        try callee.start(now: 0)
+        let hop = CallRelayHop(identity: SoftwareSigningIdentity(), transport: .gatt, childOffer: callOffer(calleeId.nodeId.prefix),
+                               hiddenIdentities: true, budget: budget, pseudonymousEdges: edges)
+        try hop.child.start(now: 0)
+        var pairs: [(MeshConnection, MeshConnection)] = [(hop.child, callee)]
+        pump(pairs)
+        let caller = CallEngine(role: .caller, transport: .gatt, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                expectedPeerPrefix: calleeId.nodeId.prefix, relayHops: 1,
+                                rotating: RotatingCallOptions(selected: hop.parentOffer),
+                                bmh3: Bmh3CallOptions(pseudonyms: true, selected: hop.parentOffer, budget: budget))
+        if let parent = hop.attachParent() {
+            try parent.start(now: 0); try caller.start(now: 0)
+            pairs.append((caller, parent)); pump(pairs)
+        }
+        return (caller, callee, hop, pairs)
+    }
+
+    func testARelayReachesAPseudonymModeCalleeOnlyWithPseudonymousEdges() throws {
+        let control = try pseudonymousCalleeChain(edges: false)
+        XCTAssertNotEqual(control.hop.state, .waitingForParent, "control arm: a real relay key meets the callee's throwaway and fails")
+        XCTAssertNotEqual(control.hop.state, .relaying)
+
+        let c = try pseudonymousCalleeChain(edges: true)
+        XCTAssertEqual(c.hop.state, .relaying, c.hop.child.closeReason ?? c.caller.closeReason ?? "")
+        XCTAssertTrue(c.hop.child.linkUsedBmh3 && c.hop.child.linkPeerPseudonymous, "the callee answered its own throwaway")
+        XCTAssertTrue(c.hop.parent?.linkPeerPseudonymous == true, "toward a relay the caller's link key declares PSEUDONYM")
+        XCTAssertTrue(c.callee.isRelayed)
+        XCTAssertEqual(c.callee.state?.phase, .incomingRinging,
+                       "callee \(c.callee.phase) \(c.callee.closeReason ?? "-") caller \(c.caller.phase) \(c.caller.closeReason ?? "-") \(String(describing: c.caller.state?.phase))")
+        try c.callee.accept(as: .voice); pump(c.pairs)
+        XCTAssertEqual(c.caller.state?.phase, .active, c.caller.closeReason ?? "")
+    }
+
+    func testATargetWithoutRelayedCallsDeclinesARelayedCallBeforeItRings() throws {
+        let c = try pseudonymousCalleeChain(edges: true, consent: false)
+        XCTAssertEqual(c.callee.relayedDecline, .declineRelayingOff)
+        XCTAssertNotEqual(c.callee.state?.phase, .incomingRinging)
+        XCTAssertNotEqual(c.caller.state?.phase, .outgoingRinging, "the caller never heard ringing")
+    }
+
     func testARelayWithoutHiddenIdentitiesCannotCarryAPseudonymCaller() throws {
         let calleeId = SoftwareSigningIdentity()
         let callee = CallEngine(role: .callee, transport: .gatt, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9)

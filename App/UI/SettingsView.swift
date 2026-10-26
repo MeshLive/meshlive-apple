@@ -207,6 +207,12 @@ struct AdvancedPrivacyView: View {
             }
             .padding(.top, 8)
             Card {
+                SettingsToggleRow(icon: "arrow.triangle.branch", title: "Relayed calls",
+                                  info: "Experimental. Calls that reach you through another phone ring only with this on. A relaying phone cannot hear or see the call, but if you answer an unverified stranger, your identity is revealed to whoever holds the call, which may be a relaying phone.",
+                                  isOn: $model.relayedCalls)
+            }
+            .padding(.top, 8)
+            Card {
                 SettingsToggleRow(icon: "exclamationmark.shield", title: "Warn instead of refusing an identity mismatch",
                                   info: "When a contact's phone shows a different identity from the one you verified, MeshLive refuses the call. With this on, it warns you instead.",
                                   isOn: Binding(get: { AppSettings.mismatchPolicyWarnOnly },

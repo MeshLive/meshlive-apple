@@ -52,7 +52,9 @@ advertisement); incoming calls while the app is closed (that needs internet push
 the compact UUID); and hardware VP9/AV1 encoding (the iPhone encodes VP9 in software with libvpx).
 
 **Not implemented yet:** store-and-forward messages, group (BGK1) relays, relay re-anchor and parent-silence recovery,
-the route-recovery hint and CallKit. See [testing](testing.md#remaining-work).
+the route-recovery hint, CallKit, and Android's on-demand relayed calls (Design C: reach tables, multi-hop discovery,
+`RELAY_SETUP`/READY/FAIL helpers). Apple implements the target side of relayed calls (consent, stranger rule, ring
+label) and the advertised-chain call relay hop with Amendment CP's pseudonymous edges. See [testing](testing.md#remaining-work).
 
 ## Screens and design
 
@@ -68,7 +70,7 @@ Screens (the same tabs and flow as Android's 2026-10-17 redesign; pure black, wh
 - **Calls:** Nearby and Recent chips. Nearby rows show contacts by their saved name with a check mark, everyone else by full handle; a row opens "Call <name>" with Voice call and Video call.
 - **Contacts:** your verified contacts with video call, voice call and info buttons, and "Add contact" (your code and scanning theirs). The info sheet shows how and when you verified them, the short and full ID, "Can see when I'm nearby" (rotating IDs) and Forget. Android's Rename and Block have no iPhone counterpart yet.
 - **Call:** always dark. One name line and a state line or timer. Encryption, route, verification and the safety code are in the info sheet behind the lock; only an identity mismatch shows loudly. There is no push-to-talk mode: while muted, press and hold Mute to talk, with a one-time hint. A short message appears only when the phone is hot or the battery is at 20 % or less.
-- **Settings:** grouped cards: Your name and Your ID; Allow calls, Call alerts, Relay live streams and Privacy (quick wipe, names and titles, then Advanced privacy: rotating IDs, hidden identities, pseudonyms, mismatch policy); Advanced (Connection, Experiments); About this app; and the red Wipe everything (type WIPE to confirm).
+- **Settings:** grouped cards: Your name and Your ID; Allow calls, Call alerts, Relay live streams and Privacy (quick wipe, names and titles, then Advanced privacy: rotating IDs, hidden identities, pseudonyms, relayed calls, mismatch policy); Advanced (Connection, Experiments); About this app; and the red Wipe everything (type WIPE to confirm).
 
 Every screen reads names through `PeerLabel`, following the naming review (R5). It shows your verified contact's saved name; otherwise a signed self-chosen name in quotes (experimental labels); otherwise the full handle. It never uses advertised device names or raw hex. The handle is Crockford Base32 of the 48-bit prefix (`M6SC7-N75YR`).
 

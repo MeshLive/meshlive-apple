@@ -96,6 +96,15 @@ final class CallController: ObservableObject, Identifiable {
     @Published var remoteMuted = false
     @Published var ended: String?
     @Published var relayed = false
+    /// The stranger notice under a ring (nil for a contact): a relayed stranger call names the possible relay in the middle.
+    @Published var ringNotice: String?
+
+    private func ringText(_ type: CallType) -> String {
+        if engine.isRelayed { relayed = true }
+        ringNotice = engine.peerIsStranger ? RelayedCallPolicy.strangerRingStatus(viaRelay: engine.isRelayed) : nil
+        let base = type == .voice ? "Incoming voice call" : "Incoming video call"
+        return engine.isRelayed ? "\(base) \(RelayedCallPolicy.viaRelayStatus)" : base
+    }
     @Published var stats = ""
     @Published var label: PeerLabel?
     @Published var activeSince: Date?
@@ -159,6 +168,8 @@ final class CallController: ObservableObject, Identifiable {
         #endif
         remote.onNeedKeyFrame = { [weak self] in self?.engine.requestKeyFrame(); self?.pump() }
         relayed = relayHops > 0
+        engine.acceptRelayedCalls = model.relayedCalls
+        engine.acceptRelayedStrangerCalls = AppSettings.relayedStrangerCalls
         phaseText = role == .caller ? "Calling…" : "Connecting…"
     }
 
@@ -217,7 +228,7 @@ final class CallController: ObservableObject, Identifiable {
             switch p {
             case .outgoingInvite: phaseText = "Calling…"
             case .outgoingRinging: phaseText = "Ringing…"
-            case .incomingRinging: phaseText = offeredType == .voice ? "Incoming voice call" : "Incoming video call"
+            case .incomingRinging: phaseText = ringText(offeredType)
             case .negotiatingMedia: phaseText = "Connecting…"
             case .active: phaseText = ""; if activeSince == nil { activeSince = Date() }
             case .ended: phaseText = "Call ended"
@@ -227,7 +238,7 @@ final class CallController: ObservableObject, Identifiable {
             if let runtime = model?.rotating, model?.rotatingIds == true { runtime.tarpit.forgive(epoch: runtime.currentEpoch()) }
         case .offeredTypeChanged(let type):
             offeredType = type; callType = type
-            if phase == .incomingRinging { phaseText = type == .voice ? "Incoming voice call" : "Incoming video call" }
+            if phase == .incomingRinging { phaseText = ringText(type) }
         case .startLocalMedia(let header, let type):
             callType = type; cameraOn = type == .video
             startMedia(header: header, video: type == .video)
@@ -572,6 +583,7 @@ final class CallController: ObservableObject, Identifiable {
         model?.desktopCallLinkFinished(self)
         #endif
         var delay: TimeInterval = 2
+        if let declined = engine.relayedDecline { AppLog.event("relayed_call", ["event": "declined", "reason": declined.rawValue]) }
         if ended == nil, closedBeforeRinging {
             AppLog.event("call_end", ["reason": reason, "error": "true", "stage": "closed_before_ringing", "shown": "false"])
             ended = ""; phaseText = ""; delay = 0
@@ -1178,7 +1190,8 @@ final class CallRelayController: ObservableObject {
     init(model: AppModel, identity: SigningIdentity, row: UUID, childOffer: DiscoveryAnnouncement, transport: MeshTransport) {
         self.model = model; self.row = row; self.transport = transport
         hop = CallRelayHop(identity: identity, transport: transport, childOffer: childOffer,
-                           hiddenIdentities: model.hiddenIdentities, pins: model.bmh3Pins)
+                           hiddenIdentities: model.hiddenIdentities, pins: model.bmh3Pins,
+                           pseudonymousEdges: model.bmh3Pseudonyms && model.rotatingIds && AppSettings.relayedPseudonymousEdges)
         hop.onStateChange = { [weak self] s in self?.stateChanged(s) }
         // Backpressure: a hop that drained lets the other one parse again, outside the sealing path that reported it.
         hop.onIngressResumable = { [weak self] in
