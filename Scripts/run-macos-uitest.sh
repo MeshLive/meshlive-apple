@@ -22,11 +22,13 @@ cleanup() { if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid"; wait "$pid"; 
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 elapsed=0
+# Whole run (build plus every test, about 15 s each); UI_LIMIT_SECONDS overrides.
+limit="${UI_LIMIT_SECONDS:-900}"
 while kill -0 "$pid" 2>/dev/null; do
     sleep 5
     elapsed=$((elapsed+5))
-    if [[ "$elapsed" -ge 240 ]]; then
-        echo "UI harness exceeded 240 s. Check for a user permission prompt; do not reset permissions." >>"$out/xcodebuild.log"
+    if [[ "$elapsed" -ge "$limit" ]]; then
+        echo "UI harness exceeded $limit s. Check for a user permission prompt; do not reset permissions." >>"$out/xcodebuild.log"
         kill -TERM "$pid" 2>/dev/null
         break
     fi
