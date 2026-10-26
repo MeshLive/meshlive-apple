@@ -52,9 +52,36 @@ advertisement); incoming calls while the app is closed (that needs internet push
 the compact UUID); and hardware VP9/AV1 encoding (the iPhone encodes VP9 in software with libvpx).
 
 **Not implemented yet:** store-and-forward messages, group (BGK1) relays, relay re-anchor and parent-silence recovery,
-the route-recovery hint, CallKit, and Android's on-demand relayed calls (Design C: reach tables, multi-hop discovery,
-`RELAY_SETUP`/READY/FAIL helpers). Apple implements the target side of relayed calls (consent, stranger rule, ring
-label) and the advertised-chain call relay hop with Amendment CP's pseudonymous edges. See [testing](testing.md#remaining-work).
+the route-recovery hint and CallKit. See [testing](testing.md#remaining-work).
+
+## Relayed calls (Design C) on Apple
+
+Experimental and off ("Relayed calls"); the wire and rules are Android's (PROTOCOL "Experimental relayed calls" and
+"Draft: on-demand route seek"), with byte-exact vector tests. None of it has run on a phone yet.
+
+- **Target.** With the switch on the call offer carries the consent bit and every call link hello signs bit 4. A
+  relayed call (the Invite says so, or the link peer is not the call peer) rings only with the switch on, a relayed
+  stranger call only with relayed stranger calls on, labelled "via a phone nearby"; every ring is capped at 60 s.
+- **Caller.** Call offers and reach pages (version 4, and version 6 with rotating IDs) from this device's own scans fill
+  two reach tables (`ReachTable`). A saved contact reachable only through helpers is listed "Via N phone(s) · not
+  confirmed"; dialling it connects to the first helper, sends `SETUP` after the link handshake and starts the call after
+  `READY` (`CallEngine` with `RelayedCallOptions`). The first hop is bound to the chosen helper unless it declared a
+  throwaway (Amendment CP); failures skip the pair and the next helper is tried (at most 3 within 60 s). A Contacts call
+  to someone not listed waits up to 45 s and, with route searches on, starts a search (below).
+- **Helper.** With "Help calls nearby" on and the device idle and not paused, the call offer carries the helper flag
+  and the listener signs bits 4 and 6. A first record `SETUP` hands the listener's authenticated link to a
+  `RelayHelperDuty` (same keys and sequences), which dials the next hop from the device's own table, regenerates
+  `SETUP` downstream, answers `READY` or `FAIL` and then copies the endpoints' records without reading them.
+- **The reach-page limitation.** CoreBluetooth cannot advertise manufacturer data, so an iPhone or Mac publishes no
+  reach pages: callers never learn a route through an Apple helper from pages, and an Apple helper answers `SETUP` only
+  for targets it hears itself or learned from Android helpers' pages.
+- **Route searches (Design OR) are the Apple path.** With `-relayedOnDemand YES` (and rotating IDs and hidden
+  identities) a helping listener signs BMH3 `RELAY_SEEK` and answers `SEEK` from what it scans: the target whose role-0
+  ID gives the token, or for two relays a next helper with a regenerated `SEEK`, within search budgets. The Apple caller
+  searches the same way for a contact that is not listed (rings 1, 1b near an epoch boundary, and 2 with a skip list;
+  give-up at 45 s; the contact's own offer appearing first wins). Searches need no pages, so Apple helpers are found.
+- **Not built:** client puzzles (OR-PZ), the automatic-retry backoff use (the memory exists), and a remote-address key
+  for pseudonymous parents in the rate limiter (CoreBluetooth gives none, so they share one bucket).
 
 ## Screens and design
 
