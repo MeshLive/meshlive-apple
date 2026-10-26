@@ -5,7 +5,7 @@ For people who build, test or change MeshLive for iPhone and Mac. The user docum
 
 - [Contributing](../../CONTRIBUTING.md): how to report a bug or a device result and send a change.
 - [Building](building.md): build and test from source, for iPhone and Mac.
-- [Architecture](architecture.md): code layout, screens and design, the native Mac app, diagnostics.
+- [Architecture](architecture.md): code layout, screens and design, the native Mac app, platform limits, diagnostics.
 - [Protocol notes](protocol.md): the iPhone-specific parts of the protocol; the canonical reference is
   [Android's](https://github.com/MeshLive/meshlive-android/blob/main/docs/dev/protocol/README.md).
 - [Switches](switches.md): the register of experimental, alternative and optional switches.

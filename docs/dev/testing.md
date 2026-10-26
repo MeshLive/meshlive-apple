@@ -238,5 +238,5 @@ These are short manual checks on one Mac, not a scored test suite.
 Not tested: live streams to or from the Mac, relays, sleep and wake, other Android models, and Mac-to-iPhone
 calls. The native app is an experimental interoperability build, not a working video-call release.
 
-Current package suite on macOS: 268 tests (187 core, 11 media, 20 retained v1, 46 desktop policy, 4 native
+Current package suite on macOS: 299 tests (218 core, 11 media, 20 retained v1, 46 desktop policy, 4 native
 transport), plus the native Release build and the native UI tests.

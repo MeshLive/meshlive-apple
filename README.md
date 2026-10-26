@@ -4,96 +4,127 @@
 
 # MeshLive for iPhone and Mac
 
-Voice and video calls and livestreams between nearby devices, over Bluetooth.<br/>
-No internet, no SIM, no account. The Apple side of [MeshLive](https://github.com/MeshLive).
+Calls and livestreams between nearby devices, over Bluetooth.<br/>
+The iPhone and Mac side of MeshLive.<br/>
+No internet, no SIM, no account.
 
 <br/>
 
 <p>
   <img alt="iOS 16+" src="https://img.shields.io/badge/iOS-16%2B-000000?style=flat&logo=apple&logoColor=white" />
-  <img alt="macOS 14+ Apple Silicon (experimental)" src="https://img.shields.io/badge/macOS-14%2B%20Apple%20Silicon%20%C2%B7%20experimental-000000?style=flat&logo=apple&logoColor=white" />
+  <img alt="macOS 14+ on Apple Silicon" src="https://img.shields.io/badge/macOS-14%2B%20Apple%20Silicon-000000?style=flat&logo=apple&logoColor=white" />
   <img alt="License GPLv3" src="https://img.shields.io/badge/License-GPLv3-FF3B30?style=flat&logo=gnu&logoColor=white" />
-  <a href="https://github.com/MeshLive/meshlive-ios/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/MeshLive/meshlive-ios/actions/workflows/ci.yml/badge.svg" /></a>
-  <img alt="Status: early" src="https://img.shields.io/badge/status-early%20%C2%B7%20little%20hardware%20testing-orange?style=flat" />
   <a href="https://github.com/MeshLive/meshlive-ios/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/MeshLive/meshlive-ios?style=flat&color=FF3B30&labelColor=181717&logo=github" /></a>
+  <a href="https://github.com/MeshLive/meshlive-ios/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/MeshLive/meshlive-ios/ci.yml?branch=main&style=flat&label=CI&color=181717&labelColor=000000&logo=githubactions&logoColor=white" /></a>
+  <img alt="Status: early" src="https://img.shields.io/badge/Status-early-181717?style=flat" />
 </p>
 
-<a href="docs/dev/building.md#iphone-app-and-package-tests"><img alt="Build for iPhone" src="https://img.shields.io/badge/Build%20for-iPhone-000000?style=for-the-badge&logo=apple&logoColor=white" /></a>
+<a href="docs/dev/building.md#iphone-app-and-package-tests"><img alt="Build for iPhone" src="https://img.shields.io/badge/Build%20for-iPhone-181717?style=for-the-badge&logo=apple&logoColor=white" /></a>
 &nbsp;
-<a href="docs/dev/building.md#native-macos-app-experimental"><img alt="Build for Mac" src="https://img.shields.io/badge/Build%20for-Mac-000000?style=for-the-badge&logo=apple&logoColor=white" /></a>
+<a href="docs/dev/building.md#native-macos-app-experimental"><img alt="Build for Mac" src="https://img.shields.io/badge/Build%20for-Mac-181717?style=for-the-badge&logo=apple&logoColor=white" /></a>
 
 <sub>Free · open source · no App Store build yet · <a href="docs/user-guide.md#install">How to install</a></sub>
 
 </div>
 
-> **Status: early.** The iPhone app has had only a handful of short test calls, and the current iPhone code
-> has not been tested on an iPhone at all. The native Mac app is **experimental**: voice calls with Android phones
-> have worked, but video calls with an Android phone still drop after between 17 seconds and about 5.5 minutes.
-> Neither has had an independent security audit. Please do not rely on MeshLive where your safety depends on it.
-
 ## What it does
 
-MeshLive sends encrypted live camera video and microphone audio directly between nearby devices over Bluetooth, with
-no account, no server and no internet. This repository holds the native SwiftUI iPhone app and a native macOS app
-built from the same sources. They speak the same protocol as [MeshLive for Android](https://github.com/MeshLive/meshlive-android)
-(BMH2/BMH3 authentication, BMS1/BME1 AES-GCM records, BMC2 calls, BTV3 media, BMV1/BFG1 forwarded streams, over
-Bluetooth LE GATT and LE L2CAP CoC), so an iPhone, a Mac and an Android phone are meant to call each other and watch
-each other's streams.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-- **Calls:** voice and video calls with people nearby, end-to-end encrypted; hold Mute to talk.
-- **Live:** go live with your camera, or audio only, and watch streams from people around you.
-- **Contacts:** verify each other by QR code or safety code; contacts show by their saved name.
-- **Privacy:** no account or server; erase your identity, contacts and settings in seconds.
+**Calls**
+- Voice and video calls with people nearby
+- End-to-end encrypted, device to device
+- Hold Mute to talk, like a walkie-talkie
+
+**Livestream**
+- Go live and share your camera with everyone around you
+- Or go live with audio only
+- Watch streams from people nearby
+
+</td>
+<td width="50%" valign="top">
+
+**Contacts**
+- Add people by scanning each other's code
+- Or compare a safety code after a call
+- Contacts show by the name you saved
+
+**Your privacy**
+- No internet, SIM, account or server
+- Your calls never touch the internet
+- Erase everything from the device in seconds
+
+</td>
+</tr>
+</table>
+
+An iPhone, a Mac, a Windows PC and an Android phone running MeshLive are meant to call each other and watch each
+other's streams. MeshLive for iPhone and Mac is **early**: read the status below, and don't rely on it where your
+safety depends on it.
 
 ## Status
 
-| | iPhone | Mac (native app, experimental) |
-| --- | --- | --- |
-| Builds and offline tests | Yes: 268 package tests (protocol vectors from Android's own classes, engines over loopback links), simulator UI tests, CI on every pull request | Yes: Release build, package tests, native UI tests in a hardware-free preview mode |
-| Tried on hardware | An earlier build: voice and video calls both ways and live streams both ways with one Android phone, short runs | Discovery of Android phones; voice calls both ways over GATT |
-| Known problems | The current code (Android-style screens, relaying, audio-only live) is not yet device-tested | Video calls drop after 17 s to about 5.5 min when the phone's incoming Bluetooth data stops; cause unknown |
-| Untested | LE L2CAP CoC, relaying, the QR scanner, the emergency wipe on a device, other models | Live streams, relays, sleep and wake, CoC, Mac-to-iPhone calls |
+There is no App Store or TestFlight build yet: you build it yourself on a Mac. The iPhone app has only had a few
+short test calls on an earlier build, and the current code has not been tested on an iPhone. The Mac app is an
+experimental native app: voice calls with Android phones work, but video calls still drop after a few minutes.
+Neither has had an independent security audit.
 
-Details: [device results](docs/devices.md) and [testing](docs/dev/testing.md). Android phones list iPhones and Macs
-only with their Advanced setting "Experimental: find iPhones" on; see
+| Device | Status |
+| --- | --- |
+| iPhone (iOS 16+) | Source build. The current code is not yet tested on an iPhone. |
+| Mac (Apple Silicon, macOS 14+) | Experimental native app. Voice calls with Android work; video calls drop after a few minutes. |
+
+Details are in [devices](docs/devices.md) and [testing](docs/dev/testing.md). Android phones only list iPhones and
+Macs when their Advanced setting "Experimental: find iPhones" is on; see
 [Talking to Android phones](docs/user-guide.md#talking-to-android-phones).
 
-**Impossible or restricted on iOS:** Bluetooth Classic, discovery while the app is in the background (iOS hides the
-advertisement), incoming calls while the app is closed (that needs internet push), manufacturer data in adverts
-(hence the compact UUID), and hardware VP9/AV1 encoding (the iPhone encodes VP9 in software with libvpx).
+## Build it yourself
 
-**Not implemented yet:** store-and-forward messages, group (BGK1) relays, relay re-anchor and parent-silence
-recovery, the route-recovery hint and CallKit.
+You need a Mac with Xcode 26 or later and Python 3. For an iPhone:
+
+```sh
+git clone https://github.com/MeshLive/meshlive-ios.git && cd meshlive-ios
+bash Scripts/prepare-opus.sh && bash Scripts/prepare-libvpx.sh   # pinned audio and video codecs
+python3 Scripts/project.py                                       # creates MeshLive.xcodeproj
+open MeshLive.xcodeproj
+```
+
+Pick your Apple developer team (a free personal team works) and run the **MeshLive-iOS** scheme on your iPhone, or
+the **MeshLive** scheme for the Mac app. The full steps, the Mac-only setup and the tests are in
+[Building from source](docs/dev/building.md).
 
 ## Help wanted
 
-The most useful thing you can do is **test it on your iPhone or Mac with an Android phone running MeshLive** and tell
-us what happened, including when everything worked.
+We need **people with an iPhone or a Mac** to try it with an Android phone running MeshLive and tell us what
+happened. Reports where everything worked are as useful as failures.
 
-1. Build and install it ([user guide](docs/user-guide.md#install)).
-2. Install [MeshLive for Android](https://github.com/MeshLive/meshlive-android) on the phone and switch on Advanced >
-   "Experimental: find iPhones".
-3. Follow the physical checks in [testing](docs/dev/testing.md#physical-checks-when-an-iphone-and-android-phones-are-available),
-   keeping both apps in the foreground, 30-60 seconds per run.
-4. Fill in the [device test report](https://github.com/MeshLive/meshlive-ios/issues/new?template=device-report.yml)
-   (about two minutes). Failures go in the [bug form](https://github.com/MeshLive/meshlive-ios/issues/new?template=bug_report.yml).
+1. Build it ([above](#build-it-yourself)) and install [MeshLive for Android](https://github.com/MeshLive/meshlive-android)
+   on a phone, with Advanced > "Experimental: find iPhones" on.
+2. Try the [physical checks](docs/dev/testing.md#physical-checks-when-an-iphone-and-android-phones-are-available),
+   keeping both apps open, 30-60 seconds per run.
+3. Fill in the [device test report](https://github.com/MeshLive/meshlive-ios/issues/new?template=device-report.yml)
+   (about two minutes), or the [bug form](https://github.com/MeshLive/meshlive-ios/issues/new?template=bug_report.yml)
+   when something breaks.
 
 Please do not post photos, recordings or the names of other people.
 
-## MeshLive on other platforms
+## MeshLive everywhere
 
-| Platform | Repository | Status |
+| | Where | Status |
 | --- | --- | --- |
-| Android 10+ | [meshlive-android](https://github.com/MeshLive/meshlive-android) | Beta, with releases; owns the protocol |
-| iPhone and Mac | meshlive-ios (this repository) | Early; build from source |
-| Windows | [meshlive-windows](https://github.com/MeshLive/meshlive-windows) | Beta-quality source; build from source |
-| Benchmarks | [meshlive-benchmarks](https://github.com/MeshLive/meshlive-benchmarks) | Measured Android phone runs |
+| Android 10+ | [meshlive-android](https://github.com/MeshLive/meshlive-android) | Beta, with releases; holds the protocol |
+| Windows | [meshlive-windows](https://github.com/MeshLive/meshlive-windows) | Beta-quality source; build it yourself |
+| iPhone and Mac | meshlive-ios (this repository) | Early; build it yourself |
+| Benchmarks | [meshlive-benchmarks](https://github.com/MeshLive/meshlive-benchmarks) | Measured results on real Android phones |
+| Website | [meshlive.github.io](https://meshlive.github.io) | Overview and privacy policy |
 
 ## Privacy
 
 No accounts, no ads, no analytics, no servers. Calls and streams are encrypted, but a nearby Bluetooth scanner can see
 that a MeshLive device is there, and while the app advertises it carries a stable ID prefix (rotating IDs are still
-an experiment). What nearby devices can and cannot see is explained in [Privacy](docs/privacy.md).
+an experiment). What nearby devices can and can't see is explained in [Privacy](docs/privacy.md).
 
 ## Documentation
 
@@ -111,7 +142,7 @@ an experiment). What nearby devices can and cannot see is explained in [Privacy]
 | --- | --- |
 | [Contributing](CONTRIBUTING.md) | How to report a bug or a device result and send a change |
 | [Building](docs/dev/building.md) | Build and test from source, for iPhone and Mac |
-| [Architecture](docs/dev/architecture.md) | Code layout, screens and design, the native Mac app, diagnostics |
+| [Architecture](docs/dev/architecture.md) | Code layout, screens and design, the native Mac app, platform limits, diagnostics |
 | [Protocol notes](docs/dev/protocol.md) | The iPhone-specific parts of the protocol; the canonical reference is [Android's](https://github.com/MeshLive/meshlive-android/blob/main/docs/dev/protocol/README.md) |
 | [Switches](docs/dev/switches.md) | The register of experimental, alternative and optional switches |
 | [Testing](docs/dev/testing.md) | What has been checked offline and on hardware, and the physical test steps |
@@ -121,13 +152,13 @@ an experiment). What nearby devices can and cannot see is explained in [Privacy]
 
 ## Contributing
 
-Bug reports, device results and code are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and follow the
-[code of conduct](CODE_OF_CONDUCT.md). Protocol changes start in [meshlive-android](https://github.com/MeshLive/meshlive-android),
-which owns the wire format. Report security issues privately: see [SECURITY.md](SECURITY.md).
+Bug reports, device results and code are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), and please follow
+the [code of conduct](CODE_OF_CONDUCT.md). Protocol changes start in
+[meshlive-android](https://github.com/MeshLive/meshlive-android), which owns the wire format. Report security issues
+privately: see [SECURITY.md](SECURITY.md).
 
 ## License
 
-Copyright (C) 2026 The MeshLive Authors (see [AUTHORS](AUTHORS)). GPL-3.0-or-later: see [LICENSE](LICENSE).
-Third-party components keep their own licences; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The scripts
-download the pinned libopus and libvpx sources at build time; no third-party binaries are included. The bundle
-identifier is `io.github.meshlive.app`, the same as the Android app.
+GPL-3.0-or-later, copyright (C) 2026 The MeshLive Authors ([AUTHORS](AUTHORS)). See [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The build scripts download the pinned libopus and libvpx sources;
+no third-party binaries are included.

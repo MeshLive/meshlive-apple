@@ -25,6 +25,29 @@ Behaviour switches are in the [switch register](switches.md).
 unit tests over in-memory links, in the iPhone app, in the Mac app and in MeshPeer. Only `App/Transport` touches
 Core Bluetooth.
 
+`Scripts/project.py` generates `MeshLive.xcodeproj` with two app schemes: **MeshLive-iOS** (the iPhone app, UI tests in
+`MeshLive-iOS-UITests`) and **MeshLive** (the native Mac app, UI tests in `MeshLiveUITests`). Both build `MeshLive.app`
+with the bundle identifier `io.github.meshlive.app`.
+
+Some internal names keep the project's earlier working name, Nearby Intercom, on purpose:
+
+- the Swift modules `NearbyCore`, `NearbyMedia`, `CNearbyVPX` and `NearbyV1Experimental`, and the `-Nearby...` DEBUG
+  launch arguments. They are never shown to users, and renaming them would touch every import for no user benefit;
+- the experimental v1 protocol labels (`NearbyIntercom/v1`, `NearbyIntercom SAS v1`), because they are hashed into
+  every v1 handshake and test vector, and the v1 Java reference package (`org.nearbyintercom`) that checks them;
+- stored identifiers: the Keychain services (`org.nearbyintercom.mesh.v2` and the legacy ones the wipe and the Mac's
+  cleanup remove), the unified-log subsystem and queue labels, and the MeshPeer bundle identifier. Renaming them would
+  orphan the identity and contacts of existing installs, or make the wipe miss old items.
+
+## Platform limits and missing features
+
+**Impossible or restricted on iOS:** Bluetooth Classic; discovery while the app is in the background (iOS hides the
+advertisement); incoming calls while the app is closed (that needs internet push); manufacturer data in adverts (hence
+the compact UUID); and hardware VP9/AV1 encoding (the iPhone encodes VP9 in software with libvpx).
+
+**Not implemented yet:** store-and-forward messages, group (BGK1) relays, relay re-anchor and parent-silence recovery,
+the route-recovery hint and CallKit. See [testing](testing.md#remaining-work).
+
 ## Screens and design
 
 One product on two platforms. Android's design direction (`DESIGN-DIRECTION.md` in the Android project, "Field radio") is the source for the screens, flow, features, wording and brand colours; each app renders them natively. Android uses Material 3; the iPhone follows Apple's HIG: SF fonts with Dynamic Type, inset grouped lists, iOS navigation and sheets, SF Symbols and native controls.
