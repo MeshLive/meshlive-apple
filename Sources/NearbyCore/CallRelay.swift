@@ -120,6 +120,7 @@ public final class CallRelayLink: MeshConnection {
     /// overtaking the callee's reply ended the caller's handshake in the first loopback).
     public func sendLiveness() {
         ordered.append((.linkHeartbeat, LinkHeartbeat.version1)); orderedBytes += LinkHeartbeat.version1.count
+        if isBehind { wasBehind = true }   // a heartbeat can be what crosses the high-water mark
         onRecordCopied?()
     }
 

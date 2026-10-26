@@ -177,6 +177,23 @@ final class CallRelayTests: XCTestCase {
         XCTAssertEqual(times, (0..<count).map { Int64($0) * 20_000 }, "every record arrives, in order")
     }
 
+    /// A heartbeat that crosses the high-water mark must still produce the drained signal, or ingress stays paused.
+    func testAHeartbeatCrossingTheHighWaterMarkStillResumes() throws {
+        let c = try chain(relays: 1)
+        try c.callee.accept(as: .voice); pump(c.pairs)
+        let child = c.hops[0].child
+        var drained = 0
+        child.onDrained = { drained += 1 }
+        let filler = CallRelayLink.highWaterBytes - child.orderedBytes - 1
+        child.copy(SecureRecord(type: .endToEndContent, payload: Data(repeating: 1, count: filler)))
+        XCTAssertFalse(child.isBehind)
+        child.sendLiveness()
+        XCTAssertTrue(child.isBehind, "the heartbeat crossed the mark")
+        while child.nextOutgoing(now: 0) != nil {}
+        XCTAssertEqual(drained, 1)
+        XCTAssertFalse(child.isBehind)
+    }
+
     func testARelayHopThatNeverDrainsEndsTheRelayInsteadOfBufferingWithoutLimit() throws {
         let c = try chain(relays: 1)
         try c.callee.accept(as: .voice); pump(c.pairs)
