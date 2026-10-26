@@ -292,7 +292,8 @@ final class AppModel: ObservableObject {
         refreshAdvertising()
     }
     /// Recent calls on this phone (newest first); Home shows the last 3.
-    @Published var recentCalls: [CallRecord] = CallHistory.all
+    /// Loaded in init, after a resumed wipe and the one-time moves of plain copies.
+    @Published var recentCalls: [CallRecord] = []
     /// EXPERIMENTAL (Settings > Advanced): help pass streams and calls to others nearby.
     @Published var relayForOthers = AppSettings.relayForOthers { didSet { AppSettings.relayForOthers = relayForOthers } }
     /// EXPERIMENTAL call relay hop (DEBUG launch argument only, like Android's test_private_call_relay).
@@ -394,7 +395,10 @@ final class AppModel: ObservableObject {
         var mark = initBegan
         func step(_ name: String) { let now = ProcessInfo.processInfo.systemUptime; steps[name] = AppLog.ms(since: mark, until: now); mark = now }
         defer { steps["initMs"] = AppLog.ms(since: initBegan); AppLog.event("startup", steps) }
-        if EmergencyWipe.pending && !DesktopPreview.enabled { EmergencyWipe.run() }
+        // A wipe resumed at launch finishes first; it does not latch, so this run can store a new identity.
+        if EmergencyWipe.pending && !DesktopPreview.enabled { EmergencyWipe.run(userInitiated: false) }
+        SealedRecords.migrateLegacy()
+        recentCalls = CallHistory.all
         step("wipeMs")
         CrashReports.shared.start()
         step("crashReportsMs")
@@ -693,9 +697,11 @@ final class AppModel: ObservableObject {
         call = controller
         refreshAdvertising()
         controller.phaseText = "Calling…"
-        radio.connect(to: person.id, transport: person.transport) { [weak self, weak controller] result in
-            guard let controller, controller.ended == nil else {
-                // The call ended while the link was connecting: a late link is closed at once, never handed on.
+        controller.connectHandle = radio.connect(to: person.id, transport: person.transport) { [weak self, weak controller] result in
+            // The call ended while the link was connecting (the user cancelled, stage "stopped"): a late link is
+            // closed at once and never handed on, and nothing is reported as "Couldn't reach".
+            let stopped = { if case .failure(let error) = result { return (error as? RadioError)?.stage == "stopped" }; return false }()
+            guard let controller, controller.ended == nil, !stopped else {
                 if case .success(let link) = result { link.close(); AppLog.event("connect", ["stage": "late_link_closed"]) }
                 self?.refreshAdvertising(); return
             }
@@ -711,10 +717,14 @@ final class AppModel: ObservableObject {
 
     /// Records the finished call in the local history (outgoing / incoming / missed).
     private func remember(_ controller: CallController) {
-        guard let prefix = controller.peerPrefixHex else { return }
+        guard !controller.closedBeforeRinging, let prefix = controller.peerPrefixHex else { return }
         let seconds = controller.activeSince.map { Int(Date().timeIntervalSince($0)) } ?? 0
         let direction: CallRecord.Direction = controller.role == .caller ? .outgoing : (controller.activeSince == nil ? .missed : .incoming)
-        CallHistory.add(CallRecord(prefixHex: prefix, direction: direction, video: controller.callType == .video, at: Date(), seconds: seconds))
+        // Only a verified contact is kept by ID; anyone else by the generated name and the time (PROTOCOL "After the
+        // reveal").
+        let contact = contactName(prefixHex: prefix) != nil
+        CallHistory.add(CallRecord(prefixHex: contact ? prefix : "", direction: direction, video: controller.callType == .video,
+                                   at: Date(), seconds: seconds, name: contact ? nil : Self.generatedName(controller.label)))
         recentCalls = CallHistory.all
     }
 
@@ -731,8 +741,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// A generated nearby name (never a handle, a self-chosen name or "Nearby phone"), or nil.
+    static func generatedName(_ label: PeerLabel?) -> String? {
+        guard let label, label.handle.isEmpty, label.contactName == nil, label.selfName == nil, label.title != "Nearby phone" else { return nil }
+        return label.title
+    }
+
     /// Calls a recent contact back if their phone is nearby now.
     func callBack(_ record: CallRecord) {
+        guard record.callable else { return }
         if let person = people.first(where: { $0.prefixHex == record.prefixHex }) {
             startCall(to: person, type: record.video ? .video : .voice)
         } else {
@@ -742,14 +759,17 @@ final class AppModel: ObservableObject {
     }
 
     func callFinished(_ controller: CallController) {
+        // An older call's delayed dismissal must not clear a newer call's ringing alert.
+        guard call === controller else { return }
         CallNotifier.shared.clear()
         if controller.activeSince != nil { CallNotifier.shared.requestIfAppropriate(.callEnded) }
-        guard call === controller else { return }
         remember(controller)
-        if MissedCallAlert.isMissed(incoming: controller.role == .callee, rang: controller.rang,
-                                    wasActive: controller.activeSince != nil, declinedHere: controller.declinedHere) {
-            CallNotifier.shared.postMissed(peerName: controller.label?.title, stranger: controller.label == nil,
-                                           prefixHex: controller.peerPrefixHex, video: controller.offeredType == .video)
+        if controller.missedHere {
+            // Call back and the caller's name only for a verified contact; anyone else is a generated name at most.
+            let contact = controller.peerPrefixHex.flatMap { contactName(prefixHex: $0) } != nil
+            CallNotifier.shared.postMissed(peerName: contact ? controller.label?.title : Self.generatedName(controller.label),
+                                           stranger: controller.label == nil,
+                                           prefixHex: contact ? controller.peerPrefixHex : nil, video: controller.offeredType == .video)
         }
         if controller.failedEarly, let ended = controller.ended {
             callNotice = ended
@@ -1043,7 +1063,9 @@ final class AppModel: ObservableObject {
         desktopCallScanning.stop()
         desktopAdvertising.stop()
         #endif
-        call?.end(); watch?.stop(); live?.stop()
+        // The call is detached first, so its end never records, notifies or shows anything after the wipe.
+        let ending = call; call = nil
+        ending?.end(); watch?.stop(); live?.stop()
         radio.stopAll()
         streamRoutePenalties.reset(); streamNotice = nil
         audioRelayMemory.reset()

@@ -183,6 +183,8 @@ open class MeshConnection {
 
     /// Begins the connection once the byte stream is open. The initiator queues its link hello.
     public func start(now: TimeInterval) throws {
+        // A connection that already ended (the user cancelled while its link was still being set up) sends nothing.
+        guard phase != .closed else { return }
         self.now = now; startedAt = now; lastReceiveAt = now
         link.acceptDiscoveryOpening = linkCapabilities.transportMask & NodeCapabilities.transportDiscoveryOpening != 0
         if let hello = try link.start() { enqueue(.raw(hello), .control) }

@@ -186,7 +186,7 @@ public final class Bmh3RevealSession {
     public var callerMayReveal: Bool { isCaller && ownPseudonymous && peerPseudonymous && revealed != nil && !ownRevealSent && !failed }
 
     /// True while a reveal from the peer is required before the call may proceed: the callee's, seen by a caller, and
-    /// (review 2026-10-27, Android CallerRevealGate) the caller's, seen by a callee that is itself pseudonymous. Such a
+    /// (review 2026-10-27, Apple-local until Android's matching fix lands) the caller's, seen by a callee that is itself pseudonymous. Such a
     /// caller always reveals right after it verified the callee's reveal, ahead of its stream header in the same ordered
     /// queue; without this rule a caller could stay a throwaway for a whole answered call.
     public var peerRevealRequired: Bool { peerPseudonymous && revealed == nil && (isCaller || ownPseudonymous) }
@@ -227,9 +227,10 @@ public final class Bmh3RevealSession {
     }
 }
 
-/// Review 2026-10-27 (Android CallerRevealGate): the callee of a pseudonym-pseudonym call revealed itself at Accept
-/// but never required the caller's reveal. It now refuses the caller's media until that reveal verified (the call
-/// ends) and hangs up when it has not arrived `deadline` after Accept.
+/// Review 2026-10-27, Apple-local for now (Android has the same fix on a branch; PROTOCOL gains the rule once it lands):
+/// the callee of a pseudonym-pseudonym call revealed itself at Accept but never required the caller's reveal. It now
+/// holds its own camera and microphone and refuses the caller's media until that reveal verified (media before it
+/// ends the call), and hangs up when the reveal has not arrived `deadline` after Accept.
 public enum CallerRevealGate {
     /// One ECDSA verification and one signature plus a round trip on the caller's side; the same 10 s bound as the
     /// hop handshake deadline, not a measured limit.

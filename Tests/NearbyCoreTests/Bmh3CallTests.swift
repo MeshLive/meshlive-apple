@@ -134,10 +134,64 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertEqual(callee.closeReason, CallEngine.inviteTimeoutReason)
     }
 
-    func testTheCallerRevealDeadline() {
-        XCTAssertFalse(CallerRevealGate.expired(revealPending: true, acceptedAt: 1, now: 1 + CallerRevealGate.deadline - 0.01))
-        XCTAssertTrue(CallerRevealGate.expired(revealPending: true, acceptedAt: 1, now: 1 + CallerRevealGate.deadline))
-        XCTAssertFalse(CallerRevealGate.expired(revealPending: false, acceptedAt: 1, now: 100), "a verified reveal ends the wait")
+    /// Review 2026-10-27: the user cancelled while the link was still connecting (the engine ended first); a link that
+    /// still arrives later must not start a handshake (no BMH3 msg1 on a closed engine).
+    func testAnEngineEndedBeforeItsLinkStartsSendsNothing() throws {
+        let (caller, _, _) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true)
+        caller.end()
+        XCTAssertEqual(caller.phase, .closed)
+        try caller.start(now: 1)
+        XCTAssertNil(caller.nextOutgoing(now: 1), "nothing goes out on a late link")
+        XCTAssertEqual(caller.phase, .closed)
+    }
+
+    /// Runs both engines to `t`: timers, then every queued record each way.
+    private func step(_ a: CallEngine, _ b: CallEngine, _ t: TimeInterval) {
+        a.tick(now: t); b.tick(now: t)
+        for _ in 0..<20 {
+            var moved = false
+            while let d = a.nextOutgoing(now: t) { b.receive(d, now: t); moved = true }
+            while let d = b.nextOutgoing(now: t) { a.receive(d, now: t); moved = true }
+            if !moved { break }
+        }
+    }
+
+    private func startedLocalMedia(_ events: [CallEngine.Event]) -> Bool {
+        events.contains { if case .startLocalMedia = $0 { return true }; return false }
+    }
+
+    /// The deadline path: a caller that sends neither its reveal nor its header. The callee keeps its own camera and
+    /// microphone off, stays up while heartbeats arrive, and hangs up with the gate's reason 10 s after Accept.
+    func testACallerThatNeverRevealsIsHungUpAtTheDeadlineWithTheCalleesMediaNeverStarted() throws {
+        let (caller, callee, box) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true)
+        caller.testingWithholdOwnReveal = true; caller.testingWithholdLocalMedia = true
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        try callee.accept(as: .voice)
+        for t in stride(from: 0.5, through: 10.0, by: 0.5) { step(caller, callee, t) }
+        XCTAssertEqual(callee.phase, .open, "\(callee.closeReason ?? "")")
+        XCTAssertFalse(startedLocalMedia(box.callee), "the callee's own media waits for the caller's reveal")
+        step(caller, callee, 10.5)
+        XCTAssertEqual(callee.phase, .closed)
+        XCTAssertEqual(callee.closeReason, CallerRevealGate.message)
+        XCTAssertFalse(startedLocalMedia(box.callee))
+        XCTAssertEqual(authenticated(box.callee), [])
+    }
+
+    /// A late but valid reveal (about 9 s) disarms the deadline and starts the callee's own media.
+    func testALateValidRevealDisarmsTheDeadline() throws {
+        let callerId = SoftwareSigningIdentity()
+        let (caller, callee, box) = rotatingCall(callerId: callerId, callerPseudonyms: true, calleePseudonyms: true)
+        caller.testingWithholdOwnReveal = true; caller.testingWithholdLocalMedia = true
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        try callee.accept(as: .voice)
+        for t in stride(from: 0.5, through: 9.0, by: 0.5) { step(caller, callee, t) }
+        XCTAssertFalse(startedLocalMedia(box.callee))
+        try caller.testingSendHeldReveal()
+        step(caller, callee, 9.2)
+        XCTAssertEqual(authenticated(box.callee), [callerId.nodeId])
+        XCTAssertTrue(startedLocalMedia(box.callee), "the callee's media starts once the caller proved itself")
+        for t in stride(from: 9.5, through: 14.0, by: 0.5) { step(caller, callee, t) }
+        XCTAssertEqual(callee.phase, .open, "no hang-up after the deadline: \(callee.closeReason ?? "")")
     }
 
     func testAPseudonymCalleeDeclinesWithoutRevealingAnything() throws {
@@ -190,7 +244,7 @@ final class Bmh3CallTests: XCTestCase {
     func testPinsAreStoredForThirtyDaysAcrossRestarts() {
         final class Store: Bmh3PinStorage {
             var text: String?
-            func read() -> String? { text }
+            func read() throws -> String? { text }
             func write(_ value: String) { text = value }
         }
         let store = Store(), six = Data([1, 2, 3, 4, 5, 6]), other = Data([10, 11, 12, 13, 14, 15])
@@ -249,6 +303,24 @@ final class Bmh3CallTests: XCTestCase {
 }
 
 final class Bmh3BudgetTests: XCTestCase {
+    /// Review 2026-10-27: an unreadable pin store is not empty; nothing is saved over it until a real load succeeded.
+    func testAnUnreadablePinStoreIsNeverOverwritten() {
+        final class Locked: Bmh3PinStorage {
+            var readable = false, text: String? = "a1b2c3d4e5f6 \(Int64(Date().timeIntervalSince1970 * 1000))", writes = 0
+            func read() throws -> String? { guard readable else { throw NSError(domain: "keychain", code: -25308) }; return text }
+            func write(_ value: String) { writes += 1; text = value }
+        }
+        let store = Locked(), pins = Bmh3Pins(storage: store)
+        pins.pin(Data(hex: "0102030405a8")!)
+        XCTAssertEqual(store.writes, 0, "the stored pins survive")
+        XCTAssertTrue(pins.isPinned(Data(hex: "0102030405a8")!), "the new pin still counts in this session")
+        store.readable = true
+        XCTAssertTrue(pins.isPinned(Data(hex: "a1b2c3d4e5f6")!), "the stored pin loads once readable")
+        pins.pin(Data(hex: "0102030405a8")!)
+        XCTAssertEqual(store.writes, 1)
+        XCTAssertTrue(store.text?.contains("a1b2c3d4e5f6") == true && store.text?.contains("0102030405a8") == true)
+    }
+
     func testTheSigningBudgetRefillsOnePer4Seconds() {
         var clock: TimeInterval = 0
         let budget = Bmh3SigningBudget(capacity: 2, refill: 4, clock: { clock })

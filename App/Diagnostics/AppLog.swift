@@ -89,6 +89,9 @@ enum AppLog {
     static func info(_ message: String) { write(message) }
 
     private static func write(_ line: String) {
+        // After the user's emergency wipe nothing more is logged in this run, not even to the unified log (lines
+        // name peers by prefix).
+        if EmergencyWipe.happened { return }
         let uptime = String(format: "%.3f", ProcessInfo.processInfo.systemUptime - uptimeStart)
         let full = "\(formatter.string(from: Date())) +\(uptime)s \(line)\n"
         logger.info("\(line, privacy: .public)")

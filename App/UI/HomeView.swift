@@ -404,8 +404,9 @@ struct RecentCallRow: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
         let label = PeerLabel(prefix: Data(hex: record.prefixHex) ?? Data(count: 6), contactName: model.contactName(prefixHex: record.prefixHex))
+        let title = record.callable ? label.title : (record.name ?? "Someone nearby")
         let text = VStack(alignment: .leading, spacing: 3) {
-            Text(label.title).font(.body.weight(.medium)).foregroundStyle(Palette.ink)
+            Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink)
             Text(detail).font(.subheadline).foregroundStyle(Palette.dimInk)
         }
         let callBack = Button { model.callBack(record) } label: {
@@ -413,7 +414,9 @@ struct RecentCallRow: View {
                 .frame(width: 48, height: 48).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Call \(label.title) back")
+        .accessibilityLabel("Call \(title) back")
+        .opacity(record.callable ? 1 : 0)
+        .disabled(!record.callable)
         Group {
             if typeSize.isAccessibilitySize {
                 VStack(alignment: .leading, spacing: 8) { text; callBack }

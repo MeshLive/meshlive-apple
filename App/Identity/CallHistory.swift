@@ -3,88 +3,81 @@ import Security
 import CryptoKit
 import NearbyCore
 
-/// Local recent-calls history (Android v7 Home "Recent calls"): the last 20 calls on this phone only, never
-/// sent anywhere. Sealed at rest (`SealedRecords`, review 2026-10-27): the records name peers by ID prefix. Earlier
-/// builds kept them in plain text in UserDefaults; that copy moves into the sealed file once. The emergency wipe
-/// deletes both.
+/// Local recent-calls history (Android v7 Home "Recent calls"): the last 20 calls on this device only, never sent
+/// anywhere. Sealed at rest (`SealedRecords`, review 2026-10-27), kept out of backups, so it does not move to a new
+/// device. A call with someone who is not a verified contact keeps only its generated name and the time (PROTOCOL
+/// "After the reveal", amending Phase 2 step 5): no ID, so a seized device holds no list of strangers' keys.
 struct CallRecord: Codable, Identifiable, Equatable {
     enum Direction: String, Codable { case outgoing, incoming, missed }
     var id = UUID()
+    /// The contact's 12-hex prefix; empty for a call with someone who is not a verified contact.
     let prefixHex: String
     let direction: Direction
     let video: Bool
     let at: Date
     let seconds: Int
+    /// For a non-contact: the generated name shown during the call (nil: "Someone nearby").
+    var name: String? = nil
+    var callable: Bool { prefixHex.count == 12 }
 }
 
 enum CallHistory {
-    private static let legacyKey = "recentCalls"
+    static let legacyKey = "recentCalls"
     static let fileName = "recent-calls.bin"
-    private static let purpose = "MeshLive/RecentCalls/1"
+    static let purpose = "MeshLive/RecentCalls/1"
     static let limit = 20
 
     static var all: [CallRecord] {
-        migrateLegacy()
-        guard let data = SealedRecords.read(fileName, purpose: purpose),
+        guard case .value(let data) = SealedRecords.files.read(fileName, purpose: purpose),
               let list = try? JSONDecoder().decode([CallRecord].self, from: data) else { return [] }
         return list
     }
 
     static func add(_ record: CallRecord) {
-        guard record.prefixHex.count == 12, let data = try? JSONEncoder().encode(Array(([record] + all).prefix(limit))) else { return }
-        SealedRecords.write(data, name: fileName, purpose: purpose)
+        let current: [CallRecord]
+        switch SealedRecords.files.read(fileName, purpose: purpose) {
+        case .absent: current = []
+        case .value(let data): current = (try? JSONDecoder().decode([CallRecord].self, from: data)) ?? []
+        case .unreadable: return      // never overwrite a history this run cannot read
+        }
+        guard let data = try? JSONEncoder().encode(Array(([record] + current).prefix(limit))) else { return }
+        SealedRecords.files.write(data, name: fileName, purpose: purpose)
     }
 
     static func clear() {
         DesktopPreview.preferences.removeObject(forKey: legacyKey)
-        SealedRecords.delete(fileName)
-    }
-
-    /// The plain-text list of earlier builds moves into the sealed file; it is removed only after the sealed write.
-    private static func migrateLegacy() {
-        guard let legacy = DesktopPreview.preferences.data(forKey: legacyKey) else { return }
-        if SealedRecords.write(legacy, name: fileName, purpose: purpose) { DesktopPreview.preferences.removeObject(forKey: legacyKey) }
+        SealedRecords.files.delete(fileName)
     }
 }
 
-/// Small local records sealed at rest (recent calls, BMH3 pins) under one this-device-only Keychain key that stays
-/// readable after the first unlock (a call can arrive while the phone is locked). When the key cannot be read (a
-/// locked Keychain, an error) nothing is read or written: never plain text instead. Nothing is written after an
-/// emergency wipe in this run.
-enum SealedRecords {
+/// The records key in the Keychain (this device only, readable after the first unlock: a call can arrive while the
+/// phone is locked). Created add-only; a key that appeared meanwhile is read back.
+final class KeychainRecordKeyStore: SealedRecordKeyStore {
     static let account = "records-key"
-    static var directory: URL { VerifiedContactsStore.url.deletingLastPathComponent() }
-
-    private static func key(create: Bool) -> Data? {
-        if DesktopPreview.enabled { return nil }
-        do {
-            if let existing = try KeychainItem.read(account) { return existing }
-            guard create else { return nil }
-            let created = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
-            try KeychainItem.write(account, created, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
-            return created
-        } catch {
-            AppLog.event("storage", ["event": "records_key", "result": "unavailable"])
-            return nil
-        }
+    func readKey() throws -> Data? { try KeychainItem.read(Self.account) }
+    func addKey(_ key: Data) throws {
+        try KeychainItem.addOnly(Self.account, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     }
-
-    static func read(_ name: String, purpose: String) -> Data? {
-        guard let blob = try? Data(contentsOf: directory.appendingPathComponent(name)), let key = key(create: false) else { return nil }
-        return SealedBlob.open(blob, key: key, purpose: purpose)
+    func replaceKey(_ key: Data) throws {
+        try KeychainItem.write(Self.account, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     }
+}
 
-    @discardableResult
-    static func write(_ plain: Data, name: String, purpose: String) -> Bool {
-        guard !EmergencyWipe.happened, let key = key(create: true), let sealed = try? SealedBlob.seal(plain, key: key, purpose: purpose) else { return false }
-        var dir = directory
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        BackupExclusion.apply(&dir)
-        do {
-            try sealed.write(to: directory.appendingPathComponent(name), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-            return true
-        } catch { return false }
+/// Small local records sealed at rest (recent calls, BMH3 pins): `SealedRecordFiles` next to the verified contacts.
+enum SealedRecords {
+    static let files = SealedRecordFiles(
+        directory: VerifiedContactsStore.url.deletingLastPathComponent(), keys: KeychainRecordKeyStore(),
+        latched: { EmergencyWipe.happened }, log: { line in AppLog.event("storage", ["detail": line]) },
+        fileProtection: .completeFileProtectionUntilFirstUserAuthentication)
+
+    /// One-time moves of the plain copies of earlier builds, at launch after a resumed wipe and before any reader.
+    static func migrateLegacy() {
+        if DesktopPreview.enabled { return }
+        let defaults = DesktopPreview.preferences
+        files.migrate(legacy: defaults.data(forKey: CallHistory.legacyKey), name: CallHistory.fileName, purpose: CallHistory.purpose,
+                      removeLegacy: { defaults.removeObject(forKey: CallHistory.legacyKey) })
+        // The pin file moves whether or not Hidden identities is on.
+        files.migrate(legacy: try? Data(contentsOf: Bmh3PinFile.legacyURL), name: Bmh3PinFile.fileName, purpose: Bmh3PinFile.purpose,
+                      removeLegacy: { try? FileManager.default.removeItem(at: Bmh3PinFile.legacyURL) })
     }
-
-    static func delete(_ name: String) { try? FileManager.default.removeItem(at: directory.appendingPathComponent(name)) }
 }

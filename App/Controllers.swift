@@ -259,8 +259,12 @@ final class CallController: ObservableObject, Identifiable {
             #if os(macOS)
             model?.desktopCallLinkFinished(self)
             #endif
-            let missed = MissedCallAlert.isMissed(incoming: role == .callee, rang: rang, wasActive: activeSince != nil, declinedHere: declinedHere)
-            if error && activeSince == nil && !missed { failedEarly = true }
+            if closedBeforeRinging {
+                AppLog.event("call_end", ["reason": reason, "error": "\(error)", "stage": "closed_before_ringing", "shown": "false"])
+                ended = ""; phaseText = ""; cleanupMedia(); scheduleDismiss(after: 0); return
+            }
+            let missed = missedHere
+            if error && activeSince == nil && !missed && !answeredHere { failedEarly = true }
             let plain = CallController.plainReason(reason)
             // A callee whose caller gave up sees "Missed call" (Android CallRingTimeout), not a connection failure.
             let shown = missed ? "Missed call"
@@ -361,7 +365,17 @@ final class CallController: ObservableObject, Identifiable {
     // MARK: User actions
 
     /// Asks for the microphone (and camera for video) before answering, so media starts without a prompt.
+    /// The user answered this call here: it is never "missed", however it ends.
+    private(set) var answeredHere = false
+    /// An incoming call that rang here and ended unanswered and not declined here.
+    var missedHere: Bool {
+        MissedCallAlert.isMissed(incoming: role == .callee, rang: rang, wasActive: activeSince != nil || answeredHere, declinedHere: declinedHere)
+    }
+    /// An incoming link that closed before its call ever rang: nothing to tell the user (no notice, no history).
+    var closedBeforeRinging: Bool { role == .callee && !rang }
+
     func accept(as type: CallType) {
+        answeredHere = true
         MediaPermissions.request(video: type == .video, context: "incoming") { [weak self] _, _ in
             guard let self, self.phase == .incomingRinging else { return }
             do { self.callType = type; try self.engine.accept(as: type); self.pump() } catch { self.stats = "\(error)" }
@@ -377,9 +391,21 @@ final class CallController: ObservableObject, Identifiable {
             ended = "Call declined"; phaseText = "Call declined"; finished("Call declined")
         }
     }
+    /// The user cancelled this call while it was still connecting (a cancel, not a failure).
+    private(set) var cancelledWhileConnecting = false
+    /// This call's outgoing connect, cancelled when the user ends the call before its link exists.
+    var connectHandle: ConnectHandle?
     func end() {
-        // Still connecting (no link yet): stop the radio attempt too, so nothing stays connecting after End.
-        if driver == nil, role == .caller { model?.radio.cancelOutgoingAttempts("Call ended") }
+        // Still connecting (no link yet): this is the user's cancel. Mark it first, then stop the radio attempt, so
+        // the attempt's "stopped" completion is not reported as "Couldn't reach" and nothing stays connecting.
+        if driver == nil, role == .caller, ended == nil {
+            cancelledWhileConnecting = true
+            ended = "Call cancelled"; phaseText = "Call cancelled"
+            AppLog.event("call_end", ["reason": "Call cancelled", "error": "false", "stage": "cancelled_while_connecting"])
+            connectHandle?.cancel()
+            engine.end(); cleanupMedia(); scheduleDismiss(after: 0.5)
+            return
+        }
         engine.end(); pump()
     }
     #if DEBUG
@@ -529,6 +555,7 @@ final class CallController: ObservableObject, Identifiable {
 
     /// Engine and radio reasons in plain words for the screen (the log keeps the original).
     static func plainReason(_ reason: String) -> String {
+        if reason == CallerRevealGate.message { return "Couldn't confirm who this is" }
         let r = reason.lowercased()
         if r.contains("declined") && r.contains("busy") { return "Busy" }
         if r.contains("declined") { return "Declined" }
@@ -547,8 +574,11 @@ final class CallController: ObservableObject, Identifiable {
         model?.desktopCallLinkFinished(self)
         #endif
         var delay: TimeInterval = 2
-        if ended == nil {
-            if MissedCallAlert.isMissed(incoming: role == .callee, rang: rang, wasActive: activeSince != nil, declinedHere: declinedHere) {
+        if ended == nil, closedBeforeRinging {
+            AppLog.event("call_end", ["reason": reason, "error": "true", "stage": "closed_before_ringing", "shown": "false"])
+            ended = ""; phaseText = ""; delay = 0
+        } else if ended == nil {
+            if missedHere {
                 // The caller gave up or the ring timed out: as Android, the callee sees "Missed call", not a failure.
                 AppLog.event("call_end", ["reason": reason, "error": "false", "stage": "missed"])
                 ended = "Missed call"

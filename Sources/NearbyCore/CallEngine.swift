@@ -138,8 +138,10 @@ public final class CallEngine: MeshConnection {
     public static let heartbeatInterval: TimeInterval = 1
     public static let silentLinkTimeout: TimeInterval = 8
     public static let ringTimeout: TimeInterval = 60
-    /// A link that finished both handshakes must carry the call's Invite within this time (review 2026-10-27, Android
-    /// HOP_AUTH_MS bound): otherwise a peer could hold an authenticated link open with heartbeats and never ring.
+    /// A link that finished both handshakes must carry the call's Invite within this time, or a peer could hold an
+    /// authenticated link open with heartbeats and never ring. Apple-local for now (review 2026-10-27): the 10 s
+    /// matches Android's HOP_AUTH_MS, which bounds the caller's handshake wait; PROTOCOL gains the rule once Android
+    /// has the matching callee fix.
     public static let inviteTimeout: TimeInterval = 10
     public static let inviteTimeoutReason = "No call arrived after the secure setup"
 
@@ -241,11 +243,20 @@ public final class CallEngine: MeshConnection {
     public private(set) var revealedPeer: Bmh3Reveal.Verified?
     /// Callee that revealed itself to a pseudonymous caller: the caller's reveal is required (CallerRevealGate).
     private var callerRevealDeadlineArmed = false
+    /// The callee's own camera and microphone wait for the caller's verified reveal (the risk stays with the caller).
+    private var localMediaHeldForReveal = false
     private var callerRevealDeadlineStart: TimeInterval?
     /// Test seam: a caller that never reveals itself (a misbehaving peer).
     var testingWithholdOwnReveal = false
     /// Test seam: a caller that opens the link but never sends its Invite.
     var testingWithholdInvite = false
+    /// Test seam: a peer that never sends its stream header or media.
+    var testingWithholdLocalMedia = false
+    /// Test seam: a caller that withheld its reveal sends it now (late).
+    func testingSendHeldReveal() throws {
+        guard let session = endpoint?.reveal, session.callerMayReveal else { return }
+        enqueue(.content(.discoveryExchange, 0, try session.sendOwn(real: identity, entries: [])), .control)
+    }
     /// When the secure setup finished (the first open tick), for the Invite deadline.
     private var openSince: TimeInterval?
     private var callerRevealPending: Bool { callRole == .callee && endpoint?.reveal?.peerRevealRequired == true }
@@ -293,6 +304,9 @@ public final class CallEngine: MeshConnection {
             } else {
                 revealedPeer = verified
                 onEvent?(.peerAuthenticated(verified.nodeId, verified.fingerprint))
+                // The caller proved itself: the callee's own media may start now.
+                callerRevealDeadlineArmed = false
+                if localMediaHeldForReveal { localMediaHeldForReveal = false; startLocalMedia() }
                 // The callee answered before it knew who called: the presence exchange starts with the real identity now.
                 if state?.phase == .negotiatingMedia || state?.phase == .active { startPresence() }
             }
@@ -588,6 +602,7 @@ public final class CallEngine: MeshConnection {
     }
 
     private func startLocalMedia() {
+        if testingWithholdLocalMedia { return }
         guard !mediaStarted, let codec = selectedCodec else { return }
         mediaStarted = true
         let header = StreamHeader(width: settings.width, height: settings.height, fps: settings.fps, codecId: codec,
@@ -613,12 +628,13 @@ public final class CallEngine: MeshConnection {
             enqueue(.content(.discoveryExchange, 0, try reveal.sendOwn(real: identity, entries: calleeEntries)), .control)
             callerRevealDeadlineArmed = reveal.peerRevealRequired
         }
+        localMediaHeldForReveal = callerRevealPending
         // R1: the callee's name travels immediately before Accept (never on decline, cancel or no answer).
         if let labels = pendingAcceptLabels { pendingAcceptLabels = nil; enqueue(.content(.labels, 0, labels), .control) }
         try sendSignal(.accept)
         if answerVoice { try sendSignal(.cameraOff) }
         startPresence()
-        startLocalMedia()
+        if !localMediaHeldForReveal { startLocalMedia() }
     }
 
     public func decline(_ reason: PrivateCallReason = .rejected) throws {
@@ -648,6 +664,15 @@ public final class CallEngine: MeshConnection {
             default: finish("Call ended", error: false)
             }
         } catch { fail(describe(error)) }
+    }
+
+    /// CallerRevealGate: the caller never proved who it is. Hang up with an error and the gate's own reason.
+    private func endForCallerReveal() {
+        if let phase = state?.phase, phase == .negotiatingMedia || phase == .active {
+            try? transition(.localHangUp)
+            try? sendSignal(.hangUp, reason: .error, closeAfter: true)
+        }
+        finish(CallerRevealGate.message, error: false)
     }
 
     /// Hang up after a local media failure (the peer sees an error hang-up, not link loss).
@@ -726,7 +751,7 @@ public final class CallEngine: MeshConnection {
                 callerRevealDeadlineArmed = false
             } else if CallerRevealGate.expired(revealPending: true, acceptedAt: start, now: now) {
                 callerRevealDeadlineArmed = false
-                endForLocalMediaFailure(CallerRevealGate.message)
+                endForCallerReveal()
                 return
             }
         }

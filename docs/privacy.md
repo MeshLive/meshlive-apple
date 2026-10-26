@@ -13,6 +13,9 @@ protocol is the same as Android's; this page covers what is different on Apple d
 - Your identity key stays in the Keychain on the device. Wipe everything (and the optional quick wipe) erases it, your
   contacts, settings and the list of phones that used hidden identities with yours (kept 30 days, outside backups),
   but cannot reach backups or copies outside the app.
+- Recent calls stay on this device, encrypted with a key that never leaves it, and are not backed up or moved to a
+  new device. A call with someone who is not a verified contact is kept only as its made-up name and the time, never
+  their ID.
 - After a crash, the system gives MeshLive a crash diagnostic. The app keeps a short report from it (app and system
   version, device model and where the app failed; no names, IDs, messages or keys) for up to 7 days, outside backups,
   and asks at the next launch whether you want to share it. It is sent only if you share it yourself; "Don't ask again"

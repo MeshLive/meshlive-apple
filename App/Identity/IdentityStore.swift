@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import CryptoKit
+import os
 import NearbyCore
 
 /// Persistent P-256 identity in the Secure Enclave (non-exportable, like Android Keystore), or a
@@ -33,6 +34,18 @@ enum KeychainItem {
         if found.status == errSecItemNotFound { return nil }
         guard found.status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(found.status)) }
         return found.item?.data
+    }
+    /// Adds the item only when none exists (a key must never silently replace another): throws
+    /// `SealedRecordKeyError.duplicate` when one appeared meanwhile.
+    static func addOnly(_ account: String, _ data: Data, accessible: CFString) throws {
+        if DesktopPreview.enabled || EmergencyWipe.happened { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)) }
+        #if os(macOS) && DEBUG
+        if ephemeral { if memory[account] != nil { throw SealedRecordKeyError.duplicate }; memory[account] = data; return }
+        #endif
+        var add = base(account); add[kSecValueData as String] = data; add[kSecAttrAccessible as String] = accessible
+        let status = SecItemAdd(add as CFDictionary, nil)
+        if status == errSecDuplicateItem { throw SealedRecordKeyError.duplicate }
+        guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
     }
     static func write(_ account: String, _ data: Data, accessible: CFString = kSecAttrAccessibleWhenUnlockedThisDeviceOnly) throws {
         if DesktopPreview.enabled { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)) }
@@ -136,8 +149,10 @@ enum VerifiedContactsStore {
             return .loaded(try JSONDecoder().decode([VerifiedContact].self, from: plain))
         } catch { return .unreadable("\(error)") }
     }
+    struct WriteBlocked: Error {}
     static func save(_ contacts: [VerifiedContact]) throws {
-        if DesktopPreview.enabled || EmergencyWipe.happened { return }
+        if DesktopPreview.enabled { return }
+        if EmergencyWipe.happened { throw WriteBlocked() }
         var keyData = try KeychainItem.read("contacts-key")
         if keyData == nil { let k = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }; try KeychainItem.write("contacts-key", k); keyData = k }
         let plain = try JSONEncoder().encode(contacts)
@@ -164,25 +179,29 @@ enum BackupExclusion {
 /// moves into the sealed one once.
 final class Bmh3PinFile: Bmh3PinStorage {
     static let fileName = "hidden-identity-pins.bin"
-    private static let purpose = "MeshLive/HiddenIdentityPins/1"
-    static var url: URL { SealedRecords.directory.appendingPathComponent(fileName) }
-    static var legacyURL: URL { SealedRecords.directory.appendingPathComponent("hidden-identity-pins.txt") }
-    func read() -> String? {
-        if let legacy = try? Data(contentsOf: Self.legacyURL) {
-            if SealedRecords.write(legacy, name: Self.fileName, purpose: Self.purpose) { try? FileManager.default.removeItem(at: Self.legacyURL) }
-            else { return String(data: legacy, encoding: .utf8) }
+    static let purpose = "MeshLive/HiddenIdentityPins/1"
+    static var url: URL { SealedRecords.files.url(fileName) }
+    static var legacyURL: URL { SealedRecords.files.url("hidden-identity-pins.txt") }
+    struct Unreadable: Error {}
+    /// nil when nothing is stored; throws when the sealed pins exist but cannot be read (never treated as empty).
+    func read() throws -> String? {
+        switch SealedRecords.files.read(Self.fileName, purpose: Self.purpose) {
+        case .absent: return nil
+        case .value(let data): return String(data: data, encoding: .utf8)
+        case .unreadable: throw Unreadable()
         }
-        return SealedRecords.read(Self.fileName, purpose: Self.purpose).flatMap { String(data: $0, encoding: .utf8) }
     }
-    func write(_ value: String) { SealedRecords.write(Data(value.utf8), name: Self.fileName, purpose: Self.purpose) }
+    func write(_ value: String) { SealedRecords.files.write(Data(value.utf8), name: Self.fileName, purpose: Self.purpose) }
 }
 
 /// Emergency wipe (Android EmergencyWipe semantics, adapted to iOS): marker first, keys first, then
 /// data, a second sweep, and the marker last. A remaining marker resumes the wipe on the next launch.
 enum EmergencyWipe {
-    /// Set when a wipe starts and kept for the rest of this run: late writers (a call that finishes, a pin, a vault
-    /// rotation, the log) must not bring data back after the wipe (review 2026-10-27).
-    private(set) static var happened = false
+    /// Set when the user's wipe starts in this session and kept for the rest of this run: late writers (a call that
+    /// finishes, a pin, a vault rotation, the log, a notification) must not bring data back after the wipe (review
+    /// 2026-10-27). A wipe resumed at launch does not latch: that run starts clean and may store a new identity.
+    static var happened: Bool { latch.withLock { $0 } }
+    private static let latch = OSAllocatedUnfairLock(initialState: false)
     static var markerURL: URL {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("emergency-wipe-pending")
     }
@@ -193,10 +212,13 @@ enum EmergencyWipe {
     /// contacts, the presence-vault guard (with its temporary files) and the BMH3 pins are gone. Otherwise the marker
     /// stays and the wipe resumes at the next launch.
     @discardableResult
-    static func run() -> Bool {
+    static func run(userInitiated: Bool = true) -> Bool {
         if DesktopPreview.enabled { return false }
-        happened = true
-        AppLog.stopFileLogging()
+        if userInitiated {
+            latch.withLock { $0 = true }
+            AppLog.stopFileLogging()
+            CallNotifier.shared.removeAllForWipe()
+        }
         try? Data().write(to: markerURL, options: .atomic)
         var deletions = KeychainItem.deleteAll()
         sweep()

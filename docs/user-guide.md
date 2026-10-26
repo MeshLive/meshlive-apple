@@ -24,7 +24,8 @@ To update, pull the latest source and build again. Your identity and contacts st
 The app has four tabs (on the Mac, a sidebar): **Live**, **Calls**, **Contacts** and **Settings**.
 
 - **Calls:** people nearby appear under Nearby. Tap a person, then Voice call or Video call. While muted, press and
-  hold Mute to talk.
+  hold Mute to talk. **Recent** lists your last calls on this device only: it is not backed up or moved to a new
+  device, and only verified contacts can be called back from it.
 - **Live:** streams from people nearby. **Go live** shares your camera and microphone, or audio only, with everyone
   around you.
 - **Contacts:** add someone by scanning each other's code (or comparing the safety code after a call). Verified

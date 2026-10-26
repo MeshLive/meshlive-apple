@@ -49,7 +49,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     /// Asks once at an understandable moment (CallAlertPolicy.shouldRequest); the Settings button always may ask.
     func requestIfAppropriate(_ moment: CallAlertPolicy.Moment) {
-        guard !DesktopPreview.enabled else { return }
+        guard !DesktopPreview.enabled, !EmergencyWipe.happened else { return }
         guard CallAlertPolicy.shouldRequest(moment, authorization: authorization, alreadyAsked: AppSettings.callAlertsAsked) else { return }
         AppSettings.callAlertsAsked = true
         AppLog.event("call_alerts", ["event": "request", "moment": "\(moment)"])
@@ -61,7 +61,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     /// The call rings, or the app's state changed while it rings: post, keep or remove the alert.
     func update(for call: CallController?) {
-        guard !DesktopPreview.enabled else { return }
+        guard !DesktopPreview.enabled, !EmergencyWipe.happened else { return }
         let ringing = call?.phase == .incomingRinging
         let active = AppPlatform.active
         guard let call, CallAlertPolicy.shouldPost(ringing: ringing, appActive: active, authorization: authorization) else {
@@ -87,7 +87,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// An incoming call stopped ringing without being answered or declined here: one notification per caller, with
     /// the number of calls missed while it is still showing. Needs the call-alert permission; never asks for it.
     func postMissed(peerName: String?, stranger: Bool, prefixHex: String?, video: Bool) {
-        guard !DesktopPreview.enabled else { return }
+        guard !DesktopPreview.enabled, !EmergencyWipe.happened else { return }
         guard authorization == .authorized else {
             AppLog.event("missed_call", ["posted": "false", "reason": "no_permission"]); return
         }
@@ -106,6 +106,13 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
             self.center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
             AppLog.event("missed_call", ["posted": "true", "count": "\(count)", "named": "\(!stranger && peerName != nil)"])
         }
+    }
+
+    /// The emergency wipe: every delivered and pending notification of this app goes (missed calls name peers).
+    func removeAllForWipe() {
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
+        posted = false
     }
 
     func clear() {

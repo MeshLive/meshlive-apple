@@ -376,11 +376,22 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     /// Connects to a discovery row with the transport its announcement declares, always through the peripheral
     /// that advertised that row most recently. A failed attempt waits once (up to 6 s, scan restarted) for the
     /// row to be re-seen, possibly under a new address, and retries once, like Android's rediscovering retry.
-    func connect(to rowId: UUID, transport: MeshTransport, completion: @escaping (Result<MeshLink, Error>) -> Void) {
-        connect(rowId: rowId, transport: transport, retried: false, completion: completion)
+    @discardableResult
+    func connect(to rowId: UUID, transport: MeshTransport, completion: @escaping (Result<MeshLink, Error>) -> Void) -> ConnectHandle {
+        let handle = ConnectHandle()
+        handle.onCancel = { [weak self, weak handle] in
+            guard let self, let handle else { return }
+            // Only this connect's own attempt: other connects (a live viewer, a relay) keep theirs.
+            for (key, attempt) in self.attempts where attempt.handle === handle { self.failAttempt(key, "Cancelled", stage: "stopped") }
+        }
+        connect(rowId: rowId, transport: transport, retried: false, handle: handle, completion: completion)
+        return handle
     }
 
-    private func connect(rowId: UUID, transport: MeshTransport, retried: Bool, completion: @escaping (Result<MeshLink, Error>) -> Void) {
+    private func connect(rowId: UUID, transport: MeshTransport, retried: Bool, handle: ConnectHandle, completion: @escaping (Result<MeshLink, Error>) -> Void) {
+        guard !handle.cancelled else {
+            completion(.failure(RadioError.connect(stage: "stopped", reason: "Cancelled"))); return
+        }
         guard centralReady, let entry = table.entry(rowId: rowId), let peripheral = knownPeripherals[entry.handle] else {
             AppLog.event("connect", ["stage": "not_nearby", "row": rowId.uuidString, "retried": "\(retried)"])
             completion(.failure(RadioError.connect(stage: "not_nearby", reason: "No longer advertising"))); return
@@ -389,12 +400,14 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         attempts[key]?.fail("Replaced", stage: "stopped")
         AppLog.event("connect", ["stage": "start", "transport": transport.rawValue, "prefix": entry.announcement.prefixHex,
                                  "ageMs": "\(Int((ProcessInfo.processInfo.systemUptime - entry.lastSeen) * 1000))", "retried": "\(retried)"])
-        let attempt = OutgoingAttempt(peripheral: peripheral, transport: transport) { [weak self] result in
+        let attempt = OutgoingAttempt(peripheral: peripheral, transport: transport, handle: handle) { [weak self] result in
             guard let self else { return }
             if case .failure(let error) = result, !retried, let radioError = error as? RadioError, radioError.stage != "stopped" {
-                self.rediscover(rowId: rowId, after: ProcessInfo.processInfo.systemUptime, failure: radioError) { found in
-                    if found { self.connect(rowId: rowId, transport: transport, retried: true, completion: completion) }
-                    else { completion(.failure(error)) }
+                self.rediscover(rowId: rowId, after: ProcessInfo.processInfo.systemUptime, failure: radioError, handle: handle) { found in
+                    // A cancel during the wait reaches connect's cancelled check and ends as "stopped".
+                    if found || handle.cancelled {
+                        self.connect(rowId: rowId, transport: transport, retried: true, handle: handle, completion: completion)
+                    } else { completion(.failure(error)) }
                 }
                 return
             }
@@ -415,13 +428,14 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     /// Waits for a fresh advertisement of the row (any address) after `after`; restarts the scan once.
-    private func rediscover(rowId: UUID, after: TimeInterval, failure: RadioError, _ done: @escaping (Bool) -> Void) {
+    private func rediscover(rowId: UUID, after: TimeInterval, failure: RadioError, handle: ConnectHandle, _ done: @escaping (Bool) -> Void) {
         AppLog.event("connect", ["stage": "rediscover", "failedStage": failure.stage, "reason": failure.description])
         restartScan()
         var ticks = 0
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
             ticks += 1
             guard let self else { timer.invalidate(); return }
+            if handle.cancelled { timer.invalidate(); done(false); return }
             if let entry = self.table.entry(rowId: rowId), entry.lastSeen > after {
                 timer.invalidate()
                 AppLog.event("connect", ["stage": "rediscovered", "waitMs": "\(ticks * 250)"])
@@ -434,11 +448,6 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         }
     }
 
-    /// The user ended a call that was still connecting: stop every outgoing attempt now (stage "stopped": no
-    /// rediscover retry), so the radio is released and no late link reaches a peer after the call ended.
-    func cancelOutgoingAttempts(_ reason: String = "Cancelled") {
-        for key in Array(attempts.keys) { failAttempt(key, reason, stage: "stopped") }
-    }
 
     private func failAttempt(_ id: UUID, _ reason: String, stage: String? = nil) {
         guard let attempt = attempts.removeValue(forKey: id) else { return }
@@ -587,9 +596,19 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 }
 
+/// One `connect` call, which its owner can cancel (the user ended a call that was still connecting). Cancelling stops
+/// this connect's attempt now (stage "stopped") and any rediscover wait or retry still to come; other connects keep
+/// theirs.
+final class ConnectHandle {
+    private(set) var cancelled = false
+    var onCancel: (() -> Void)?
+    func cancel() { guard !cancelled else { return }; cancelled = true; onCancel?(); onCancel = nil }
+}
+
 final class OutgoingAttempt {
     let peripheral: CBPeripheral
     let transport: MeshTransport
+    weak var handle: ConnectHandle?
     let completion: (Result<MeshLink, Error>) -> Void
     var write: CBCharacteristic?
     var timer: Timer?
@@ -604,8 +623,8 @@ final class OutgoingAttempt {
         return ["ms": "\(Int(((now - startedAt) * 1000).rounded()))", "stepMs": "\(Int(((now - lastStepAt) * 1000).rounded()))"]
     }
     private var done = false
-    init(peripheral: CBPeripheral, transport: MeshTransport, completion: @escaping (Result<MeshLink, Error>) -> Void) {
-        self.peripheral = peripheral; self.transport = transport; self.completion = completion
+    init(peripheral: CBPeripheral, transport: MeshTransport, handle: ConnectHandle? = nil, completion: @escaping (Result<MeshLink, Error>) -> Void) {
+        self.peripheral = peripheral; self.transport = transport; self.handle = handle; self.completion = completion
     }
     func fail(_ reason: String, stage: String? = nil) {
         guard !done else { return }; done = true; timer?.invalidate()

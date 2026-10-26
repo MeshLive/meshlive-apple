@@ -27,7 +27,8 @@ public enum Bmh3Choice {
 
 /// Where BMH3 pins are kept (the app: a small file outside backups, deleted by the emergency wipe).
 public protocol Bmh3PinStorage: AnyObject {
-    func read() -> String?
+    /// nil when nothing is stored; throws when something is stored but cannot be read (it is then never overwritten).
+    func read() throws -> String?
     func write(_ value: String)
 }
 
@@ -67,8 +68,15 @@ public final class Bmh3Pins {
 
     private func load(_ now: Date) {
         guard !loaded else { return }
+        let text: String
+        do { text = try storage?.read() ?? "" }
+        catch {
+            // Unreadable is not empty (review 2026-10-27): keep this session's pins in memory, never save over the
+            // stored ones (30-day downgrade protection), and try reading again next time.
+            return
+        }
         loaded = true
-        for line in (storage?.read() ?? "").split(separator: "\n") {
+        for line in text.split(separator: "\n") {
             let parts = line.split(separator: " ")
             guard parts.count == 2, parts[0].count == 12, Data(hex: String(parts[0])) != nil, String(parts[0]) == parts[0].lowercased(),
                   let at = Int64(parts[1]) else { continue }
@@ -86,7 +94,10 @@ public final class Bmh3Pins {
         if entries.count != before { save() }
     }
 
-    private func save() { storage?.write(entries.map { "\($0.key) \($0.atMs)" }.joined(separator: "\n")) }
+    private func save() {
+        guard loaded else { return }
+        storage?.write(entries.map { "\($0.key) \($0.atMs)" }.joined(separator: "\n"))
+    }
 }
 
 /// The signing budget of a stranger-facing R_FIRST responder (Android Bmh3SigningBudget): 8 signatures in a burst, one

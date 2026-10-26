@@ -17,26 +17,33 @@ final class Ringer {
         ringing = true
         #if os(iOS)
         // Session changes can block for a few hundred ms (Android saw 288-453 ms on route reads): never on the main
-        // thread, and ordered with call audio on its control queue.
+        // thread, and ordered with call audio on its control queue. The tone starts only after the ambient category
+        // is in place, so the Ring/Silent switch applies to it.
         CallAudio.onAudioControl {
             let session = AVAudioSession.sharedInstance()
             try? session.setCategory(.ambient, mode: .default, options: [])
             try? session.setActive(true)
+            let category = session.category.rawValue
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.ringing else { return }
+                self.startTone()
+                AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+                self.vibration = Timer.scheduledTimer(withTimeInterval: Ringer.period, repeats: true) { _ in AudioServicesPlaySystemSound(kSystemSoundID_Vibrate) }
+                AppLog.event("ringer", ["state": "start", "silentSwitchRespected": "\(category == AVAudioSession.Category.ambient.rawValue)", "category": category])
+            }
         }
-        #endif
-        if let player = try? AVAudioPlayer(data: Ringer.tone) {
-            player.numberOfLoops = -1
-            player.volume = 1
-            player.play()
-            self.player = player
-        }
-        #if os(iOS)
-        AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
-        vibration = Timer.scheduledTimer(withTimeInterval: Ringer.period, repeats: true) { _ in AudioServicesPlaySystemSound(kSystemSoundID_Vibrate) }
-        AppLog.event("ringer", ["state": "start", "silentSwitchRespected": "true", "category": AVAudioSession.Category.ambient.rawValue])
         #else
+        startTone()
         AppLog.event("ringer", ["state": "start"])
         #endif
+    }
+
+    private func startTone() {
+        guard let player = try? AVAudioPlayer(data: Ringer.tone) else { return }
+        player.numberOfLoops = -1
+        player.volume = 1
+        player.play()
+        self.player = player
     }
 
     func stop() {
