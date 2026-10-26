@@ -88,7 +88,17 @@ final class AppModel: ObservableObject {
     @Published var wiped = false
     /// EXPERIMENTAL rotating discovery IDs (Settings > Advanced).
     @Published var rotatingIds = AppSettings.rotatingIds {
-        didSet { AppSettings.rotatingIds = rotatingIds; updateDiscoveryCompatibility(); refreshAdvertising() }
+        didSet {
+            AppSettings.rotatingIds = rotatingIds; updateDiscoveryCompatibility()
+            // A join or forwarder of a rotating stream started with the setting off advertises the fixed prefix:
+            // stop it now that the setting hides that prefix (RotatingStreamPolicy).
+            if let watch, let refusal = RotatingStreamPolicy.joinRefusal(offer: watch.offer, rotatingIds: rotatingIds) {
+                AppLog.event("rotating_ids", ["event": "join_stopped", "role": "viewer"])
+                watch.stop()
+                streamNotice = refusal
+            }
+            refreshAdvertising()
+        }
     }
     #if os(macOS)
     @Published var desktopPauseCallDiscovery = AppSettings.desktopPauseCallDiscovery {
@@ -530,10 +540,12 @@ final class AppModel: ObservableObject {
         if let relayOffer = callRelay?.parentOffer {
             // Experimental call relay: the callee's offer with route cost + 1 until one parent connects.
             announcement = relayOffer
-        } else if let watch, !watch.awaitingSource, let forward = watch.forwardOffer {
+        } else if let watch, !watch.awaitingSource, let forward = watch.forwardOffer,
+                  RotatingStreamPolicy.mayForward(offer: watch.offer, rotatingIds: rotatingIds) {
             // Experimental forwarding: offer the stream onward until a child connects (one UUID at a time).
             announcement = forward
-        } else if let watch, watch.awaitingSource {
+        } else if let watch, watch.awaitingSource, RotatingStreamPolicy.joinRefusal(offer: watch.offer, rotatingIds: rotatingIds) == nil {
+            // (A rotating stream's fixed-prefix request is never advertised while rotating IDs are on.)
             let offer = watch.offer
             announcement = DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: DiscoveryAnnouncement.flagAcceptingConnections | gattFlag(watch.transport),
                                                  capabilitySummary: decodeMask, streamToken: offer.streamToken, routeCost: offer.routeCost,
@@ -760,8 +772,17 @@ final class AppModel: ObservableObject {
     func canSeeMe(_ contact: VerifiedContact) -> Bool { nodeId(of: contact).map { rotating.vault.canSeeMe($0) } ?? true }
     func setCanSeeMe(_ contact: VerifiedContact, _ on: Bool) {
         guard let node = nodeId(of: contact) else { return }
+        let before = rotating.vault.generation
         rotating.vault.setCanSeeMe(node, on, epoch: rotating.currentEpoch())
         objectWillChange.send()
+        presenceRevoked(from: before)
+    }
+    /// After a revocation the advertised rotating ID must come from the new generation at once: until the next
+    /// boundary the old one is still a valid ID for the revoked contacts to recognise.
+    private func presenceRevoked(from before: UInt32) {
+        guard rotating.vault.generation != before else { return }
+        presenceGeneration = rotating.vault.generation
+        refreshAdvertising()
     }
     /// "Reset presence key": a new generation; contacts recognise this phone again after the next mutual call.
     func resetPresenceKey() {
@@ -775,7 +796,9 @@ final class AppModel: ObservableObject {
         book.forget(contact.fingerprintHex); try? saveContacts()
         // A contact that holds this phone's lease: a new presence generation, so the old keys recognise nothing.
         if let node = Data(hex: String(contact.fingerprintHex.prefix(32))).flatMap({ try? NodeId(bytes: $0) }) {
+            let before = rotating.vault.generation
             rotating.vault.forget(node, epoch: rotating.currentEpoch())
+            presenceRevoked(from: before)
         }
     }
 
@@ -783,8 +806,9 @@ final class AppModel: ObservableObject {
         VerifiedContactsStore.reset(); book.reset(); contacts = []; contactsUnreadable = nil
         // Former contacts must stop recognising this phone: their records go and any delivered lease is revoked
         // (a new presence generation), as Android's reset of the verified contacts.
+        let before = rotating.vault.generation
         rotating.vault.resetContacts(epoch: RotatingDiscoveryIds.currentWallEpoch())
-        presenceGeneration = rotating.vault.generation
+        presenceRevoked(from: before)
     }
 
     private func loadContacts() {
