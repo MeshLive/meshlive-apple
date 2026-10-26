@@ -434,6 +434,12 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         }
     }
 
+    /// The user ended a call that was still connecting: stop every outgoing attempt now (stage "stopped": no
+    /// rediscover retry), so the radio is released and no late link reaches a peer after the call ended.
+    func cancelOutgoingAttempts(_ reason: String = "Cancelled") {
+        for key in Array(attempts.keys) { failAttempt(key, reason, stage: "stopped") }
+    }
+
     private func failAttempt(_ id: UUID, _ reason: String, stage: String? = nil) {
         guard let attempt = attempts.removeValue(forKey: id) else { return }
         let failedStage = stage ?? attempt.stage

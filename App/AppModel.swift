@@ -694,7 +694,11 @@ final class AppModel: ObservableObject {
         refreshAdvertising()
         controller.phaseText = "Calling…"
         radio.connect(to: person.id, transport: person.transport) { [weak self, weak controller] result in
-            guard let controller else { return }
+            guard let controller, controller.ended == nil else {
+                // The call ended while the link was connecting: a late link is closed at once, never handed on.
+                if case .success(let link) = result { link.close(); AppLog.event("connect", ["stage": "late_link_closed"]) }
+                self?.refreshAdvertising(); return
+            }
             switch result {
             case .success(let link): controller.attach(link)
             case .failure(let error):

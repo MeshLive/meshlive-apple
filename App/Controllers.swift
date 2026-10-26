@@ -165,6 +165,8 @@ final class CallController: ObservableObject, Identifiable {
     func attach(_ link: MeshLink) {
         #if os(macOS)
         guard driver == nil, model?.desktopCallLinkAttached(self) == true else { link.close(); return }
+        #else
+        guard driver == nil, ended == nil else { link.close(); return }
         #endif
         let driver = ConnectionDriver(engine: engine, link: link)
         driver.onFinished = { [weak self] reason in self?.finished(reason) }
@@ -375,7 +377,11 @@ final class CallController: ObservableObject, Identifiable {
             ended = "Call declined"; phaseText = "Call declined"; finished("Call declined")
         }
     }
-    func end() { engine.end(); pump() }
+    func end() {
+        // Still connecting (no link yet): stop the radio attempt too, so nothing stays connecting after End.
+        if driver == nil, role == .caller { model?.radio.cancelOutgoingAttempts("Call ended") }
+        engine.end(); pump()
+    }
     #if DEBUG
     /// Fixture only (`-NearbyFixtureMissAfter N`): the unconnected ringing call ends as if the caller gave up.
     func debugCallerGaveUp() { finished("Caller cancelled") }
