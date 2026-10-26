@@ -8,6 +8,8 @@ import NearbyCore
 ///
 /// Arguments:
 /// - `-NearbyAutoCall first|<handle>|<short handle>|<12-hex prefix>`: call that person once discovered (60 s wait).
+///   `nearest` or `nearest-android` (no iPhones) calls the direct call offer with the strongest signal after 8 s of
+///   scanning, so a phone advertising a rotating ID can be called without knowing its current ID.
 /// - `-NearbyCallType voice|video` (default voice); `-NearbyCallSeconds N`: hang up N s after the call is active (default 20).
 /// - `-NearbyAutoAccept voice|video`: answer incoming calls automatically (every call while the app runs);
 ///   `-NearbyAnswerSeconds N` hangs an answered call up after N s (default: the caller hangs up).
@@ -115,6 +117,16 @@ final class Automation {
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
     }
 
+    /// The person `-NearbyAutoCall` names, or nil while they are not found (yet).
+    private func pick(_ target: String, model: AppModel) -> PersonRow? {
+        if target == "nearest" || target == "nearest-android" {
+            guard Date().timeIntervalSince(started) >= 8 else { return nil }
+            let candidates = model.people.filter { $0.relays == 0 && (target == "nearest" || !$0.isIPhone) }
+            return candidates.max { (model.radio.peers[$0.id]?.rssi ?? -127) < (model.radio.peers[$1.id]?.rssi ?? -127) }
+        }
+        return model.people.first { matches(target, prefixHex: $0.prefixHex) }
+    }
+
     private func matches(_ target: String, prefixHex: String) -> Bool {
         if target == "first" { return true }
         if target.lowercased() == prefixHex.lowercased() { return true }
@@ -150,10 +162,10 @@ final class Automation {
         let seconds = Double(args["CallSeconds"] ?? "20") ?? 20
         if let target = args["AutoCall"] {
             if callStartedAt == nil {
-                if let person = model.people.first(where: { matches(target, prefixHex: $0.prefixHex) }) {
+                if let person = pick(target, model: model) {
                     let type: CallType = args["CallType"] == "video" ? .video : .voice
                     AppLog.event("auto_call", ["target": target, "prefix": person.prefixHex, "handle": person.label.handle, "type": type.rawValue,
-                                               "transport": person.transport.rawValue])
+                                               "transport": person.transport.rawValue, "rssi": "\(model.radio.peers[person.id]?.rssi ?? 0)"])
                     model.startCall(to: person, type: type)
                     callStartedAt = Date()
                 } else if Date().timeIntervalSince(started) > 60 {
