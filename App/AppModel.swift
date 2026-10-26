@@ -492,12 +492,12 @@ final class AppModel: ObservableObject {
                         : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex)),
                       prefixHex: p.prefixHex, transport: p.announcement.transport ?? .gatt, relays: Int(p.announcement.routeCost), isIPhone: p.isIPhone)
         }
-        // A malformed audio-only marker is ignored (Android StreamOfferKind.MALFORMED); with the audio-live switch off,
-        // audio-only offers are not listed and the marker means nothing, as on Android.
+        // A malformed audio-only marker is never listed (Android StreamOfferKind.MALFORMED; Android lists it as video
+        // with its switch off, this app refuses it either way). Audio-only offers are listed only with audio live on.
         let audioLive = AppSettings.audioLive
         streams = peers.filter {
             $0.announcement.isStreamOffer && !$0.announcement.usesClassic
-                && ($0.announcement.streamOfferKind == .video || ($0.announcement.streamOfferKind == .audioOnly) == audioLive)
+                && ($0.announcement.streamOfferKind == .video || ($0.announcement.streamOfferKind == .audioOnly && audioLive))
                 && !streamRoutePenalties.isPenalized(streamRouteKey($0.id, $0.announcement), now: ConnectionDriver.now)
         }.map { p in
             #if os(macOS)

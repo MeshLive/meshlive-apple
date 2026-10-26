@@ -258,17 +258,20 @@ struct GoLiveSheet: View {
             DesktopCameraPicker()
             #endif
             CapsuleButton(title: "Video and audio", systemImage: "video", kind: .white) { start(false, AudioLive.presetVoice) }
-            CapsuleButton(title: "Audio only", systemImage: "radio", kind: .dark) { start(true, UInt8(preset)) }
-            let qualityLayout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
-            qualityLayout {
-                Chip(title: "Voice", selected: preset == Int(AudioLive.presetVoice)) { preset = Int(AudioLive.presetVoice) }
-                Chip(title: "Low data", selected: preset == Int(AudioLive.presetLowData)) { preset = Int(AudioLive.presetLowData) }
-                Chip(title: "Music", selected: preset == Int(AudioLive.presetMusic)) { preset = Int(AudioLive.presetMusic) }
+            // Audio-only live streams follow their switch (Android audio_live).
+            if AppSettings.audioLive {
+                CapsuleButton(title: "Audio only", systemImage: "radio", kind: .dark) { start(true, UInt8(preset)) }
+                let qualityLayout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
+                qualityLayout {
+                    Chip(title: "Voice", selected: preset == Int(AudioLive.presetVoice)) { preset = Int(AudioLive.presetVoice) }
+                    Chip(title: "Low data", selected: preset == Int(AudioLive.presetLowData)) { preset = Int(AudioLive.presetLowData) }
+                    Chip(title: "Music", selected: preset == Int(AudioLive.presetMusic)) { preset = Int(AudioLive.presetMusic) }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Audio only quality")
+                Text(AppPlatform.isMac ? "Audio only uses less bandwidth and can keep playing with the display off while this Mac is awake. Listeners learn your ID." : "Audio only reaches further and keeps playing with the screen off. Listeners learn your ID.")
+                    .font(.subheadline).foregroundStyle(Palette.dimInk)
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Audio only quality")
-            Text(AppPlatform.isMac ? "Audio only uses less bandwidth and can keep playing with the display off while this Mac is awake. Listeners learn your ID." : "Audio only reaches further and keeps playing with the screen off. Listeners learn your ID.")
-                .font(.subheadline).foregroundStyle(Palette.dimInk)
           }
           .padding(.horizontal, 20).padding(.bottom, 24)
         }
