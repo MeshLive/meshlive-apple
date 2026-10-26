@@ -18,6 +18,7 @@ struct VerifyView: View {
             VStack(alignment: .leading, spacing: 12) {
                 CardNote("Meet in person. Scan each other's code, or compare the safety code on both screens during a call. If they match, no one is in the middle.")
                     .padding(.bottom, 4)
+                if let line = model.ownNearbyLine { OwnNearbyNameLine(text: line).padding(.horizontal, 6) }
                 if let text = model.myQrText(), let image = qrImage(text) {
                     Image(decorative: image, scale: 1).interpolation(.none).resizable().scaledToFit()
                         .padding(14).background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))

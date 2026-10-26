@@ -237,10 +237,29 @@ struct CardNote: View {
     }
 }
 
+/// "You appear as ..." (OwnNearbyName) with a small info glyph; tapping it explains the changing name.
+struct OwnNearbyNameLine: View {
+    let text: String
+    @State private var showInfo = false
+    var body: some View {
+        Button { showInfo = true } label: {
+            (Text(text).foregroundColor(Palette.dimInk) + Text("  ") + Text(Image(systemName: "info.circle")).foregroundColor(Palette.dimInk))
+                .font(Typo.secondary).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(text)
+        .accessibilityHint("Explains this name")
+        .accessibilityIdentifier("own-nearby-name")
+        .alert(OwnNearbyName.infoTitle, isPresented: $showInfo) { Button("OK", role: .cancel) {} } message: { Text(OwnNearbyName.info) }
+    }
+}
+
 /// Leading icon + label (+ optional grey value) + chevron: the content of a navigation row in a card.
 struct SettingsRowLabel: View {
     let icon: String, title: String
     var value: String? = nil
+    /// A grey line under the title (for example "You appear as ..." under Your name).
+    var subtitle: String? = nil
     var chevron = true
     @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
@@ -248,8 +267,14 @@ struct SettingsRowLabel: View {
             Image(systemName: icon).font(.system(size: 17)).foregroundStyle(Palette.dimInk).frame(width: 26).accessibilityHidden(true)
             let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 8))
             layout {
-                Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let subtitle {
+                        Text(subtitle).font(.footnote).foregroundStyle(Palette.dimInk).multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 if !typeSize.isAccessibilitySize { Spacer(minLength: 8) }
                 if let value { Text(value).font(.body).foregroundStyle(Palette.dimInk).fixedSize(horizontal: false, vertical: true) }
             }
@@ -266,6 +291,7 @@ struct SettingsRowLabel: View {
 struct SettingsLinkRow<Destination: View>: View {
     let icon: String, title: String
     var value: String? = nil
+    var subtitle: String? = nil
     @ViewBuilder let destination: () -> Destination
     #if os(macOS)
     @State private var desktopRouteID = UUID()
@@ -273,12 +299,12 @@ struct SettingsLinkRow<Destination: View>: View {
     var body: some View {
         #if os(macOS)
         NavigationLink(value: DesktopDetailRoute(id: desktopRouteID) { destination() }) {
-            SettingsRowLabel(icon: icon, title: title, value: value)
+            SettingsRowLabel(icon: icon, title: title, value: value, subtitle: subtitle)
         }
             .buttonStyle(.plain)
             .accessibilityIdentifier("settings-link-" + title)
         #else
-        NavigationLink { destination() } label: { SettingsRowLabel(icon: icon, title: title, value: value) }
+        NavigationLink { destination() } label: { SettingsRowLabel(icon: icon, title: title, value: value, subtitle: subtitle) }
             .buttonStyle(.plain)
             .accessibilityIdentifier("settings-link-" + title)
         #endif

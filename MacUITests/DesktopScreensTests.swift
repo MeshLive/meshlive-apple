@@ -36,7 +36,9 @@ final class DesktopScreensTests: XCTestCase {
         XCTAssertTrue(first.waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "amiable otter")).firstMatch.exists)
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Asha")).firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["This Mac appears nearby as mild bream"].exists)
+        let own = app.descendants(matching: .any).matching(identifier: "own-nearby-name").firstMatch
+        XCTAssertTrue(own.exists)
+        XCTAssertTrue(own.label.contains("mild bream"), "the Calls list says which name people nearby see for this Mac")
         first.click()
         XCTAssertTrue(app.buttons["Voice call"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Video call"].exists)

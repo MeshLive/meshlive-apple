@@ -88,6 +88,16 @@ final class AppModel: ObservableObject {
     /// The app left or regained the front while a call may ring (inactive or background).
     func appActivityChanged() { CallNotifier.shared.update(for: call) }
     @Published var wiped = false
+    /// "You appear as ..." (OwnNearbyName): what people nearby who have not added you see for this device now, or nil.
+    var ownNearbyLine: String? {
+        #if os(macOS)
+        let generatedOn = desktopGeneratedNames, generated = desktopAdvertisedName
+        #else
+        let generatedOn = false, generated: String? = nil   // the iPhone has no generated names yet
+        #endif
+        return OwnNearbyName.shown(reachableForCalls: availableForCalls, rotatingOn: rotatingIds,
+                                   generatedNamesOn: generatedOn, generatedName: generated).map(OwnNearbyName.line)
+    }
     /// EXPERIMENTAL rotating discovery IDs (Settings > Advanced).
     @Published var rotatingIds = AppSettings.rotatingIds {
         didSet {
@@ -871,6 +881,7 @@ final class AppModel: ObservableObject {
             }
             people.append(PersonRow(id: UUID(), label: PeerLabel(prefix: Data(hex: "a1b2c3d4e5f6")!, contactName: "Asha"),
                                     prefixHex: "a1b2c3d4e5f6", transport: .gatt, relays: 0, isIPhone: false))
+            rotatingIds = true
             desktopAdvertisedName = "mild bream"
             return
         }

@@ -295,12 +295,7 @@ struct CallsTab: View {
     var body: some View {
         TabPage {
             TabHeader(title: "Calls")
-            #if os(macOS)
-            if let name = model.desktopAdvertisedName {
-                Text("This Mac appears nearby as \(name)").font(Typo.secondary).foregroundStyle(Palette.dimInk)
-                    .accessibilityIdentifier("desktop-nearby-name")
-            }
-            #endif
+            if !showRecent, let line = model.ownNearbyLine { OwnNearbyNameLine(text: line) }
             let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
             layout {
                 Chip(title: "Nearby", selected: !showRecent) { showRecent = false }

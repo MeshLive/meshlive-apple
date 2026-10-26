@@ -18,17 +18,11 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 TabHeader(title: "Settings")
                 Card {
-                    SettingsLinkRow(icon: "person", title: "Your name",
-                                    value: model.displayName.trimmingCharacters(in: .whitespaces).isEmpty ? "Not set" : model.displayName) { NameView() }
+                    let unnamed = model.displayName.trimmingCharacters(in: .whitespaces).isEmpty
+                    SettingsLinkRow(icon: "person", title: "Your name", value: unnamed ? "Not set" : model.displayName,
+                                    subtitle: unnamed ? model.ownNearbyLine : nil) { NameView() }
                     CardDivider()
                     SettingsLinkRow(icon: AppIcon.identity, title: "Your ID", value: model.handle) { VerifyView() }
-                    #if os(macOS)
-                    if let name = model.desktopAdvertisedName {
-                        CardDivider()
-                        SettingsRowLabel(icon: "person.crop.circle", title: "Nearby as \(name)", chevron: false)
-                            .accessibilityIdentifier("desktop-nearby-name")
-                    }
-                    #endif
                 }
                 Card {
                     SettingsToggleRow(icon: "phone", title: "Allow calls",

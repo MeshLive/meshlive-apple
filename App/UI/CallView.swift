@@ -148,6 +148,8 @@ struct CallView: View {
                 EmptyView()
             } else if call.phase == .incomingRinging {
                 Text(call.offeredType == .voice ? "Voice call" : "Video call").font(Typo.secondary).foregroundStyle(Palette.dimInk)
+                // So the two of you can match up: the name the caller sees for this device nearby.
+                if let line = model.ownNearbyLine { OwnNearbyNameLine(text: line) }
                 let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 20)) : AnyLayout(HStackLayout(spacing: 56))
                 layout {
                     RoundControl(icon: "phone.down.fill", label: "Decline", fill: Palette.callEnd, foreground: .white, size: 76) { call.decline() }
