@@ -100,6 +100,46 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(caller.closeReason?.contains("busy") == true, caller.closeReason ?? "-")
     }
 
+    /// Glare (Android F14 DialCollision): only the person being dialled rings while a dial still looks for its person.
+    func testDialCollisionRingsOnlyThePersonBeingDialled() {
+        XCTAssertEqual(DialCollision.decide(dialling: true, target: "a1b2c3d4e5f6", callerPrefix: "A1B2C3D4E5F6"), .ring)
+        XCTAssertEqual(DialCollision.decide(dialling: true, target: "a1b2c3d4e5f6", callerPrefix: "0102030405a8"), .declineBusy)
+        XCTAssertEqual(DialCollision.decide(dialling: true, target: "a1b2c3d4e5f6", callerPrefix: nil), .declineBusy, "a throwaway never matches")
+        XCTAssertEqual(DialCollision.decide(dialling: true, target: nil, callerPrefix: "a1b2c3d4e5f6"), .declineBusy)
+        XCTAssertEqual(DialCollision.decide(dialling: false, target: "a1b2c3d4e5f6", callerPrefix: "a1b2c3d4e5f6"), .declineBusy, "in a call: busy")
+    }
+
+    func testABusyListenerRingsForTheDialledPersonAndDeclinesEveryoneElse() throws {
+        for ring in [true, false] {
+            let (caller, callee, pipe, _, _) = try makeCall()
+            var asked: NodeId?
+            callee.declineAsBusy = true
+            callee.ringInsteadOfBusy = { id in asked = id; return ring }
+            try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+            XCTAssertEqual(asked, caller.identityNodeIdForTests, "the hook sees the caller's real ID")
+            if ring { XCTAssertEqual(callee.state?.phase, .incomingRinging); XCTAssertFalse(callee.declinedBusy) }
+            else { XCTAssertTrue(callee.declinedBusy); XCTAssertTrue(caller.closeReason?.contains("busy") == true) }
+        }
+    }
+
+    /// Both devices dial each other: the first Invite to arrive while the other still looks becomes the only call.
+    func testTwoDevicesDiallingEachOtherEndInOneCall() throws {
+        // A's dial reaches B's listener first; B's own dial (to A) is still looking.
+        let (aOut, bListen, first, _, _) = try makeCall()
+        var bDialling = true
+        bListen.declineAsBusy = true
+        bListen.ringInsteadOfBusy = { id in
+            guard DialCollision.decide(dialling: bDialling, target: id?.prefix.hex, callerPrefix: id?.prefix.hex) == .ring else { return false }
+            bDialling = false   // B's own dial stops: the call from A is the conversation
+            return true
+        }
+        try aOut.start(now: 0); try bListen.start(now: 0); try first.pump()
+        XCTAssertEqual(bListen.state?.phase, .incomingRinging)
+        XCTAssertFalse(bDialling, "B cancelled its own dial, so its Invite never reaches A")
+        try bListen.accept(as: .voice); try first.pump()
+        XCTAssertEqual(aOut.state?.phase, .active)
+    }
+
     /// The end-to-end hello never signs transport bit 4 (0x10, Android's in-call link renewal), whatever is on.
     func testCallHellosNeverSignTheRenewalBit() throws {
         let (caller, callee, pipe, _, _) = try makeCall(type: .video, fragments: true)

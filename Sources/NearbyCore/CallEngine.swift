@@ -440,6 +440,9 @@ public final class CallEngine: MeshConnection {
     /// value 2) before it rings; the caller shows "Busy" instead of a dropped link.
     public var declineAsBusy = false
     public private(set) var declinedBusy = false
+    /// Glare (DialCollision): asked at the Invite with the caller's authenticated real node ID (nil for a throwaway);
+    /// true lets the call ring although `declineAsBusy` is set (the caller is the person this device is dialling).
+    public var ringInsteadOfBusy: ((NodeId?) -> Bool)?
     /// True when this call passes through at least one relay: the Invite says so (the caller's claim, which can only
     /// make a call count as relayed), or the authenticated link peer is not the authenticated call peer (a direct call
     /// uses the same key at both layers).
@@ -448,6 +451,7 @@ public final class CallEngine: MeshConnection {
     }
     /// Test seam: a caller that opens the link but never sends its Invite.
     var testingWithholdInvite = false
+    var identityNodeIdForTests: NodeId { identity.nodeId }
     /// Test seam: a callee that reads the Invite but never answers it (no Ringing).
     var testingIgnoreInvite = false
 
@@ -820,6 +824,9 @@ public final class CallEngine: MeshConnection {
                 try sendSignal(.decline, reason: .rejected, closeAfter: true)
                 finish("Relayed call declined (\(decision.rawValue))", error: false)
                 return
+            }
+            if declineAsBusy, ringInsteadOfBusy?(endpoint.flatMap { $0.peerPseudonymous ? nil : $0.peerNodeId }) == true {
+                declineAsBusy = false
             }
             if declineAsBusy {
                 declinedBusy = true

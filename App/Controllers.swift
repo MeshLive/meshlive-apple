@@ -108,6 +108,18 @@ final class CallController: ObservableObject, Identifiable {
     /// Why the route failed before READY (a first hop that could not be connected or closed early counts as a timeout).
     var relayFailure: RelaySetupFailure? { engine.relaySetupFailure ?? (relayConnectFailed || engine.relayedRouteFailed ? .timeout : nil) }
     var userCancelled = false
+    /// Glare: the real prefix of the person this caller dials, when known.
+    var dialTargetPrefixHex: String?
+    /// A busy listener (DialCollision): never shown, never rings unless promoted to the device's call.
+    var busyMode = false
+    /// A caller still looking for its person (no link yet).
+    var isConnecting: Bool { role == .caller && driver == nil && ended == nil }
+    /// Busy listener: the Invite is declined with BUSY unless `ring` says the caller is the person being dialled.
+    func configureBusy(ring: @escaping (NodeId?) -> Bool) {
+        busyMode = true
+        engine.declineAsBusy = true
+        engine.ringInsteadOfBusy = ring
+    }
     /// A search was not sent because the first hop did not sign RELAY_SEEK.
     var relaySeekRefusedLocally: Bool { engine.closeReason?.contains("does not search") == true }
 
@@ -207,7 +219,7 @@ final class CallController: ObservableObject, Identifiable {
 
     func attach(_ link: MeshLink) {
         #if os(macOS)
-        guard driver == nil, model?.desktopCallLinkAttached(self) == true else { link.close(); return }
+        guard driver == nil, busyMode || model?.desktopCallLinkAttached(self) == true else { link.close(); return }
         #else
         guard driver == nil, ended == nil else { link.close(); return }
         #endif
@@ -258,7 +270,7 @@ final class CallController: ObservableObject, Identifiable {
         case .phase(let p):
             phase = p
             if p == .incomingRinging { ringer.start() } else { ringer.stop() }
-            CallNotifier.shared.update(for: self)
+            if !busyMode { CallNotifier.shared.update(for: self) }
             switch p {
             case .outgoingInvite: phaseText = "Calling…"
             case .outgoingRinging: phaseText = "Ringing…"

@@ -721,7 +721,7 @@ final class AppModel: ObservableObject {
     private func handleIncoming(_ link: MeshLink) {
         if let relay = callRelay, relay.awaitingParent { relay.attachParent(link); refreshAdvertising(); return }
         if let watch, watch.awaitingSource { watch.attach(link); refreshAdvertising(); return }
-        if (call != nil || placingCall || relayDuty != nil), availableForCalls, let identity,
+        if (call != nil || placingCall || relayDuty != nil || contactDialWait != nil), availableForCalls, let identity,
            UserDefaults.standard.object(forKey: "callBusyDecline") as? Bool ?? true { declineBusy(link, identity: identity); return }
         guard call == nil, availableForCalls, let identity else { link.close(); return }
         let pins = rotating.pins
@@ -736,23 +736,64 @@ final class AppModel: ObservableObject {
         refreshAdvertising()
     }
 
-    /// Busy rule (Android F14): an incoming call while this phone is in a call or dialling finishes its handshake and
-    /// is declined with BUSY before it rings; nothing is shown. (Android's glare exception, letting the person this
-    /// phone is dialling ring, needs a second call controller and is not ported.)
-    private var busyDrivers: [ObjectIdentifier: ConnectionDriver] = [:]
+    /// Busy rule (Android F14): an incoming call while this device is in a call, dialling or relaying finishes its
+    /// handshake as an ordinary (hidden) callee and is declined with BUSY before it rings. Glare (DialCollision): when
+    /// the caller is the very person being dialled, their call rings instead and the user's own dial stops; whichever
+    /// Invite arrives first while the other is still looking becomes the call. `-dialCollisionRing NO` is the control arm.
+    private var busyControllers: [CallController] = []
+    private var dialSuperseded = false
+    private var pendingDialTarget: String?
+
     private func declineBusy(_ link: MeshLink, identity: SigningIdentity) {
-        let engine = CallEngine(role: .callee, transport: link.transport, identity: identity, requestedType: .voice,
-                                encodeMask: VideoDecoderSupport.encodeMask, decodeMask: VideoDecoderSupport.decodeMask,
-                                bmh3: bmh3Options(selected: nil))
-        engine.declineAsBusy = true
-        let driver = ConnectionDriver(engine: engine, link: link)
-        let key = ObjectIdentifier(driver)
-        driver.onFinished = { [weak self] reason in
-            AppLog.event("call_collision", ["action": engine.declinedBusy ? "declined_busy" : "closed", "reason": reason])
-            self?.busyDrivers[key] = nil
+        let pins = rotating.pins
+        let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
+                                        identity: identity, transport: link.transport, type: .video, relayHops: 0,
+                                        rotating: rotatingIds ? withPresence(RotatingCallOptions(entries: { pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) })) : nil,
+                                        bmh3: bmh3Options(selected: nil),
+                                        relayed: relayedCalls ? RelayedCallOptions(featureOn: true, acceptRdi: rotatingIds) : nil)
+        controller.configureBusy { [weak self, weak controller] caller in
+            guard let self, let controller else { return false }
+            return self.glareRings(controller, caller: caller)
         }
-        busyDrivers[key] = driver
-        driver.start()
+        busyControllers.append(controller)
+        controller.attach(link)
+    }
+
+    /// This device's own dial while it is still looking for its person, and that person's real prefix when known.
+    private func ownDial() -> (dialling: Bool, target: String?) {
+        if placingCall { return (true, pendingDialTarget) }
+        if let c = call, c.isConnecting { return (true, c.dialTargetPrefixHex) }
+        if let wait = contactDialWait { return (true, wait.contact.nodePrefixHex) }
+        return (false, nil)
+    }
+
+    /// The real prefix of the person a row dials: a fixed prefix, or the contact a rotating or routed row stands for.
+    func dialTarget(for person: PersonRow) -> String? {
+        if person.relayRoute != nil { return person.prefixHex }
+        guard let offer = radio.peers[person.id]?.announcement, offer.rotating else { return person.prefixHex }
+        let hits = rotating.vault.recognition.lookup(offer.nodeIdPrefix)
+        guard hits.count == 1 else { return nil }
+        return contacts.first { $0.fingerprintHex.hasPrefix(hits[0].contact.hex) }?.nodePrefixHex
+    }
+
+    private func glareRings(_ controller: CallController, caller: NodeId?) -> Bool {
+        let enabled = UserDefaults.standard.object(forKey: "dialCollisionRing") as? Bool ?? true
+        let own = ownDial()
+        let action = enabled ? DialCollision.decide(dialling: own.dialling, target: own.target, callerPrefix: caller?.prefix.hex) : .declineBusy
+        AppLog.event("call_collision", ["action": action == .ring ? "their_call_rings" : "declined_busy", "dialling": "\(own.dialling)",
+                                        "callerKnown": "\(caller != nil)"])
+        guard action == .ring else { return false }
+        // Their call is the conversation: the user's own dial stops, and this listener becomes the call.
+        if let own = call, own !== controller { own.userCancelled = true; own.end() }
+        if placingCall { dialSuperseded = true }
+        contactDialWait = nil
+        seekAttempt = nil
+        busyControllers.removeAll { $0 === controller }
+        controller.busyMode = false
+        call = controller
+        AppLog.event("call_invite", ["state": "cancelled", "reason": "target_called_first"])
+        refreshAdvertising()
+        return true
     }
 
     // MARK: Calls
@@ -781,10 +822,13 @@ final class AppModel: ObservableObject {
         relayDuty?.preempt()   // the user's own activity ends a relay at once (Design C, C5)
         guard call == nil, !placingCall, identity != nil else { return }
         placingCall = true; callNotice = nil
+        pendingDialTarget = dialTarget(for: person); dialSuperseded = false
         let tappedAt = ProcessInfo.processInfo.systemUptime
         MediaPermissions.request(video: type == .video, context: "outgoing") { [weak self] _, _ in
             guard let self else { return }
             self.placingCall = false
+            // Glare: the person being dialled called first while the permission question was open.
+            if self.dialSuperseded { self.dialSuperseded = false; return }
             self.placeCall(to: person, type: type, tappedAt: tappedAt)
         }
     }
@@ -811,6 +855,7 @@ final class AppModel: ObservableObject {
                                         rotating: outgoingRotatingOptions(selected: peer.announcement),
                                         bmh3: bmh3Options(selected: peer.announcement),
                                         relayed: relayedCalls ? RelayedCallOptions(featureOn: true) : nil)
+        controller.dialTargetPrefixHex = dialTarget(for: person)
         call = controller
         controller.startTimeline(origin: tappedAt)
         controller.markStage("permissions")
@@ -866,6 +911,7 @@ final class AppModel: ObservableObject {
                                         relayed: RelayedCallOptions(featureOn: true, route: route, pseudonymousEdges: AppSettings.relayedPseudonymousEdges,
                                                                     setupStartedAt: ProcessInfo.processInfo.systemUptime))
         controller.relayRoute = route
+        controller.dialTargetPrefixHex = person.prefixHex
         lastOutgoing = CallRetry(personId: person.id, prefixHex: person.prefixHex, video: type == .video, name: person.label.title)
         call = controller
         controller.startTimeline(origin: tappedAt)
@@ -1412,6 +1458,7 @@ final class AppModel: ObservableObject {
     }
 
     func callFinished(_ controller: CallController) {
+        if controller.busyMode { busyControllers.removeAll { $0 === controller }; return }
         // An older call's delayed dismissal must not clear a newer call's ringing alert.
         guard call === controller else { return }
         if relayedOutcome(controller) { return }
