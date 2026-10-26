@@ -43,12 +43,23 @@ enum KeychainItem {
         let status = SecItemDelete(base(account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
     }
-    static func deleteAll() {
-        if DesktopPreview.enabled { return }
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
-        // The phase 1 rotating-ID presence key (now replaced by the presence vault), and the earlier v1 identity.
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.rotating"] as CFDictionary)
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.identity.v1"] as CFDictionary)
+    /// Every service this app ever used: the current one (identity, contacts key, presence vault, guard secret), the
+    /// phase 1 rotating-ID presence key (now replaced by the presence vault), and the earlier v1 identity.
+    static let allServices = [service, "org.nearbyintercom.rotating", "org.nearbyintercom.identity.v1"]
+    /// Deletes every item of every service; one status per service.
+    @discardableResult
+    static func deleteAll() -> [OSStatus] {
+        if DesktopPreview.enabled { return [] }
+        return allServices.map { SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: $0] as CFDictionary) }
+    }
+    /// One query per service: `errSecItemNotFound` only when no item of it remains; an error is not absence.
+    static func verifyAllDeleted() -> [OSStatus] {
+        allServices.map { name in
+            let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: name,
+                                        kSecMatchLimit as String: kSecMatchLimitOne, kSecReturnAttributes as String: true]
+            var item: CFTypeRef?
+            return SecItemCopyMatching(query as CFDictionary, &item)
+        }
     }
     private static func base(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
@@ -99,14 +110,12 @@ enum VerifiedContactsStore {
         let sealed = try AES.GCM.seal(plain, using: SymmetricKey(data: keyData!), authenticating: Data("verified-contacts-v1".utf8)).combined!
         var dir = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        var values = URLResourceValues(); values.isExcludedFromBackup = true; try? dir.setResourceValues(values)
+        BackupExclusion.apply(&dir)
         try sealed.write(to: url, options: [.atomic, .completeFileProtection])
     }
     static func reset() { if !DesktopPreview.enabled { try? FileManager.default.removeItem(at: url) } }
 }
 
-/// BMH3 pins (Android `hidden-identity-pins.txt`): next to the verified contacts, excluded from backup, readable after
-/// the first unlock (an incoming call can arrive while the phone is locked), deleted by the emergency wipe.
 /// Excludes a directory of app data from backups; a failure is logged (status only, no path).
 enum BackupExclusion {
     static func apply(_ dir: inout URL) {
@@ -115,6 +124,8 @@ enum BackupExclusion {
     }
 }
 
+/// BMH3 pins (Android `hidden-identity-pins.txt`): next to the verified contacts, excluded from backup, readable after
+/// the first unlock (an incoming call can arrive while the phone is locked), deleted by the emergency wipe.
 final class Bmh3PinFile: Bmh3PinStorage {
     static var url: URL { VerifiedContactsStore.url.deletingLastPathComponent().appendingPathComponent("hidden-identity-pins.txt") }
     func read() -> String? { try? String(contentsOf: Self.url, encoding: .utf8) }
@@ -134,23 +145,25 @@ enum EmergencyWipe {
     }
     static var pending: Bool { FileManager.default.fileExists(atPath: markerURL.path) }
 
-    /// Runs synchronously; returns true when the final sweep left nothing behind.
+    /// Runs synchronously; returns true only when the wipe is verified (`WipeVerification`): every Keychain deletion
+    /// succeeded or found nothing, a query then confirmed every service empty (an error is not absence), and the
+    /// contacts, the presence-vault guard (with its temporary files) and the BMH3 pins are gone. Otherwise the marker
+    /// stays and the wipe resumes at the next launch.
     @discardableResult
     static func run() -> Bool {
         if DesktopPreview.enabled { return false }
         try? Data().write(to: markerURL, options: .atomic)
-        KeychainItem.deleteAll()
+        var deletions = KeychainItem.deleteAll()
         sweep()
         if let domain = Bundle.main.bundleIdentifier { DesktopPreview.preferences.removePersistentDomain(forName: domain) }
         sweep()
-        KeychainItem.deleteAll()
+        deletions += KeychainItem.deleteAll()
         let fm = FileManager.default
-        // Done only when the identity, the contacts, the presence vault (and its guard secret), the vault guard and the
-        // BMH3 pins are all gone.
-        let complete = (try? KeychainItem.read("identity-se")) == nil && (try? KeychainItem.read("identity-software")) == nil
-            && (try? KeychainItem.read(PresenceVault.account)) == nil && (try? KeychainItem.read(PresenceVault.guardSecretAccount)) == nil
-            && !fm.fileExists(atPath: VerifiedContactsStore.url.path) && !fm.fileExists(atPath: PresenceVault.guardURL.path)
-            && !fm.fileExists(atPath: Bmh3PinFile.url.path)
+        // The directory holding the contacts, the vault guard (and its temporary files) and the pins: gone or empty.
+        let identityDir = VerifiedContactsStore.url.deletingLastPathComponent()
+        let filesLeft = [VerifiedContactsStore.url, PresenceVault.guardURL, Bmh3PinFile.url].filter { fm.fileExists(atPath: $0.path) }.count
+            + ((try? fm.contentsOfDirectory(atPath: identityDir.path))?.count ?? 0)
+        let complete = WipeVerification.complete(deletions: deletions, verifications: KeychainItem.verifyAllDeleted(), filesLeft: filesLeft)
         if complete { try? FileManager.default.removeItem(at: markerURL) }
         return complete
     }
