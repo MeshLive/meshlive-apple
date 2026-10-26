@@ -140,6 +140,8 @@ public struct MediaPacket: Equatable {
         func delta() throws -> Int64 {
             let value = Int64(try r.i32())
             guard (0...StreamProtocol.maxAudioGapUs).contains(value) else { throw ProtocolError.malformed("Invalid paired-audio timestamp gap") }
+            // The unit's time must fit in 64 bits (a peer's timestamp near the limit is rejected, never trapped on).
+            guard !presentationTimeUs.addingReportingOverflow(value).overflow else { throw ProtocolError.malformed("Audio timestamp out of range") }
             return value
         }
         let magic = try r.bytes(4)

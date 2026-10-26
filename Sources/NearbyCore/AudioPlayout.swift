@@ -38,7 +38,10 @@ public struct AudioPlayout {
     }
 
     private func slot(_ pts: Int64) -> Int64 {
-        let delta = pts - (baseUs ?? pts)
+        // A distance that does not fit (a peer's timestamp near the 64-bit limits) is a sender restart: far outside
+        // the window, so push() resets the timeline instead of trapping.
+        let (delta, overflow) = pts.subtractingReportingOverflow(baseUs ?? pts)
+        guard !overflow, delta.magnitude < UInt64(Int64.max / 2) else { return Int64.max / 4 }
         return delta >= 0 ? (delta + frameUs / 2) / frameUs : -((-delta + frameUs / 2) / frameUs)
     }
 
@@ -51,9 +54,14 @@ public struct AudioPlayout {
         // instead of being discarded as late.
         if !playing, index < next, index >= next - Int64(capacityFrames) {
             let shift = next - index
-            slots = Dictionary(uniqueKeysWithValues: slots.map { ($0.key + shift, $0.value) })
-            baseUs = baseUs! - shift * frameUs
-            index = next
+            let (rebased, overflow) = baseUs!.subtractingReportingOverflow(shift * frameUs)
+            if overflow {
+                reset(); baseUs = pts; index = 0
+            } else {
+                slots = Dictionary(uniqueKeysWithValues: slots.map { ($0.key + shift, $0.value) })
+                baseUs = rebased
+                index = next
+            }
         }
         guard index >= next else { late += 1; return }
         guard slots[index] == nil else { return }

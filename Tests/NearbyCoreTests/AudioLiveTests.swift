@@ -160,6 +160,36 @@ final class AudioLiveTests: XCTestCase {
         }
     }
 
+    /// A source-signed record with a timestamp at the 64-bit limits ends the stream with an error instead of trapping.
+    func testTimestampsAtTheLimitsAreRejectedNotTrapped() throws {
+        do { // the record's end time does not fit
+            let (s, g, _) = try setup()
+            XCTAssertThrowsError(try g.open(try record(s, units(1, at: Int64.max))))
+            XCTAssertThrowsError(try g.open(try record(s, units(1, at: Int64.max - 10_000))))
+        }
+        do { // the gap from the previous record does not fit
+            let (s, g, _) = try setup()
+            XCTAssertNoThrow(try g.open(try record(s, units(1, at: Int64.min))))
+            XCTAssertThrowsError(try g.open(try record(s, units(1, at: Int64.max - 20_000))))
+        }
+        do { // a lifecycle record restarts the baseline: a far time is then accepted, and still fits
+            let (s, g, _) = try setup()
+            XCTAssertNoThrow(try g.open(try record(s, units(1, at: Int64.min))))
+            try g.onLifecycleRecord()
+            XCTAssertNoThrow(try g.open(try record(s, units(1, at: Int64.max - 20_000))))
+        }
+        // A call peer's paired audio near the limit is rejected by the batch reader.
+        let pair = try MediaPacket.combineAudio(units(2, at: 0))
+        var far = pair; far.presentationTimeUs = Int64.max - 1
+        XCTAssertThrowsError(try far.splitAudio())
+        // The playout buffer resets on a jump that does not fit instead of trapping.
+        var playout = AudioPlayout(targetFrames: 1)
+        playout.push(presentationTimeUs: Int64.min + 5, payload: Data([1]))
+        playout.push(presentationTimeUs: Int64.max, payload: Data([2]))
+        playout.push(presentationTimeUs: Int64.min, payload: Data([3]))
+        XCTAssertEqual(playout.bufferedFrames, 1)
+    }
+
     func testLifecycleRestartsTheClockBaseline() throws {
         let (s, g, clock) = try setup()
         XCTAssertNoThrow(try g.open(try record(s, units(10, at: 0))))

@@ -332,10 +332,12 @@ public final class AudioLiveStreamGuard {
         let firstUs = units[0].presentationTimeUs
         for (index, unit) in units.enumerated() {
             guard AudioLiveOpus.isSingle20msMonoFrame(unit.payload) else { throw ProtocolError.incompatible("Not a single 20 ms mono Opus frame") }
-            guard unit.presentationTimeUs == firstUs + Int64(index) * AudioLive.frameUs else { throw ProtocolError.malformed("Audio units are not contiguous 20 ms steps") }
+            guard unit.presentationTimeUs == Self.offset(firstUs, frames: index) else { throw ProtocolError.malformed("Audio units are not contiguous 20 ms steps") }
         }
+        // A signed record whose time does not fit in 64 bits ends the stream instead of trapping.
+        guard let endUs = Self.offset(firstUs, frames: units.count) else { throw ProtocolError.malformed("Audio timestamp out of range") }
         try checkGap(firstUs: firstUs, seq: opened.seq)
-        previousEndUs = firstUs + Int64(units.count) * AudioLive.frameUs
+        previousEndUs = endUs
         previousSeq = opened.seq
         try checkBurst(firstUs: firstUs, nowMs: now)
         verifiedRecords += 1
@@ -343,9 +345,17 @@ public final class AudioLiveStreamGuard {
         return body
     }
 
+    /// `startUs + frames x 20 ms`, or nil when it does not fit in 64 bits.
+    static func offset(_ startUs: Int64, frames: Int) -> Int64? {
+        let (span, spanOverflow) = Int64(frames).multipliedReportingOverflow(by: AudioLive.frameUs)
+        let (sum, sumOverflow) = startUs.addingReportingOverflow(span)
+        return spanOverflow || sumOverflow ? nil : sum
+    }
+
     private func checkGap(firstUs: Int64, seq: Int64) throws {
         guard let end = previousEndUs else { return }
-        let step = firstUs - end
+        let (step, overflow) = firstUs.subtractingReportingOverflow(end)
+        guard !overflow else { throw ProtocolError.malformed("Audio timestamp out of range") }
         guard step >= 0 else { throw ProtocolError.malformed("Audio timestamps overlap") }
         let dropped = max(0, seq - previousSeq - 1)
         let allowed = min(Self.gapSlackUs + dropped * Self.maxRecordSpanUs, Self.maxGapUs)
