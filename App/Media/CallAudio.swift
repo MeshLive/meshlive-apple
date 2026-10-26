@@ -73,6 +73,31 @@ final class CallAudio {
     private var tapInstalled = false
     /// Playback chain generation: buffer completions from a stopped engine never continue a new chain.
     private var playGeneration = 0
+    /// EXPERIMENTAL caller microphone prewarm (`-callerMicPrewarm YES`, off): an engine with voice processing already
+    /// enabled (the ~1 s step), never started and without a tap, so nothing is captured before `start`.
+    private var warmEngine: AVAudioEngine?
+    private var warmedAt: TimeInterval?
+
+    /// Enables voice processing on an engine that is not started (no tap, no capture). Only with the microphone
+    /// already allowed; `start(capture: true)` then uses it, and `stop()` discards it.
+    /// macOS only: on iOS voice processing must follow the session category, which is set at bring-up.
+    func prewarm() {
+        #if os(macOS)
+        guard !DesktopPreview.enabled, MediaPermissions.microphone == "granted" else { return }
+        control.async {
+            guard !self.stopped, self.engine == nil, self.warmEngine == nil else { return }
+            let began = ProcessInfo.processInfo.systemUptime
+            let engine = AVAudioEngine()
+            do {
+                try engine.inputNode.setVoiceProcessingEnabled(true)
+                self.warmEngine = engine; self.warmedAt = ProcessInfo.processInfo.systemUptime
+                AppLog.event("audio_prewarm", ["event": "ready", "ms": "\(Int((ProcessInfo.processInfo.systemUptime - began) * 1000))"])
+            } catch {
+                AppLog.event("audio_prewarm", ["event": "failed", "error": self.describe(error)])
+            }
+        }
+        #endif
+    }
 
     /// Experimental call FEC (Settings > Advanced, off; Android test_call_native_opus): in-band FEC, 10 % loss hint.
     let fec: Bool
@@ -198,9 +223,14 @@ final class CallAudio {
     }
 
     private func startEngine(capture: Bool, voiceProcessing: Bool) throws {
-        let engine = AVAudioEngine(), player = AVAudioPlayerNode()
+        let warm = capture && voiceProcessing ? warmEngine : nil
+        if let warmedAt, warm != nil {
+            AppLog.event("audio_prewarm", ["event": "used", "ageMs": "\(Int((ProcessInfo.processInfo.systemUptime - warmedAt) * 1000))"])
+        }
+        warmEngine = nil; warmedAt = nil
+        let engine = warm ?? AVAudioEngine(), player = AVAudioPlayerNode()
         self.engine = engine; self.player = player
-        if capture && voiceProcessing { try engine.inputNode.setVoiceProcessingEnabled(true) }
+        if capture && voiceProcessing && warm == nil { try engine.inputNode.setVoiceProcessingEnabled(true) }
         #if os(macOS)
         player.volume = route == .speaker ? 1 : 0
         #endif
@@ -443,6 +473,8 @@ final class CallAudio {
         control.async {
             self.stopped = true
             self.observers.forEach(NotificationCenter.default.removeObserver); self.observers.removeAll()
+            if self.warmEngine != nil { AppLog.event("audio_prewarm", ["event": "discarded"]) }
+            self.warmEngine = nil; self.warmedAt = nil
             self.tearDownEngine()
             self.queue.sync {
                 if let encoder = self.encoder { nearby_opus_encoder_destroy(encoder) }

@@ -339,7 +339,7 @@ final class CallController: ObservableObject, Identifiable {
         case .phase(let p):
             switch p {
             case .outgoingInvite: markStage("invite")
-            case .outgoingRinging, .incomingRinging: markStage("ringing")
+            case .outgoingRinging, .incomingRinging: markStage("ringing"); if p == .outgoingRinging { prewarmCallerAudio() }
             case .negotiatingMedia: markStage("accepted")
             case .active: markStage("active")
             default: break
@@ -382,8 +382,20 @@ final class CallController: ObservableObject, Identifiable {
         AppLog.event("call_stats", fields)
     }
 
-    private func startMedia(header: StreamHeader, video: Bool) {
+    /// EXPERIMENTAL (`-callerMicPrewarm YES`, off): the caller's audio engine, voice processing enabled at
+    /// outgoingRinging but not started; used by `startMedia`, stopped if the call ends first.
+    private var prewarmedAudio: CallAudio?
+
+    private func prewarmCallerAudio() {
+        guard role == .caller, prewarmedAudio == nil, audio == nil, UserDefaults.standard.bool(forKey: "callerMicPrewarm") else { return }
         let audio = CallAudio(bitrate: 24_000, route: speaker ? .speaker : .earpiece, fec: AppSettings.callAudioFec)
+        audio.prewarm()
+        prewarmedAudio = audio
+    }
+
+    private func startMedia(header: StreamHeader, video: Bool) {
+        let audio = prewarmedAudio ?? CallAudio(bitrate: 24_000, route: speaker ? .speaker : .earpiece, fec: AppSettings.callAudioFec)
+        prewarmedAudio = nil
         audio.clockStart = mediaClock
         audio.onPacket = { [weak self] pts, data in
             guard let self else { return }
@@ -605,6 +617,7 @@ final class CallController: ObservableObject, Identifiable {
         ringer.stop()
         if audio != nil || camera != nil { logStats(final: true) }
         audio?.stop(); audio = nil
+        prewarmedAudio?.stop(); prewarmedAudio = nil
         camera?.stop(); camera = nil
         remote.stop()
         statsTimer?.invalidate(); statsTimer = nil

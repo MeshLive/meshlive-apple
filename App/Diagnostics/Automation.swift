@@ -112,6 +112,16 @@ final class Automation {
     /// One loopback run of `CallAudio`; the second run starts right after the first one's stop (teardown ordering).
     private func audioSelfTest(run: Int, seconds: Double) {
         let audio = CallAudio(bitrate: 24_000, route: .earpiece)
+        // With -callerMicPrewarm YES the engine is warmed 2 s before start, as at outgoingRinging.
+        if UserDefaults.standard.bool(forKey: "callerMicPrewarm") {
+            audio.prewarm()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.audioSelfTestStart(audio, run: run, seconds: seconds) }
+            return
+        }
+        audioSelfTestStart(audio, run: run, seconds: seconds)
+    }
+
+    private func audioSelfTestStart(_ audio: CallAudio, run: Int, seconds: Double) {
         let began = ProcessInfo.processInfo.systemUptime
         var first = true
         audio.onPacket = { [weak audio] pts, packet in

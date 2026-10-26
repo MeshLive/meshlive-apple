@@ -480,9 +480,8 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
                                          "cachedServices": "\(peripheral.services?.count ?? 0)"].merging(attempt.timing()) { a, _ in a })
         #endif
         peripheral.discoverServices([CBUUID(string: service)])
-        // Service discovery normally answers in about 0.5 s; on Mac calls it twice hung for 12 and 15 s and the
-        // retry then took 2.3 s. A first attempt still discovering after `servicesStallSeconds` is cut and goes
-        // straight to the existing rediscover-and-retry (`-servicesStallSeconds 0` is the control arm).
+        // Experimental: a first attempt still discovering after `servicesStallSeconds` is cut and goes straight to the
+        // existing rediscover-and-retry.
         let stall = MeshRadio.servicesStallSeconds
         if stall > 0, !attempt.retried {
             let key = peripheral.identifier
@@ -493,9 +492,12 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         }
     }
 
-    /// The first attempt's service-discovery deadline (seconds); 0 waits for the 15 s connect timeout as before.
+    /// The first attempt's service-discovery deadline (seconds); 0 (default) waits for the 15 s connect timeout.
+    /// EXPERIMENTAL, off: the 12 s and 15 s hangs it targeted were macOS pairing prompts during discovery (the peer
+    /// refused the GAP name read), and CoreBluetooth gives a central no pairing or encryption state, so the cut could
+    /// abort a pairing the user is answering. `-servicesStallSeconds 4` enables it for tests.
     static var servicesStallSeconds: TimeInterval {
-        UserDefaults.standard.object(forKey: "servicesStallSeconds") as? Double ?? 4
+        UserDefaults.standard.object(forKey: "servicesStallSeconds") as? Double ?? 0
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
