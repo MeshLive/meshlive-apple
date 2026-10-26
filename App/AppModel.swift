@@ -43,6 +43,8 @@ struct StreamRow: Identifiable, Equatable {
 /// App state and orchestration on the main queue. One radio; one advertised role at a time
 /// (review R5: a pending viewer request beats call availability).
 final class AppModel: ObservableObject {
+    /// First stored property, so it marks where this object's construction began (startup timing, `BENCHMARK startup`).
+    private let constructionBegan = ProcessInfo.processInfo.systemUptime
     @Published var status = ""
     @Published var bluetoothProblem: String?
     @Published var people: [PersonRow] = []
@@ -364,13 +366,22 @@ final class AppModel: ObservableObject {
 
     init() {
         AppLog.start()
+        let initBegan = ProcessInfo.processInfo.systemUptime
+        var steps: [String: String] = ["propertiesMs": AppLog.ms(since: constructionBegan, until: initBegan)]
+        var mark = initBegan
+        func step(_ name: String) { let now = ProcessInfo.processInfo.systemUptime; steps[name] = AppLog.ms(since: mark, until: now); mark = now }
+        defer { steps["initMs"] = AppLog.ms(since: initBegan); AppLog.event("startup", steps) }
         if EmergencyWipe.pending && !DesktopPreview.enabled { EmergencyWipe.run() }
+        step("wipeMs")
         KeychainItem.migrateLegacyServices()
+        step("keychainMoveMs")
+        defer { step("contactsAndHooksMs") }
         do { identity = try IdentityStore.loadOrCreate() } catch {
             // Without Keychain access (for example an unsigned build) run with a session-only identity and say so.
             identity = SoftwareSigningIdentity()
             status = "This phone's identity could not be saved (\(error)); a temporary one is used until the app closes."
         }
+        step("identityMs")
         loadContacts()
         book.policy = AppSettings.mismatchPolicyWarnOnly ? .warn : .refuse
         book.onMismatch = { [weak self] _, _, contact in
@@ -390,6 +401,8 @@ final class AppModel: ObservableObject {
         #if os(macOS)
         guard !desktopStopping else { return }
         #endif
+        let began = ProcessInfo.processInfo.systemUptime
+        defer { AppLog.event("startup", ["startMs": AppLog.ms(since: began)]) }
         if rotatingIds { rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch()) }
         if automation == nil, let auto = Automation(model: self) {
             automation = auto

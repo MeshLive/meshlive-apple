@@ -16,6 +16,12 @@ import NearbyCore
 /// code restarted at once, saw 0 Hz, and fell back to playback-only for the whole call (iPhone -> Android
 /// silent). Now restarts are debounced, an invalid input format is retried, voice processing is dropped only
 /// after repeated failures, and a playback-only fallback keeps retrying the microphone.
+///
+/// Threads: engine bring-up, restarts, route changes and teardown run on one serial control queue, never on the main
+/// thread. Enabling voice processing alone takes about a second on a Mac (measured: `audio_setup` to `audio_input`
+/// 0.98-1.1 s, which the main-thread watchdog logged as `main_stall` every time a call became active). The control
+/// queue is shared by every instance, so a previous call's teardown always finishes before the next engine starts.
+/// Packet and playout state stays on `queue`; `onFailure` and `onPacket` are called on the main thread.
 final class CallAudio {
     enum Route { case speaker, earpiece }
     struct Counters {
@@ -23,6 +29,14 @@ final class CallAudio {
         var receivedPackets = 0, decodedPackets = 0, decodeErrors = 0, concealedFrames = 0, silentFrames = 0, scheduledBuffers = 0, fecRecovered = 0
     }
     private let queue = DispatchQueue(label: "io.github.meshlive.app.audio", qos: .userInteractive)
+    private static let control = DispatchQueue(label: "io.github.meshlive.app.audio.control", qos: .userInitiated)
+    private var control: DispatchQueue { CallAudio.control }
+    /// Engine state for `logFields`, readable from any thread (the engine itself belongs to the control queue).
+    private let stateLock = NSLock()
+    private var published = (running: false, capturing: false, voiceProcessing: false)
+    /// Set by `stop()` at once (any thread may read it): a bring-up still running on the control queue then never
+    /// restarts encoding or playback for a call that already ended.
+    private var stopRequested = false
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var resampler: PCMResampler?
@@ -72,15 +86,30 @@ final class CallAudio {
     /// Starts playback, and capture when the microphone is allowed (permission is requested if undecided).
     func start(capture: Bool) {
         guard !DesktopPreview.enabled else { return }
-        guard capture else { setUp(capture: false); return }
+        guard capture else { control.async { self.setUp(capture: false) }; return }
         MediaPermissions.requestMicrophone { granted in
-            guard !self.stopped else { return }
-            if !granted { self.onFailure?("Microphone is off for MeshLive. Turn it on in Settings to talk; you can still hear them.") }
-            self.setUp(capture: granted)
+            self.control.async {
+                guard !self.stopped else { return }
+                if !granted { self.report("Microphone is off for MeshLive. Turn it on in Settings to talk; you can still hear them.") }
+                self.setUp(capture: granted)
+            }
         }
     }
 
+    /// `onFailure` on the main thread.
+    private func report(_ message: String) {
+        DispatchQueue.main.async { [weak self] in self?.onFailure?(message) }
+    }
+
+    private func publish() {
+        let state = (running: engine?.isRunning ?? false, capturing: capturing, voiceProcessing: voiceProcessing)
+        stateLock.withLock { published = state }
+    }
+
+    // MARK: Control queue
+
     private func setUp(capture: Bool) {
+        guard !stopped else { return }
         wantCapture = capture
         AppLog.event("audio_setup", ["capture": "\(capture)", "microphone": MediaPermissions.microphone, "opus": "\(CallAudio.opusAvailable)",
                                      "route": route == .speaker ? "speaker" : "earpiece"])
@@ -97,7 +126,7 @@ final class CallAudio {
         tearDownEngine()
         do { try configureSession() } catch {
             AppLog.event("audio_error", ["stage": "session", "reason": reason, "error": describe(error)])
-            onFailure?("Audio could not start: \(describe(error))"); return
+            report("Audio could not start: \(describe(error))"); return
         }
         if wantCapture {
             let vp = attempt < 4
@@ -112,7 +141,7 @@ final class CallAudio {
                 tearDownEngine()
             }
             if attempt < 7 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                control.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                     guard let self, generation == self.bringUpGeneration else { return }
                     self.bringUp(reason: reason, attempt: attempt + 1)
                 }
@@ -124,13 +153,13 @@ final class CallAudio {
             logSession(reason + (wantCapture ? " (playback only)" : ""))
         } catch {
             AppLog.event("audio_error", ["stage": "playback", "reason": reason, "error": describe(error)])
-            onFailure?("Audio could not start: \(describe(error))"); return
+            report("Audio could not start: \(describe(error))"); return
         }
         if wantCapture {
-            onFailure?("Microphone could not start yet; retrying. You can still hear them.")
-            guard captureRetries < 5 else { onFailure?("Microphone could not start. You can still hear them."); return }
+            report("Microphone could not start yet; retrying. You can still hear them.")
+            guard captureRetries < 5 else { report("Microphone could not start. You can still hear them."); return }
             captureRetries += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            control.asyncAfter(deadline: .now() + 3) { [weak self] in
                 guard let self, generation == self.bringUpGeneration, !self.capturing else { return }
                 self.bringUp(reason: "microphone retry \(self.captureRetries)", attempt: 0)
             }
@@ -182,6 +211,7 @@ final class CallAudio {
         capturing = capture; self.voiceProcessing = capture && voiceProcessing
         startPlayback(player)
         startedAtUptime = ProcessInfo.processInfo.systemUptime
+        publish()
     }
 
     /// Reads the input format (it must be valid: 0 Hz means the session is still switching) and installs the tap.
@@ -211,7 +241,13 @@ final class CallAudio {
 
     private func startPlayback(_ player: AVAudioPlayerNode) {
         player.play()
-        let generation: Int = queue.sync { running = true; playGeneration += 1; scheduled = 0; return playGeneration }
+        let trim = AppSettings.audioStartTrim
+        let (generation, dropped, kept): (Int, Int, Int) = queue.sync {
+            guard !stateLock.withLock({ stopRequested }) else { return (playGeneration, 0, 0) }
+            running = true; playGeneration += 1; scheduled = 0
+            return (playGeneration, trim ? playout.dropBacklog(keeping: playout.targetFrames) : 0, playout.bufferedMilliseconds)
+        }
+        if dropped > 0 { AppLog.event("audio_backlog_dropped", ["frames": "\(dropped)", "keptMs": "\(kept)"]) }
         queue.async { for _ in 0..<3 { self.scheduleNext(generation) } }
     }
 
@@ -231,6 +267,7 @@ final class CallAudio {
             guard engine.isRunning else { throw RadioError.setup("Audio engine did not restart") }
             capturing = wantCapture
             startPlayback(player)
+            publish()
             AppLog.event("audio_resumed", ["capture": "\(capturing)", "voiceProcessing": "\(voiceProcessing)"])
             logSession("resumed")
             return true
@@ -247,6 +284,7 @@ final class CallAudio {
         player?.stop(); engine?.stop()
         engine = nil; player = nil; capturing = false; voiceProcessing = false
         queue.sync { scheduled = 0 }
+        publish()
     }
 
     private func logSession(_ event: String) {
@@ -274,20 +312,25 @@ final class CallAudio {
             let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init) ?? .began
             AppLog.event("audio_interruption", ["type": type == .began ? "began" : "ended"])
             self.onInterruption?(type == .began)
-            if type == .ended { self.restart("interruption ended") }
+            if type == .ended { self.control.async { self.restart("interruption ended") } }
         })
         observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
             let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
-            AppLog.event("audio_route_change", ["reason": "\(reason)"]); self?.logSession("route_change")
+            AppLog.event("audio_route_change", ["reason": "\(reason)"])
+            self?.control.async { self?.logSession("route_change") }
         })
         observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
-            AppLog.event("audio_media_services_reset"); self?.restart("media services reset")
+            AppLog.event("audio_media_services_reset")
+            self?.control.async { self?.restart("media services reset") }
         })
         #endif
-        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
-            guard let self, let engine = note.object as? AVAudioEngine, engine === self.engine else { return }
-            AppLog.event("audio_engine_configuration_change", ["running": "\(engine.isRunning)", "capture": "\(self.capturing)"])
-            self.restart("engine configuration change")
+        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { [weak self] note in
+            guard let engine = note.object as? AVAudioEngine else { return }
+            self?.control.async {
+                guard let self, engine === self.engine else { return }
+                AppLog.event("audio_engine_configuration_change", ["running": "\(engine.isRunning)", "capture": "\(self.capturing)"])
+                self.restart("engine configuration change")
+            }
         })
     }
 
@@ -301,7 +344,7 @@ final class CallAudio {
             AppLog.event("audio_error", ["stage": "restart_loop", "why": why]); return
         }
         restartPending = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        control.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self, !self.stopped else { return }
             self.restartPending = false
             AppLog.event("audio_restart", ["why": why])
@@ -367,35 +410,44 @@ final class CallAudio {
     /// Log fields: captured/encoded and received/decoded/played counts plus engine state.
     var logFields: [String: String] {
         let (c, played, underruns, late, jitter) = queue.sync { (counters, playout.played, playout.underruns, playout.late, playout.bufferedMilliseconds) }
+        let engine = stateLock.withLock { published }
         return ["audioTapBuffers": "\(c.tapBuffers)", "audioCaptured": "\(c.capturedFrames)", "audioEncoded": "\(c.encodedPackets)",
                 "audioEncodeErrors": "\(c.encodeErrors)", "audioMutedFrames": "\(c.mutedFrames)",
                 "audioReceived": "\(c.receivedPackets)", "audioDecoded": "\(c.decodedPackets)", "audioDecodeErrors": "\(c.decodeErrors)",
                 "audioPlayed": "\(played)", "audioConcealed": "\(c.concealedFrames)", "audioSilent": "\(c.silentFrames)",
                 "audioUnderruns": "\(underruns)", "audioLate": "\(late)", "audioJitterMs": "\(jitter)", "audioFecRecovered": "\(c.fecRecovered)",
-                "audioEngine": engine?.isRunning == true ? "running" : "stopped", "audioCapture": "\(capturing)", "audioVP": "\(voiceProcessing)"]
+                "audioEngine": engine.running ? "running" : "stopped", "audioCapture": "\(engine.capturing)", "audioVP": "\(engine.voiceProcessing)"]
     }
 
     func setRoute(_ route: Route) {
-        self.route = route
-        #if os(iOS)
-        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(route == .speaker ? .speaker : .none)
-        #else
-        player?.volume = route == .speaker ? 1 : 0
-        #endif
-        logSession("route_set")
+        control.async {
+            self.route = route
+            #if os(iOS)
+            try? AVAudioSession.sharedInstance().overrideOutputAudioPort(route == .speaker ? .speaker : .none)
+            #else
+            self.player?.volume = route == .speaker ? 1 : 0
+            #endif
+            self.logSession("route_set")
+        }
     }
 
+    /// Returns at once: nothing is encoded or played after this, and the engine is torn down on the control queue
+    /// before any later instance starts its own.
     func stop() {
-        stopped = true
-        observers.forEach(NotificationCenter.default.removeObserver); observers.removeAll()
-        tearDownEngine()
-        queue.sync {
-            if let encoder { nearby_opus_encoder_destroy(encoder) }
-            if let decoder { nearby_opus_decoder_destroy(decoder) }
-            encoder = nil; decoder = nil; framer.reset(); playout.reset()
+        stateLock.withLock { stopRequested = true }
+        queue.sync { running = false; playGeneration += 1 }
+        control.async {
+            self.stopped = true
+            self.observers.forEach(NotificationCenter.default.removeObserver); self.observers.removeAll()
+            self.tearDownEngine()
+            self.queue.sync {
+                if let encoder = self.encoder { nearby_opus_encoder_destroy(encoder) }
+                if let decoder = self.decoder { nearby_opus_decoder_destroy(decoder) }
+                self.encoder = nil; self.decoder = nil; self.framer.reset(); self.playout.reset()
+            }
+            #if os(iOS)
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            #endif
         }
-        #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        #endif
     }
 }

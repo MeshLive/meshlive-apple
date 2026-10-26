@@ -21,6 +21,9 @@ import NearbyCore
 /// - `-NearbyAutoListen first|<handle>|<12-hex prefix>` and `-NearbyListenSeconds N` (default 60): join an
 ///   audio-only (radio) stream only; logs `auto_listen` with the verified record count at the end.
 /// - `-NearbyTransport gatt|l2cap`: transport to advertise; `-NearbyLabels 1`: experimental names and titles.
+/// - `-NearbyAudioSelfTest N`: two back-to-back N-second runs of the call audio engine (microphone with voice
+///   processing, packets looped back into playout, output volume 0 on a Mac); logs `auto_audio_selftest` with the
+///   setup time and stats, so audio bring-up and teardown can be timed without a second device.
 /// - `-NearbyCallCamera off`: switch this Mac's camera off as soon as a video call is active (receive-only
 ///   video tests that must not show the room); logs `auto_camera`.
 /// Every step is logged as `BENCHMARK auto_*`.
@@ -38,6 +41,7 @@ final class Automation {
     private var relayStarted = false
     private var answeredActiveAt: Date?
     private var cameraOffCall: ObjectIdentifier?
+    private var selfTestAudio: CallAudio?
 
     static func parse(_ arguments: [String]) -> [String: String] {
         var out: [String: String] = [:]
@@ -59,6 +63,30 @@ final class Automation {
         #endif
     }
 
+    /// One loopback run of `CallAudio`; the second run starts right after the first one's stop (teardown ordering).
+    private func audioSelfTest(run: Int, seconds: Double) {
+        let audio = CallAudio(bitrate: 24_000, route: .earpiece)
+        let began = ProcessInfo.processInfo.systemUptime
+        var first = true
+        audio.onPacket = { [weak audio] pts, packet in
+            if first { first = false; AppLog.event("auto_audio_selftest", ["run": "\(run)", "event": "first_packet", "ms": AppLog.ms(since: began)]) }
+            audio?.receive(presentationTimeUs: pts, opus: packet)
+        }
+        audio.onFailure = { message in AppLog.event("auto_audio_selftest", ["run": "\(run)", "event": "failure", "message": message]) }
+        selfTestAudio = audio
+        audio.start(capture: true)
+        AppLog.event("auto_audio_selftest", ["run": "\(run)", "event": "start_returned", "ms": AppLog.ms(since: began)])
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            var fields = audio.logFields; fields["run"] = "\(run)"; fields["event"] = "stats"
+            AppLog.event("auto_audio_selftest", fields)
+            let stopping = ProcessInfo.processInfo.systemUptime
+            audio.stop()
+            AppLog.event("auto_audio_selftest", ["run": "\(run)", "event": "stop_returned", "ms": AppLog.ms(since: stopping)])
+            self?.selfTestAudio = nil
+            if run < 2 { self?.audioSelfTest(run: run + 1, seconds: seconds) }
+        }
+    }
+
     func start() {
         AppLog.event("auto_start", args)
         if let t = args["Transport"], let transport = MeshTransport(rawValue: t) { model?.transport = transport }
@@ -68,6 +96,7 @@ final class Automation {
         if let ladder = args["ResolutionLadder"] { AppSettings.resolutionLadder = ladder == "1" }
         if args["RequestPermissions"] == "1" { MediaPermissions.request(video: true, context: "launch") { _, _ in } }
         if args["Relay"] == "1" { model?.relayForOthers = true }
+        if let seconds = args["AudioSelfTest"].flatMap(Double.init), seconds > 0 { audioSelfTest(run: 1, seconds: seconds) }
         if let title = args["AutoRadio"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
                 guard let self, let model = self.model else { return }

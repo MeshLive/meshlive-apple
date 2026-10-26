@@ -29,6 +29,8 @@ public struct AudioPlayout {
     public private(set) var late = 0
     public private(set) var overflows = 0
     public private(set) var played = 0
+    /// Frames dropped by `dropBacklog` (audio that arrived while the output was not running).
+    public private(set) var backlogDropped = 0
     public var bufferedFrames: Int { slots.count }
     public var bufferedMilliseconds: Int { Int(Int64(slots.count) * frameUs / 1000) }
 
@@ -95,6 +97,20 @@ public struct AudioPlayout {
         next += 1; concealRun += 1; concealed += 1
         if concealRun > 10, let first = slots.keys.min() { next = first; concealRun = 0 }
         return .conceal
+    }
+
+    /// While playback has not started (or drained), keeps only the newest `frames` slots. Audio that arrived before
+    /// the output ran (the engine is still starting) would otherwise play late and stay as latency for the whole
+    /// call, because playout never catches up. Returns the number of frames dropped.
+    @discardableResult
+    public mutating func dropBacklog(keeping frames: Int) -> Int {
+        guard !playing, slots.count > max(frames, 0) else { return 0 }
+        let kept = slots.keys.sorted().suffix(max(frames, 0))
+        let dropped = slots.count - kept.count
+        slots = slots.filter { kept.contains($0.key) }
+        if let first = kept.first { next = max(next, first) }
+        backlogDropped += dropped
+        return dropped
     }
 
     public mutating func reset() {

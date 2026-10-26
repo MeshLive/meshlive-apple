@@ -42,6 +42,31 @@ final class AudioPlayoutTests: XCTestCase {
         XCTAssertLessThanOrEqual(p.bufferedFrames, 10); XCTAssertGreaterThan(p.overflows, 0)
     }
 
+    /// Audio that arrived before the output started is not played a second late for the rest of the call: only the
+    /// newest frames are kept, and playback continues in order from them.
+    func testBacklogBeforePlaybackStartsKeepsOnlyTheNewestFrames() {
+        var p = AudioPlayout(targetFrames: 4)
+        for i in 0..<50 { p.push(presentationTimeUs: Int64(i) * 20_000, payload: Data([UInt8(i)])) }
+        XCTAssertEqual(p.dropBacklog(keeping: p.targetFrames), 46)
+        XCTAssertEqual(p.bufferedMilliseconds, 80)
+        XCTAssertEqual(p.pop(), .packet(Data([46])))
+        p.push(presentationTimeUs: 50 * 20_000, payload: Data([50]))
+        XCTAssertEqual((0..<4).map { _ in p.pop() }, [47, 48, 49, 50].map { AudioPlayout.Output.packet(Data([UInt8($0)])) })
+        XCTAssertEqual(p.backlogDropped, 46)
+        XCTAssertEqual(p.concealed, 0)
+    }
+
+    func testBacklogIsNeverDroppedWhilePlaying() {
+        var p = AudioPlayout(targetFrames: 2)
+        for i in 0..<10 { p.push(presentationTimeUs: Int64(i) * 20_000, payload: Data([UInt8(i)])) }
+        _ = p.pop()
+        XCTAssertEqual(p.dropBacklog(keeping: 2), 0, "a running output drains by itself")
+        XCTAssertEqual(p.bufferedFrames, 9)
+        var short = AudioPlayout(targetFrames: 4)
+        for i in 0..<3 { short.push(presentationTimeUs: Int64(i) * 20_000, payload: Data([UInt8(i)])) }
+        XCTAssertEqual(short.dropBacklog(keeping: 4), 0)
+    }
+
     /// Experimental FEC: one missing frame is rebuilt from the next packet (not concealed); longer gaps still
     /// conceal until the frame just before an arrived packet.
     func testFecRecoversTheFrameJustBeforeAnArrivedPacket() {

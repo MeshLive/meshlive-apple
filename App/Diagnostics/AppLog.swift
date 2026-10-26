@@ -42,7 +42,8 @@ enum AppLog {
         event("app_start", ["version": "\(info["CFBundleShortVersionString"] ?? "?")", "build": "\(info["CFBundleVersion"] ?? "?")",
                             "device": "Mac", "macos": ProcessInfo.processInfo.operatingSystemVersionString,
                             "args": ProcessInfo.processInfo.arguments.dropFirst().joined(separator: " "),
-                            "bluetooth": MediaPermissions.bluetooth, "microphone": MediaPermissions.microphone, "camera": MediaPermissions.camera])
+                            "bluetooth": MediaPermissions.bluetooth, "microphone": MediaPermissions.microphone, "camera": MediaPermissions.camera,
+                            "processAgeMs": "\(processAgeMs)"])
         #else
         event("app_start", ["version": "\(info["CFBundleShortVersionString"] ?? "?")", "build": "\(info["CFBundleVersion"] ?? "?")",
                             "device": UIDevice.current.model, "ios": UIDevice.current.systemVersion,
@@ -50,6 +51,23 @@ enum AppLog {
                             "bluetooth": MediaPermissions.bluetooth, "microphone": MediaPermissions.microphone, "camera": MediaPermissions.camera])
         #endif
     }
+
+    /// Whole milliseconds between two uptimes (default: now), for timing fields.
+    static func ms(since start: TimeInterval, until end: TimeInterval = ProcessInfo.processInfo.systemUptime) -> String {
+        "\(Int(((end - start) * 1000).rounded()))"
+    }
+
+    #if os(macOS)
+    /// How long this process had run (since exec) when this was read; -1 if unknown. At `app_start` it separates
+    /// a slow launch (dyld, AppKit, SwiftUI scene setup) from slow work in the app's own startup.
+    static var processAgeMs: Int {
+        var info = kinfo_proc(), size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return -1 }
+        let started = info.kp_proc.p_starttime
+        return Int((Date().timeIntervalSince1970 - (Double(started.tv_sec) + Double(started.tv_usec) / 1_000_000)) * 1000)
+    }
+    #endif
 
     /// `BENCHMARK <name>: k=v | k=v` (values sanitized to one line).
     static func event(_ name: String, _ fields: KeyValuePairs<String, String> = [:]) {

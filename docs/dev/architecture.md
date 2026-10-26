@@ -103,5 +103,10 @@ Cmd-Shift-V picks Video call.
 ## Diagnostics and remote testing (DEBUG)
 
 - `AppLog` writes Android-style `BENCHMARK <event>: k=v | ...` lines to the app's Documents/logs: permissions, audio session and route, discovery, connect stages, call phases, authentication and codec, call_stats every 5 s (captured/encoded/sent and received/decoded/played counts), rate changes, and the end reason. They contain no keys, text or media.
+- Startup and the main thread: `app_start` has `processAgeMs` (time from exec to the first line on the Mac),
+  `startup` the time of each startup step, and a watchdog logs `main_stall` whenever the main thread was blocked for
+  more than 0.75 s. Call audio starts, restarts and stops on its own serial queue (`CallAudio`), because enabling voice
+  processing alone takes about a second on a Mac and used to freeze the window each time a call became active.
+  `-NearbyAudioSelfTest N` times two back-to-back audio engine runs in loopback at zero volume, without a second device.
 - Launch arguments (`App/Diagnostics/Automation.swift`) run a call without touching the phone: `-NearbyAutoCall <handle>`, `-NearbyCallType voice|video`, `-NearbyCallSeconds N`, `-NearbyAutoAccept voice|video` and others.
 - `Scripts/gui-run.sh install` builds, signs, installs and launches through the logged-in GUI session (`Scripts/device-gui.command`), because SSH sessions cannot use the login keychain. `Scripts/run-scenario.sh call|answer` runs a scenario over SSH, and `Scripts/pull-logs.sh` copies the logs. `Scripts/screenshots.sh` takes simulator screenshots. `Scripts/gui-run.sh uitest call|people` runs the XCUITest scenarios (`UITests/`), with a screenshot at each step.
