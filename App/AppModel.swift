@@ -708,6 +708,11 @@ final class AppModel: ObservableObject {
         if controller.activeSince != nil { CallNotifier.shared.requestIfAppropriate(.callEnded) }
         guard call === controller else { return }
         remember(controller)
+        if MissedCallAlert.isMissed(incoming: controller.role == .callee, rang: controller.rang,
+                                    wasActive: controller.activeSince != nil, declinedHere: controller.declinedHere) {
+            CallNotifier.shared.postMissed(peerName: controller.label?.title, stranger: controller.label == nil,
+                                           prefixHex: controller.peerPrefixHex, video: controller.offeredType == .video)
+        }
         if controller.failedEarly, let ended = controller.ended { callNotice = ended }
         call = nil
         refreshAdvertising()
@@ -931,6 +936,11 @@ final class AppModel: ObservableObject {
         case "call-incoming", "call-incoming-voice":
             controller.phase = .incomingRinging; controller.offeredType = variant == "call-incoming" ? .video : .voice
             controller.phaseText = "Incoming call"
+            if let seconds = RootView.debugArgument("-NearbyFixtureMissAfter").flatMap(Double.init) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak controller] in
+                    if controller?.phase == .incomingRinging { controller?.debugCallerGaveUp() }
+                }
+            }
         case "call-active", "call-mismatch":
             controller.phase = .active; controller.activeSince = Date().addingTimeInterval(-83)
             controller.fingerprint = SoftwareSigningIdentity().fingerprint

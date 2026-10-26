@@ -27,7 +27,11 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
         let decline = UNNotificationAction(identifier: CallAlertPolicy.declineAction, title: "Decline", options: [])
         let category = UNNotificationCategory(identifier: CallAlertPolicy.categoryIdentifier, actions: [accept, decline], intentIdentifiers: [],
                                               hiddenPreviewsBodyPlaceholder: CallAlertPolicy.lockedPlaceholder, options: [])
-        center.setNotificationCategories([category])
+        // Missed calls (MissedCallAlert): Call back dials the caller again when they are still nearby.
+        let callBack = UNNotificationAction(identifier: MissedCallAlert.callBackAction, title: "Call back", options: [.foreground])
+        let missed = UNNotificationCategory(identifier: MissedCallAlert.categoryIdentifier, actions: [callBack], intentIdentifiers: [],
+                                            hiddenPreviewsBodyPlaceholder: MissedCallAlert.lockedPlaceholder, options: [])
+        center.setNotificationCategories([category, missed])
         refreshAuthorization()
     }
 
@@ -80,6 +84,30 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
         AppLog.event("call_alerts", ["event": "posted", "voice": "\(call.offeredType == .voice)"])
     }
 
+    /// An incoming call stopped ringing without being answered or declined here: one notification per caller, with
+    /// the number of calls missed while it is still showing. Needs the call-alert permission; never asks for it.
+    func postMissed(peerName: String?, stranger: Bool, prefixHex: String?, video: Bool) {
+        guard !DesktopPreview.enabled else { return }
+        guard authorization == .authorized else {
+            AppLog.event("missed_call", ["posted": "false", "reason": "no_permission"]); return
+        }
+        let identifier = MissedCallAlert.identifier(prefixHex: prefixHex)
+        center.getDeliveredNotifications { delivered in
+            let previous = delivered.first { $0.request.identifier == identifier }?.request.content.userInfo[MissedCallAlert.countKey] as? Int
+            let count = MissedCallAlert.nextCount(stillShowing: previous != nil, previous: previous ?? 0)
+            let content = UNMutableNotificationContent()
+            content.title = MissedCallAlert.title(peerName: peerName, stranger: stranger, count: count)
+            content.categoryIdentifier = MissedCallAlert.categoryIdentifier
+            content.threadIdentifier = "missed-calls"
+            content.sound = .default
+            var info: [String: Any] = [MissedCallAlert.countKey: count, MissedCallAlert.videoKey: video]
+            if let prefixHex, !stranger { info[MissedCallAlert.prefixKey] = prefixHex }
+            content.userInfo = info
+            self.center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+            AppLog.event("missed_call", ["posted": "true", "count": "\(count)", "named": "\(!stranger && peerName != nil)"])
+        }
+    }
+
     func clear() {
         guard posted else { return }
         posted = false
@@ -93,7 +121,10 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         // Frontmost, the call screen and ringer already show the call. Inactive (Control Center, Notification Center, a
         // system alert over the app, or on the way to the background) the alert must show, or it would be swallowed.
+        let missed = notification.request.content.categoryIdentifier == MissedCallAlert.categoryIdentifier
         DispatchQueue.main.async {
+            // A missed call stays in the list even while MeshLive is frontmost (the call screen already said so).
+            if missed { completionHandler(AppPlatform.active ? [.list] : [.banner, .list, .sound]); return }
             completionHandler(AppPlatform.active ? [] : [.banner, .list, .sound])
         }
     }
@@ -101,6 +132,19 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let action = response.actionIdentifier
+        let content = response.notification.request.content
+        if content.categoryIdentifier == MissedCallAlert.categoryIdentifier {
+            let prefix = content.userInfo[MissedCallAlert.prefixKey] as? String
+            let video = content.userInfo[MissedCallAlert.videoKey] as? Bool ?? false
+            DispatchQueue.main.async {
+                AppLog.event("missed_call", ["event": "action", "action": action])
+                if action == MissedCallAlert.callBackAction, let prefix, let model = self.model, model.call == nil {
+                    model.callBack(CallRecord(prefixHex: prefix, direction: .missed, video: video, at: Date(), seconds: 0))
+                }
+                completionHandler()
+            }
+            return
+        }
         DispatchQueue.main.async {
             self.posted = false
             AppLog.event("call_alerts", ["event": "action", "action": action])

@@ -79,7 +79,9 @@ final class CallController: ObservableObject, Identifiable {
     weak var model: AppModel?
     let role: PrivateCallRole
     let transport: MeshTransport
-    @Published var phase: PrivateCallPhase?
+    @Published var phase: PrivateCallPhase? { didSet { if phase == .incomingRinging { rang = true } } }
+    /// This incoming call rang here (a link that failed before ringing is not a missed call).
+    private(set) var rang = false
     @Published var phaseText = ""
     @Published var peerName: String
     @Published var peerPrefixHex: String?
@@ -255,9 +257,12 @@ final class CallController: ObservableObject, Identifiable {
             #if os(macOS)
             model?.desktopCallLinkFinished(self)
             #endif
-            if error && activeSince == nil { failedEarly = true }
+            let missed = MissedCallAlert.isMissed(incoming: role == .callee, rang: rang, wasActive: activeSince != nil, declinedHere: declinedHere)
+            if error && activeSince == nil && !missed { failedEarly = true }
             let plain = CallController.plainReason(reason)
-            let shown = error && activeSince == nil ? "Couldn't reach \(label?.title ?? peerName) \u{2013} \(plain.lowercased())" : plain
+            // A callee whose caller gave up sees "Missed call" (Android CallRingTimeout), not a connection failure.
+            let shown = missed ? "Missed call"
+                : error && activeSince == nil ? "Couldn't reach \(label?.title ?? peerName) \u{2013} \(plain.lowercased())" : plain
             ended = shown; phaseText = shown; cleanupMedia(); scheduleDismiss(after: error ? 6 : 2)
         }
     }
@@ -360,7 +365,10 @@ final class CallController: ObservableObject, Identifiable {
             do { self.callType = type; try self.engine.accept(as: type); self.pump() } catch { self.stats = "\(error)" }
         }
     }
+    /// The user declined this call here (a declined call is not a missed call).
+    private(set) var declinedHere = false
     func decline() {
+        declinedHere = true
         do { try engine.decline(.rejected); pump() } catch {
             // Nothing to decline on the wire (the link is not set up, or a DEBUG fixture): close the screen.
             CallNotifier.shared.clear()
@@ -368,6 +376,10 @@ final class CallController: ObservableObject, Identifiable {
         }
     }
     func end() { engine.end(); pump() }
+    #if DEBUG
+    /// Fixture only (`-NearbyFixtureMissAfter N`): the unconnected ringing call ends as if the caller gave up.
+    func debugCallerGaveUp() { finished("Caller cancelled") }
+    #endif
 
     func toggleMute() { setMuted(!muted) }
     /// `muted` stays true while talking by holding Mute, so the button and state line still read "muted".
@@ -530,7 +542,11 @@ final class CallController: ObservableObject, Identifiable {
         #endif
         var delay: TimeInterval = 2
         if ended == nil {
-            if activeSince == nil {
+            if MissedCallAlert.isMissed(incoming: role == .callee, rang: rang, wasActive: activeSince != nil, declinedHere: declinedHere) {
+                // The caller gave up or the ring timed out: as Android, the callee sees "Missed call", not a failure.
+                AppLog.event("call_end", ["reason": reason, "error": "false", "stage": "missed"])
+                ended = "Missed call"
+            } else if activeSince == nil {
                 // The link closed before the call was ever active: say who could not be reached and why.
                 failedEarly = true; delay = 6
                 AppLog.event("call_end", ["reason": reason, "error": "true", "stage": "link_closed_before_active", "phase": "\(String(describing: phase))"])

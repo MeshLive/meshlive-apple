@@ -71,4 +71,24 @@ final class CallAlertUITests: XCTestCase {
         expectation(for: gone, evaluatedWith: ringing)
         waitForExpectations(timeout: 10)
     }
+
+    /// A call that stops ringing unanswered leaves a missed-call notification with Call back (Android parity).
+    func testUnansweredCallLeavesAMissedCallNotificationWithCallBack() throws {
+        guard env["NEARBY_ALERT_ANSWER"] == "allow" else { throw XCTSkip("needs NEARBY_ALERT_ANSWER=allow") }
+        var app = openSettings()
+        if app.buttons["allowCallAlerts"].waitForExistence(timeout: 8) { app.buttons["allowCallAlerts"].tap(); answerPrompt(allow: true) }
+        app.terminate()
+        app = XCUIApplication()
+        app.launchArguments = ["-NearbyScreen", "call-incoming", "-NearbyFixtureMissAfter", "6"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Decline"].waitForExistence(timeout: 10), "the fixture call rings")
+        XCUIDevice.shared.press(.home)
+        let missed = springboard.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", "Missed call")).firstMatch
+        XCTAssertTrue(missed.waitForExistence(timeout: 25), "the missed call is announced after the ringing stops")
+        XCTAssertTrue(missed.label.contains("Asha"), "a known caller is named")
+        shot("missed-call")
+        missed.press(forDuration: 1.2)
+        XCTAssertTrue(springboard.buttons["Call back"].waitForExistence(timeout: 8), "the notification offers Call back")
+        shot("missed-call-actions")
+    }
 }
