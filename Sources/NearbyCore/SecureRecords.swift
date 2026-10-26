@@ -8,6 +8,8 @@ public enum SecureRecordType: UInt8 {
     case groupControl = 8, routeControl = 9, routeControlAck = 10
     /// Experimental store-and-forward; rejected unless a reader explicitly opts in.
     case storeForward = 11
+    /// EXPERIMENTAL relayed calls (Design C): `BRS1` SETUP/READY/FAIL, rejected unless the reader opted in.
+    case relaySetup = 12
     /// EXPERIMENTAL rotating discovery IDs: the BDO1 link opening, only as the first hop record each way when
     /// both link hellos carry bit 3; anywhere else it is rejected like an unknown type.
     case discoveryOpening = 13
@@ -54,6 +56,8 @@ public final class SecureRecordOpener {
     /// Hop type 13 (BDO1) parses only for a reader whose own link hello carries bit 3; its position is
     /// enforced by MeshConnection (first record each way when both hellos carry the bit).
     public var acceptDiscoveryOpening = false
+    /// Hop type 12 parses only while the owner expects a relay setup message (a helper's first record, a caller's reply).
+    public var acceptRelaySetup = false
     /// A role-specific ciphertext cap, checked from the header before waiting for or decrypting the body.
     public var maxCiphertextBytes = SecureRecordProtocol.maxPlaintextBytes + MeshAead.tagBytes
     public var bufferedBytes: Int { buffer.count }
@@ -68,7 +72,7 @@ public final class SecureRecordOpener {
             guard try r.bytes(4) == SecureRecordProtocol.magic else { throw ProtocolError.malformed("Invalid secure record magic") }
             let typeValue = try r.byte()
             guard let type = SecureRecordType(rawValue: typeValue), type != .storeForward || acceptStoreForward,
-                  type != .discoveryOpening || acceptDiscoveryOpening else {
+                  type != .discoveryOpening || acceptDiscoveryOpening, type != .relaySetup || acceptRelaySetup else {
                 throw ProtocolError.malformed("Unknown secure record type \(typeValue)")
             }
             let sequence = try r.u64()
