@@ -22,7 +22,7 @@ final class CallAudio {
         var tapBuffers = 0, capturedFrames = 0, encodedPackets = 0, encodeErrors = 0, mutedFrames = 0
         var receivedPackets = 0, decodedPackets = 0, decodeErrors = 0, concealedFrames = 0, silentFrames = 0, scheduledBuffers = 0, fecRecovered = 0
     }
-    private let queue = DispatchQueue(label: "org.nearbyintercom.audio", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "io.github.meshlive.app.audio", qos: .userInteractive)
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var resampler: PCMResampler?

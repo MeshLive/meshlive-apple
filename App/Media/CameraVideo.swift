@@ -17,7 +17,7 @@ import NearbyMedia
 /// Frames are rotated by the capture connection, so the BTV3 header rotation is 0 and the size is portrait.
 final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let session = AVCaptureSession()
-    private let queue = DispatchQueue(label: "org.nearbyintercom.camera", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "io.github.meshlive.app.camera", qos: .userInitiated)
     private var encoder: VP9Encoder?
     private var forceKeyFrame = true
     private var lastFrameUptime: TimeInterval = 0

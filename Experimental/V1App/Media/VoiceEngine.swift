@@ -28,7 +28,7 @@ private final class AudioRing {
 /// Hardware setup occurs on main; conversion, encoding and jitter scheduling use a serial media queue.
 /// The input tap only copies channel 0 into a preallocated SPSC C ring.
 final class VoiceEngine {
-    private let queue = DispatchQueue(label: "org.nearbyintercom.voice", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "io.github.meshlive.app.voice", qos: .userInitiated)
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var worker: AudioWorker?

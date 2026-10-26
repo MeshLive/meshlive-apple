@@ -7,11 +7,11 @@ import AppKit
 #endif
 
 /// Structured diagnostics log in the app container (Documents/logs/), Android-style `BENCHMARK <event>: k=v | k=v`
-/// lines, also mirrored to the unified log (subsystem org.nearbyintercom, category app). Pull with
+/// lines, also mirrored to the unified log (subsystem io.github.meshlive.app, category app). Pull with
 /// `Scripts/pull-logs.sh`. Contains no keys, message text or media; peers appear by 12-hex prefix and handle.
 enum AppLog {
-    private static let queue = DispatchQueue(label: "org.nearbyintercom.log", qos: .utility)
-    private static let logger = Logger(subsystem: "org.nearbyintercom", category: "app")
+    private static let queue = DispatchQueue(label: "io.github.meshlive.app.log", qos: .utility)
+    private static let logger = Logger(subsystem: "io.github.meshlive.app", category: "app")
     private static var handle: FileHandle?
     private static let formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f

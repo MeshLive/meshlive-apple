@@ -365,6 +365,7 @@ final class AppModel: ObservableObject {
     init() {
         AppLog.start()
         if EmergencyWipe.pending && !DesktopPreview.enabled { EmergencyWipe.run() }
+        KeychainItem.migrateLegacyServices()
         do { identity = try IdentityStore.loadOrCreate() } catch {
             // Without Keychain access (for example an unsigned build) run with a session-only identity and say so.
             identity = SoftwareSigningIdentity()

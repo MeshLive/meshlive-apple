@@ -13,7 +13,9 @@ final class SecureEnclaveSigningIdentity: SigningIdentity {
 }
 
 enum KeychainItem {
-    static let service = "org.nearbyintercom.mesh.v2"
+    /// Current service; items of the old `org.nearbyintercom.mesh.v2` move here once (`migrateLegacyServices`).
+    static let service = KeychainServices.current
+    private static let store = SecKeychainServiceStore()
     #if os(macOS) && DEBUG
     /// DEBUG-only `-NearbyEphemeralIdentity 1`: keep this run's identity and presence state in memory, so an
     /// unattended interop run of a freshly built (differently ad-hoc signed) app never waits on a login-keychain
@@ -26,12 +28,11 @@ enum KeychainItem {
         #if os(macOS) && DEBUG
         if ephemeral { return memory[account] }
         #endif
-        var query = base(account); query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
-        return item as? Data
+        // The current service, or the old one while its migration is unfinished; an error is never absence.
+        let found = KeychainServices.read(account, store: store)
+        if found.status == errSecItemNotFound { return nil }
+        guard found.status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(found.status)) }
+        return found.item?.data
     }
     static func write(_ account: String, _ data: Data, accessible: CFString = kSecAttrAccessibleWhenUnlockedThisDeviceOnly) throws {
         if DesktopPreview.enabled { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)) }
@@ -56,12 +57,25 @@ enum KeychainItem {
         #if os(macOS) && DEBUG
         if ephemeral { memory[account] = nil; return }
         #endif
-        let status = SecItemDelete(base(account) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+        // Under both names, so an unfinished migration cannot bring the deleted secret back.
+        let status = KeychainServices.delete(account, store: store)
+        guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
     }
-    /// Every service this app ever used: the current one (identity, contacts key, presence vault, guard secret), the
-    /// phase 1 rotating-ID presence key (now replaced by the presence vault), and the earlier v1 identity.
-    static let allServices = [service, "org.nearbyintercom.rotating", "org.nearbyintercom.identity.v1"]
+    /// Moves the items of the old service names to the current ones (once; a failure keeps the old item readable
+    /// and retries at the next launch). Never in the preview or an ephemeral DEBUG run.
+    static func migrateLegacyServices() {
+        if DesktopPreview.enabled { return }
+        #if os(macOS) && DEBUG
+        if ephemeral { return }
+        #endif
+        let result = KeychainServiceMigration.run(from: KeychainServices.legacyCurrent, to: service, store: store)
+        if result.moved > 0 || !result.complete {
+            AppLog.event("keychain_migration", ["moved": "\(result.moved)", "pending": "\(result.pending)",
+                                                "listFailed": "\(result.listFailed)", "complete": "\(result.complete)"])
+        }
+    }
+    /// Every service this app ever used, old and new names (`KeychainServices.all`).
+    static let allServices = KeychainServices.all
     /// Deletes every item of every service; one status per service.
     @discardableResult
     static func deleteAll() -> [OSStatus] {
@@ -70,19 +84,14 @@ enum KeychainItem {
         // An ephemeral DEBUG run only ever held this run's in-memory items; the login Keychain is left untouched.
         if ephemeral { memory.removeAll(); return allServices.map { _ in errSecSuccess } }
         #endif
-        return allServices.map { SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: $0] as CFDictionary) }
+        return KeychainServices.deleteAll(store: store)
     }
     /// One query per service: `errSecItemNotFound` only when no item of it remains; an error is not absence.
     static func verifyAllDeleted() -> [OSStatus] {
         #if os(macOS) && DEBUG
         if ephemeral { return allServices.map { _ in memory.isEmpty ? errSecItemNotFound : errSecSuccess } }
         #endif
-        return allServices.map { name in
-            let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: name,
-                                        kSecMatchLimit as String: kSecMatchLimitOne, kSecReturnAttributes as String: true]
-            var item: CFTypeRef?
-            return SecItemCopyMatching(query as CFDictionary, &item)
-        }
+        return KeychainServices.verifyAllDeleted(store: store)
     }
     private static func base(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]

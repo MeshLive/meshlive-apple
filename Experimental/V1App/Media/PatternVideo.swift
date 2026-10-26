@@ -17,7 +17,7 @@ struct VideoMetrics: Codable {
 
 /// Controlled generated live target. No camera access, file recording, or private scene capture.
 final class PatternVideo {
-    private let queue = DispatchQueue(label: "org.nearbyintercom.video", qos: .utility)
+    private let queue = DispatchQueue(label: "io.github.meshlive.app.video", qos: .utility)
     private var compression: VTCompressionSession?
     private var decompression: VTDecompressionSession?
     private var format: CMVideoFormatDescription?

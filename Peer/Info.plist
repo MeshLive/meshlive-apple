@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key><string>org.nearbyintercom.meshpeer</string>
+    <key>CFBundleIdentifier</key><string>io.github.meshlive.app.meshpeer</string>
     <key>CFBundleName</key><string>MeshPeer</string>
     <key>CFBundleShortVersionString</key><string>0.1</string>
     <key>NSBluetoothAlwaysUsageDescription</key>

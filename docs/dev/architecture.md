@@ -34,10 +34,16 @@ Some internal names keep the project's earlier working name, Nearby Intercom, on
 - the Swift modules `NearbyCore`, `NearbyMedia`, `CNearbyVPX` and `NearbyV1Experimental`, and the `-Nearby...` DEBUG
   launch arguments. They are never shown to users, and renaming them would touch every import for no user benefit;
 - the experimental v1 protocol labels (`NearbyIntercom/v1`, `NearbyIntercom SAS v1`), because they are hashed into
-  every v1 handshake and test vector, and the v1 Java reference package (`org.nearbyintercom`) that checks them;
-- stored identifiers: the Keychain services (`org.nearbyintercom.mesh.v2` and the legacy ones the wipe and the Mac's
-  cleanup remove), the unified-log subsystem and queue labels, and the MeshPeer bundle identifier. Renaming them would
-  orphan the identity and contacts of existing installs, or make the wipe miss old items.
+  every v1 handshake and test vector, and the v1 Java reference package (`org.nearbyintercom`) that checks them.
+
+Stored identifiers use the app's name: the Keychain services `io.github.meshlive.app.mesh.v2` (identity, contacts
+key, presence vault) and `io.github.meshlive.app.identity.v1` (the v1 experiment), the unified-log subsystem
+`io.github.meshlive.app`, the queue labels and the MeshPeer bundle identifier `io.github.meshlive.app.meshpeer`.
+Earlier builds stored their Keychain items under `org.nearbyintercom.*`. At launch each old item moves once: it is
+copied to the new service, read back and compared, and only then deleted. Until that has worked (a locked Keychain,
+an error, a crash between copy and delete) the app keeps reading the old item and tries again at the next launch, so
+the identity is never lost; anything written since goes to the new service and wins. Deleting an item, the emergency
+wipe and its verification cover every old and new service name.
 
 ## Platform limits and missing features
 

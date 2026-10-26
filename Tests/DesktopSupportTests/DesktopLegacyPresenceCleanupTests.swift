@@ -1,11 +1,12 @@
 import XCTest
 import Security
+import NearbyCore
 @testable import DesktopSupport
 
 final class DesktopLegacyPresenceCleanupTests: XCTestCase {
     private final class Store {
-        var values = ["org.nearbyintercom.rotating": "legacy-presence",
-                      "org.nearbyintercom.mesh.v2": "current-identity-and-vault"]
+        var values = [KeychainServices.legacyPresence: "legacy-presence",
+                      KeychainServices.current: "current-identity-and-vault"]
 
         func delete(_ query: CFDictionary) -> OSStatus {
             let query = query as NSDictionary
@@ -18,17 +19,17 @@ final class DesktopLegacyPresenceCleanupTests: XCTestCase {
     func testPreviewLeavesLegacyAndCurrentIdentityUntouched() {
         let store = Store()
         DesktopLegacyPresenceCleanup.run(preview: true, deleteItem: store.delete)
-        XCTAssertEqual(store.values["org.nearbyintercom.rotating"], "legacy-presence")
-        XCTAssertEqual(store.values["org.nearbyintercom.mesh.v2"], "current-identity-and-vault")
+        XCTAssertEqual(store.values[KeychainServices.legacyPresence], "legacy-presence")
+        XCTAssertEqual(store.values[KeychainServices.current], "current-identity-and-vault")
     }
 
     func testNormalStartupRetainsTheExistingLegacyMigration() {
         let store = Store()
         DesktopLegacyPresenceCleanup.run(preview: false, deleteItem: store.delete)
-        XCTAssertNil(store.values["org.nearbyintercom.rotating"])
-        XCTAssertEqual(store.values["org.nearbyintercom.mesh.v2"], "current-identity-and-vault")
+        XCTAssertNil(store.values[KeychainServices.legacyPresence])
+        XCTAssertEqual(store.values[KeychainServices.current], "current-identity-and-vault")
         DesktopLegacyPresenceCleanup.run(preview: false, deleteItem: store.delete)
-        XCTAssertEqual(store.values["org.nearbyintercom.mesh.v2"], "current-identity-and-vault")
+        XCTAssertEqual(store.values[KeychainServices.current], "current-identity-and-vault")
     }
 
     func testPreviewNeverInvokesKeychainDeletion() {

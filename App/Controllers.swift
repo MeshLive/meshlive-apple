@@ -13,7 +13,7 @@ enum MediaDefaults {
 
 /// Remote video decode on a serial queue; decode failures ask the sender for a keyframe (rate-limited).
 final class RemoteVideo {
-    private let queue = DispatchQueue(label: "org.nearbyintercom.decode", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "io.github.meshlive.app.decode", qos: .userInitiated)
     private var decoder: VideoFrameDecoder?
     private var codecId: UInt8 = 0
     private var lastKeyRequest: TimeInterval = 0

@@ -59,7 +59,7 @@ final class RotatingDiscoveryRuntime {
         DesktopLegacyPresenceCleanup.run(preview: DesktopPreview.enabled)
         #endif
         #else
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.nearbyintercom.rotating"] as CFDictionary)
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: KeychainServices.legacyPresence] as CFDictionary)
         #endif
     }
 
