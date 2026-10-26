@@ -88,7 +88,7 @@ final class AppModel: ObservableObject {
     /// The app left or regained the front while a call may ring (inactive or background).
     func appActivityChanged() { CallNotifier.shared.update(for: call) }
     @Published var wiped = false
-    /// Experimental generated nearby names (Android names-v2) on iPhone and Mac.
+    /// Generated nearby names (Android names-v2) on iPhone and Mac, on by default as on Android.
     @Published var desktopGeneratedNames = AppSettings.desktopGeneratedNames {
         didSet { AppSettings.desktopGeneratedNames = desktopGeneratedNames; rebuildLists(); refreshAdvertising() }
     }

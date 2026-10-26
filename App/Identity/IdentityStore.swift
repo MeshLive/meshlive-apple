@@ -300,9 +300,10 @@ struct AppSettings {
         set { d.set(newValue, forKey: "experimentalDesktopCallDeliveryFeedback") }
     }
     #endif
-    /// Experimental generated nearby names (Android names-v2), iPhone and Mac (the key keeps its Mac name).
+    /// Generated nearby names (Android names-v2), iPhone and Mac, on by default as on Android (user decision
+    /// 2026-10-27); the switch in Settings › Privacy turns it off (the key keeps its Mac name).
     static var desktopGeneratedNames: Bool {
-        get { d.bool(forKey: "experimentalDesktopGeneratedNames") }
+        get { d.object(forKey: "experimentalDesktopGeneratedNames") as? Bool ?? true }
         set { d.set(newValue, forKey: "experimentalDesktopGeneratedNames") }
     }
     static var displayName: String {

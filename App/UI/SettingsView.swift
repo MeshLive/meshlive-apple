@@ -156,7 +156,7 @@ struct PrivacyView: View {
                                   isOn: $model.peerLabelsEnabled)
                 CardDivider()
                 SettingsToggleRow(icon: "person.crop.circle", title: "Generated nearby names",
-                                  info: AppPlatform.isMac ? "Experimental. Shows the same changing two-word names as Android for rotating nearby IDs. These names help pick a device; they do not verify its identity. Turn on Rotating discovery IDs in Advanced privacy for this Mac to appear by a changing name too." : "Experimental. Shows the same changing two-word names as Android for rotating nearby IDs. These names help pick a phone; they do not verify its identity. Turn on Rotating discovery IDs in Advanced privacy for this iPhone to appear by a changing name too.",
+                                  info: AppPlatform.isMac ? "Shows the same changing two-word names as Android for rotating nearby IDs. These names help pick a device; they do not verify its identity. Turn on Rotating discovery IDs in Advanced privacy for this Mac to appear by a changing name too." : "Shows the same changing two-word names as Android for rotating nearby IDs. These names help pick a phone; they do not verify its identity. Turn on Rotating discovery IDs in Advanced privacy for this iPhone to appear by a changing name too.",
                                   identifier: "desktop-generated-names", isOn: $model.desktopGeneratedNames)
             }
             Card {
@@ -175,7 +175,7 @@ struct AdvancedPrivacyView: View {
         SettingsPage(title: "Advanced privacy") {
             Card {
                 SettingsToggleRow(icon: "arrow.triangle.2.circlepath", title: "Rotating discovery IDs",
-                                  info: AppPlatform.isMac ? "Experimental. Changes your nearby Bluetooth ID every 15 minutes to make this Mac harder to recognise. This doesn't make you anonymous. Contacts you allow can still recognise you, and older app versions may not connect. macOS may show this Mac's name to devices that connect; use a neutral computer name if yours is personal." : "Experimental. Changes your nearby Bluetooth ID every 15 minutes to make your phone harder to recognise. This doesn't make you anonymous. Contacts you allow can still recognise you, and older app versions may not connect. The name in Settings > General > About > Name can still identify this iPhone to phones that connect.",
+                                  info: AppPlatform.isMac ? "Experimental. Changes your nearby Bluetooth ID every 15 minutes to make this Mac harder to recognise. This doesn't make you anonymous. Contacts you allow can still recognise you, and older app versions may not connect. On a Mac this does not hide the Mac's Bluetooth address, which macOS keeps fixed. macOS may show this Mac's name to devices that connect; use a neutral computer name if yours is personal." : "Experimental. Changes your nearby Bluetooth ID every 15 minutes to make your phone harder to recognise. This doesn't make you anonymous. Contacts you allow can still recognise you, and older app versions may not connect. The name in Settings > General > About > Name can still identify this iPhone to phones that connect.",
                                   isOn: $model.rotatingIds)
                 if model.rotatingIds {
                     CardDivider()

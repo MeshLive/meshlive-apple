@@ -48,6 +48,11 @@ To reduce your exposure now: close the app or switch Bluetooth off when you do n
 
 The Mac app advertises and connects like the iPhone, with these differences:
 
+- On a Mac, MeshLive's Bluetooth advertisements and connections come from the Mac's fixed Bluetooth hardware
+  address. macOS gives apps no way to change it, so anyone scanning nearby can recognise this Mac over time, even with
+  Rotating discovery IDs on (those hide which MeshLive identity it is, not that it is the same Mac). Turn off Allow
+  calls or quit MeshLive when you do not want to be recognisable.
+
 - macOS may expose the Mac's **system Bluetooth name** (System Settings > General > About > Name) to devices that connect. Use a neutral computer name.
 - The Mac keeps discovery running while the app is open, including when its window is in the background, so it stays
   visible to nearby phones until you quit it (or close its windows, unless "Keep running with windows closed" is on).
