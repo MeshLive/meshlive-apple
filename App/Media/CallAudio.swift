@@ -30,6 +30,8 @@ final class CallAudio {
     }
     private let queue = DispatchQueue(label: "io.github.meshlive.app.audio", qos: .userInteractive)
     private static let control = DispatchQueue(label: "io.github.meshlive.app.audio.control", qos: .userInitiated)
+    /// Other audio-session work (the ringer) runs here too, in order with call audio and off the main thread.
+    static func onAudioControl(_ work: @escaping () -> Void) { control.async(execute: work) }
     private var control: DispatchQueue { CallAudio.control }
     /// Engine state for `logFields`, readable from any thread (the engine itself belongs to the control queue).
     private let stateLock = NSLock()

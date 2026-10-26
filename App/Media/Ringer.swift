@@ -16,9 +16,13 @@ final class Ringer {
         guard !ringing else { return }
         ringing = true
         #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.ambient, mode: .default, options: [])
-        try? session.setActive(true)
+        // Session changes can block for a few hundred ms (Android saw 288-453 ms on route reads): never on the main
+        // thread, and ordered with call audio on its control queue.
+        CallAudio.onAudioControl {
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.ambient, mode: .default, options: [])
+            try? session.setActive(true)
+        }
         #endif
         if let player = try? AVAudioPlayer(data: Ringer.tone) {
             player.numberOfLoops = -1
@@ -29,7 +33,7 @@ final class Ringer {
         #if os(iOS)
         AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
         vibration = Timer.scheduledTimer(withTimeInterval: Ringer.period, repeats: true) { _ in AudioServicesPlaySystemSound(kSystemSoundID_Vibrate) }
-        AppLog.event("ringer", ["state": "start", "silentSwitchRespected": "true", "category": session.category.rawValue])
+        AppLog.event("ringer", ["state": "start", "silentSwitchRespected": "true", "category": AVAudioSession.Category.ambient.rawValue])
         #else
         AppLog.event("ringer", ["state": "start"])
         #endif
