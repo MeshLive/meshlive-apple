@@ -396,6 +396,8 @@ final class AppModel: ObservableObject {
         defer { steps["initMs"] = AppLog.ms(since: initBegan); AppLog.event("startup", steps) }
         if EmergencyWipe.pending && !DesktopPreview.enabled { EmergencyWipe.run() }
         step("wipeMs")
+        CrashReports.shared.start()
+        step("crashReportsMs")
         KeychainItem.migrateLegacyServices()
         step("keychainMoveMs")
         defer { step("contactsAndHooksMs") }

@@ -68,6 +68,9 @@ struct RootView: View {
         }
     }
     var body: some View {
+        rootContent.crashReportPrompt()
+    }
+    @ViewBuilder private var rootContent: some View {
         #if os(macOS)
         DesktopRootView()
         #else

@@ -445,6 +445,22 @@ final class SimulatorScreensTests: XCTestCase {
     /// First call: the system asks for the microphone; "Don't Allow" must leave the app usable and explain the next
     /// step (the fixture person is not on the radio, so the call itself ends with the "isn't nearby" notice).
     /// Needs reset privacy for the app (run-uitest.sh resets it before the run on a simulator).
+    /// A crash report waits for the user's answer; "Don't ask again" turns reports off for later launches.
+    func testCrashReportIsOfferedAndCanBeTurnedOff() {
+        var app = launch(["-crashReports", "YES", "-NearbyCrashReportFixture", "1"])
+        let title = app.staticTexts["MeshLive closed unexpectedly"]
+        XCTAssertTrue(title.waitForExistence(timeout: 6), "the next launch asks about the crash")
+        XCTAssertTrue(app.descendants(matching: .any)["crash-report-text"].exists, "the exact report is shown before sharing")
+        XCTAssertTrue(app.buttons["Share"].exists)
+        XCTAssertTrue(app.buttons["Not now"].exists)
+        shot("crash-report")
+        app.buttons["Don't ask again"].tap()
+        XCTAssertFalse(title.waitForExistence(timeout: 2))
+        app.terminate()
+        app = launch(["-NearbyCrashReportFixture", "1"])
+        XCTAssertFalse(title.waitForExistence(timeout: 4), "turned off: no report is kept or offered")
+    }
+
     /// A live join that never starts says so and offers Try again (Android StreamJoinRetry).
     func testFailedJoinOffersTryAgain() {
         let app = launch(["-NearbyWatchTimeout", "3"])
