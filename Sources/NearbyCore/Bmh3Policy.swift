@@ -149,6 +149,8 @@ public final class Bmh3CallSettings {
     /// Initiator (Amendment CP): the link override is presented as a declared throwaway (extension PSEUDONYM), so a
     /// pseudonym-mode answerer may answer with its own throwaway; false presents it as an undeclared key.
     public var declareLinkOverride = false
+    /// Responder (Design OR): the `RELAY_SEEK` bits this call listener signs while it would admit a search; nil none.
+    public var relaySeek: UInt8?
     /// Responder (phase 2): `K_tag` checks of this phone's own day keys against the adverts it has on air or just left.
     public var tagChecks: () -> [Bmh3ContactTag] = { [] }
     /// Responder: a matched tag must come from a contact this phone delivered its current lease to (else a lease leaked).

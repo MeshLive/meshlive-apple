@@ -325,8 +325,9 @@ public final class CallEngine: MeshConnection {
         if callRole == .callee {
             guard relaySetupRequest == nil, state == nil, endpoint == nil else { throw ProtocolError.state("Unexpected relay setup record") }
             acceptRelaySetup = false
-            let message = try RelaySetupCodec.decode(record.payload, acceptRdi: relayedOptions?.acceptRdi == true)
-            guard case .setup = message else { throw ProtocolError.state("A listener reads only SETUP") }
+            let message = try RelaySetupCodec.decode(record.payload, acceptRdi: relayedOptions?.acceptRdi == true,
+                                                     acceptSeek: bmh3?.relaySeek.map { $0 & RelaySeek.featureSeekV1 != 0 } == true)
+            switch message { case .setup, .seek: break; default: throw ProtocolError.state("A listener reads only SETUP or SEEK") }
             relaySetupRequest = message
             onEvent?(.relaySetupRequested(message))
             return
@@ -352,7 +353,7 @@ public final class CallEngine: MeshConnection {
             try sendDeferredEndpointHello()
         case .fail(_, let reason):
             failRelay(reason, reason.userText)
-        case .setup:
+        case .setup, .seek:
             failRelay(nil, "The helping phone sent an invalid answer")
         }
     }

@@ -106,4 +106,59 @@ final class RelayedCallsWireTests: XCTestCase {
         XCTAssertEqual(RelaySetupRateLimiter.key(parentPrefixHex: "aa", pseudonymous: true, remoteAddress: nil), RelaySetupRateLimiter.unknownAddressBucket)
         XCTAssertEqual(RelaySetupRateLimiter.key(parentPrefixHex: "aa", pseudonymous: false, remoteAddress: "x"), "aa")
     }
+
+    // MARK: Design OR SEEK (Android RelaySeekTest vectors)
+
+    func testSeekTokenAndMessageMatchAndroidBytes() throws {
+        let nonce = d("0102030405060708"), target = d("974ae410ea91")
+        XCTAssertEqual(RelaySeek.token(nonce: nonce, rdi: target).hex, "f997a00c2596")
+        XCTAssertNotEqual(RelaySeek.token(nonce: d("0102030405060709"), rdi: target), RelaySeek.token(nonce: nonce, rdi: target))
+        let seek = RelaySetupMessage.seek(budget: 2, remainingMs: 20_000, setupId: d("1112131415161718"), nonce: nonce,
+                                          token: RelaySeek.token(nonce: nonce, rdi: target), skip: [d("44e6")])
+        let encoded = try RelaySetupCodec.encode(seek)
+        XCTAssertEqual(encoded.hex, "42525331050200004e2011121314151617180102030405060708f997a00c25960144e6")
+        XCTAssertThrowsError(try RelaySetupCodec.decode(encoded), "message 5 is unknown with the switches off")
+        XCTAssertEqual(try RelaySetupCodec.decode(encoded, acceptSeek: true), seek)
+        for count in 0...3 {
+            let skip = (0..<count).map { Data([0x10, UInt8(0x20 + $0)]) }
+            let bytes = try RelaySetupCodec.encode(.seek(budget: 1, remainingMs: 2_000, setupId: id, nonce: nonce, token: d("aabbccddeeff"), skip: skip))
+            XCTAssertEqual(bytes.count, 33 + 2 * count)
+        }
+        for bad in [encoded.prefix(encoded.count - 1).rebased, encoded + Data([0])] { XCTAssertThrowsError(try RelaySetupCodec.decode(bad, acceptSeek: true)) }
+        XCTAssertThrowsError(try RelaySetupCodec.encode(.seek(budget: 3, remainingMs: 2_000, setupId: id, nonce: nonce, token: d("aabbccddeeff"), skip: [])))
+        XCTAssertThrowsError(try RelaySetupCodec.encode(.seek(budget: 1, remainingMs: 2_000, setupId: id, nonce: Data(count: 8), token: d("aabbccddeeff"), skip: [])))
+        XCTAssertThrowsError(try RelaySetupCodec.encode(.seek(budget: 1, remainingMs: 2_000, setupId: id, nonce: nonce, token: d("aabbccddeeff"),
+                                                              skip: [d("0102"), d("0102")])))
+    }
+
+    func testRelaySeekExtensionIsTypeFiveAndFitsBesideTheLargestBlock() throws {
+        let area = try Bmh3Extensions(relaySeek: RelaySeek.featureSeekV1).encodeArea()
+        XCTAssertEqual(try Bmh3Extensions.parse(area).relaySeek, 1)
+        XCTAssertNil(try Bmh3Extensions.parse(try Bmh3Extensions().encodeArea()).relaySeek)
+        var opening = Data(count: 87); opening[0] = 2
+        let full = Bmh3Extensions(opening: opening, buildTag: BuildTag(encoded: 0x0601), relaySeek: 1)
+        XCTAssertEqual(try Bmh3Extensions.parse(try full.encodeArea()).relaySeek, 1)
+        func areaWith(_ tail: [UInt8]) -> Data {
+            let pad = Bmh3Wire.extensionBytes - 3 - tail.count
+            return Data([0, UInt8(pad >> 8), UInt8(pad & 0xff)]) + Data(count: pad) + Data(tail)
+        }
+        XCTAssertThrowsError(try Bmh3Extensions.parse(areaWith([5, 0, 2, 1, 0])))
+        XCTAssertEqual(try Bmh3Extensions.parse(areaWith([5, 0, 1, 7])).relaySeek, 7, "reserved bits are carried")
+    }
+
+    func testAListenerSignsRelaySeekInItsLinkBlockAndTheCallerReadsIt() throws {
+        let budget = Bmh3SigningBudget(capacity: 10)
+        let listenerSettings = Bmh3CallSettings(speak: false, acceptBmh2: true, replayCache: Bmh3ReplayCache(), budget: budget)
+        listenerSettings.relaySeek = RelaySeek.featureSeekV1
+        let listener = CallRelayLink(role: .responder, transport: .gatt, identity: SoftwareSigningIdentity(), bmh3: listenerSettings, relaySetup: true)
+        let caller = CallRelayLink(role: .initiator, transport: .gatt, identity: SoftwareSigningIdentity(), bmh3: Bmh3CallSettings(speak: true))
+        try listener.start(now: 0); try caller.start(now: 0)
+        for _ in 0..<10 {
+            while let b = caller.nextOutgoing(now: 0) { listener.receive(b, now: 0) }
+            while let b = listener.nextOutgoing(now: 0) { caller.receive(b, now: 0) }
+        }
+        XCTAssertEqual(caller.phase, .open, caller.closeReason ?? "-")
+        XCTAssertEqual(caller.linkPeerRelaySeek, 1)
+        XCTAssertEqual(listener.linkPeerRelaySeek, 0, "an initiator block never carries it")
+    }
 }

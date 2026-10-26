@@ -250,6 +250,8 @@ open class MeshConnection {
     /// BMH3: the link peer presented a throwaway key / this phone did.
     public var linkPeerPseudonymous: Bool { link.peerPseudonymous }
     public var linkUsedBmh3: Bool { link.usedBmh3 }
+    /// Design OR: the `RELAY_SEEK` bits the link peer signed as BMH3 responder.
+    public var linkPeerRelaySeek: UInt8 { link.peerRelaySeek }
 
     /// Begins the connection once the byte stream is open. The initiator queues its link hello.
     public func start(now: TimeInterval) throws {

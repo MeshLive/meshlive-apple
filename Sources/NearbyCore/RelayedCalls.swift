@@ -38,10 +38,13 @@ public enum RelaySetupMessage: Equatable {
     case setup(target: Data, budget: Int, remainingMs: Int, setupId: Data, rotating: Bool)
     case ready(setupId: Data, relays: Int)
     case fail(setupId: Data, reason: RelaySetupFailure)
+    /// Design OR message 5: a search for one target ID blinded as `token` under `nonce`, with up to 3 two-byte RDI
+    /// prefixes to skip. Regenerated per hop like SETUP; nonce, token and skip list travel unchanged.
+    case seek(budget: Int, remainingMs: Int, setupId: Data, nonce: Data, token: Data, skip: [Data])
 
     public var setupId: Data {
         switch self {
-        case .setup(_, _, _, let id, _), .ready(let id, _), .fail(let id, _): return id
+        case .setup(_, _, _, let id, _), .ready(let id, _), .fail(let id, _), .seek(_, _, let id, _, _, _): return id
         }
     }
 }
@@ -51,7 +54,8 @@ public enum RelaySetupCodec {
     public static let setupBytes = 24
     public static let replyBytes = 14
     public static let idBytes = 8
-    public static let setup: UInt8 = 1, ready: UInt8 = 2, fail: UInt8 = 3, setupRdi: UInt8 = 4
+    public static let setup: UInt8 = 1, ready: UInt8 = 2, fail: UInt8 = 3, setupRdi: UInt8 = 4, seek: UInt8 = 5
+    public static let seekBaseBytes = 33
 
     public static func encode(_ message: RelaySetupMessage) throws -> Data {
         var w = BinaryWriter()
@@ -69,12 +73,27 @@ public enum RelaySetupCodec {
         case let .fail(setupId, reason):
             guard setupId.count == idBytes else { throw ProtocolError.malformed("Setup ID") }
             w.byte(fail); w.bytes(setupId); w.byte(reason.rawValue)
+        case let .seek(budget, remainingMs, setupId, nonce, token, skip):
+            try validateSeek(budget: budget, remainingMs: remainingMs, setupId: setupId, nonce: nonce, token: token, skip: skip)
+            w.byte(seek); w.byte(UInt8(budget)); w.u32(UInt32(remainingMs)); w.bytes(setupId); w.bytes(nonce); w.bytes(token)
+            w.byte(UInt8(skip.count)); skip.forEach { w.bytes($0) }
         }
         return w.data
     }
 
-    /// Exactly one valid message. `acceptRdi` only with rotating IDs and relayed calls both on (message 4).
-    public static func decode(_ data: Data, acceptRdi: Bool = false) throws -> RelaySetupMessage {
+    static func validateSeek(budget: Int, remainingMs: Int, setupId: Data, nonce: Data, token: Data, skip: [Data]) throws {
+        guard (1...RelaySeek.maxBudget).contains(budget) else { throw ProtocolError.malformed("Seek budget") }
+        guard (RelayedCalls.minRemainingMs...RelayedCalls.setupDeadlineMs).contains(remainingMs) else { throw ProtocolError.malformed("Seek deadline") }
+        guard setupId.count == idBytes else { throw ProtocolError.malformed("Setup ID") }
+        guard nonce.count == RelaySeek.nonceBytes, nonce.contains(where: { $0 != 0 }) else { throw ProtocolError.malformed("Seek nonce") }
+        guard token.count == RelaySeek.tokenBytes else { throw ProtocolError.malformed("Seek token") }
+        guard skip.count <= RelaySeek.maxSkip, skip.allSatisfy({ $0.count == RelaySeek.skipPrefixBytes }) else { throw ProtocolError.malformed("Seek skip list") }
+        guard Set(skip).count == skip.count else { throw ProtocolError.malformed("Seek skip list duplicates") }
+    }
+
+    /// Exactly one valid message. `acceptRdi` only with rotating IDs and relayed calls both on (message 4); `acceptSeek`
+    /// only on a link where this listener signed `RELAY_SEEK` (message 5).
+    public static func decode(_ data: Data, acceptRdi: Bool = false, acceptSeek: Bool = false) throws -> RelaySetupMessage {
         let bytes = data.rebased
         guard bytes.count >= 5, bytes.prefix(4) == magic else { throw ProtocolError.malformed("Relay setup magic") }
         var r = BinaryReader(bytes.suffix(from: 4).rebased)
@@ -102,6 +121,21 @@ public enum RelaySetupCodec {
             let id = try r.bytes(idBytes)
             guard let reason = RelaySetupFailure(rawValue: try r.byte()) else { throw ProtocolError.malformed("Relay fail reason") }
             return .fail(setupId: id, reason: reason)
+        case seek:
+            guard acceptSeek else { throw ProtocolError.malformed("Relay setup message \(type)") }
+            guard bytes.count >= seekBaseBytes else { throw ProtocolError.malformed("Relay seek length") }
+            let budget = Int(try r.byte())
+            let remaining = Int(try r.u32())
+            let id = try r.bytes(idBytes)
+            let nonce = try r.bytes(RelaySeek.nonceBytes)
+            let token = try r.bytes(RelaySeek.tokenBytes)
+            let count = Int(try r.byte())
+            guard count <= RelaySeek.maxSkip, bytes.count == seekBaseBytes + RelaySeek.skipPrefixBytes * count else {
+                throw ProtocolError.malformed("Relay seek length")
+            }
+            let skip = try (0..<count).map { _ in try r.bytes(RelaySeek.skipPrefixBytes) }
+            try validateSeek(budget: budget, remainingMs: remaining, setupId: id, nonce: nonce, token: token, skip: skip)
+            return .seek(budget: budget, remainingMs: remaining, setupId: id, nonce: nonce, token: token, skip: skip)
         default:
             throw ProtocolError.malformed("Relay setup message \(type)")
         }

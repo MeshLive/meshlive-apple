@@ -30,6 +30,8 @@ public final class SecureLink {
     public private(set) var presentedCapabilities: NodeCapabilities
     /// BMH3 only: the peer's block declared a throwaway key / this phone presented one.
     public private(set) var peerPseudonymous = false
+    /// Design OR: the `RELAY_SEEK` bits the BMH3 responder signed (0 for BMH2 or none).
+    public private(set) var peerRelaySeek: UInt8 = 0
     public private(set) var ownPseudonymous = false
     public private(set) var usedBmh3 = false
     /// BMH3 only: the authenticated peer of the link handshake.
@@ -140,7 +142,8 @@ public final class SecureLink {
             var strangerCaps = capabilities
             strangerCaps.transportMask &= ~NodeCapabilities.transportDiscoveryOpening
             let config = try Bmh3Config(purpose: .link, identity: identity, capabilities: capabilities, entropy: bmh3.entropy,
-                                        stranger: try bmh3.stranger.map { try Bmh3Presentation(identity: $0, capabilities: strangerCaps, pseudonym: true) })
+                                        stranger: try bmh3.stranger.map { try Bmh3Presentation(identity: $0, capabilities: strangerCaps, pseudonym: true) },
+                                        relaySeek: bmh3.relaySeek)
             let budget = bmh3.budget
             let responder = Bmh3Responder(config: config, tagChecks: bmh3.tagChecks(), opening: bmh3.opening(), replayCache: bmh3.replayCache,
                                           beforeReply: { _ in try budget?.spend() },
@@ -178,6 +181,7 @@ public final class SecureLink {
         caps.transportMask &= ~NodeCapabilities.transportBuildTag
         peerCapabilities = caps
         peerPseudonymous = result.peer.pseudonymous
+        peerRelaySeek = result.peer.relaySeek
         ownPseudonymous = result.ownPseudonymous
         if result.ownPseudonymous && role == .responder { presentedCapabilities.transportMask &= ~NodeCapabilities.transportDiscoveryOpening }
         return MeshSessionKeys(peerNodeId: result.peer.nodeId, sendKey: SymmetricKey(data: result.sendKey), receiveKey: SymmetricKey(data: result.receiveKey))

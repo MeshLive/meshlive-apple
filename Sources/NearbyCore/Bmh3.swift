@@ -100,21 +100,27 @@ public struct Bmh3Config {
     public let buildTag: BuildTag?
     /// What this phone presents to a peer that is not a recognised contact (rule P); nil: the real identity to everyone.
     public let stranger: Bmh3Presentation?
+    /// Design OR: the `RELAY_SEEK` bits this listener signs in its responder LINK block; nil signs nothing.
+    public let relaySeek: UInt8?
     public var identity: SigningIdentity { real.identity }
 
     public init(purpose: Bmh3Purpose, identity: SigningIdentity, capabilities: NodeCapabilities,
-                entropy: Bmh3Entropy = SecureBmh3Entropy(), buildTag: BuildTag? = nil, stranger: Bmh3Presentation? = nil) throws {
+                entropy: Bmh3Entropy = SecureBmh3Entropy(), buildTag: BuildTag? = nil, stranger: Bmh3Presentation? = nil,
+                relaySeek: UInt8? = nil) throws {
         self.purpose = purpose
         real = try Bmh3Presentation(identity: identity, capabilities: capabilities, pseudonym: false)
         self.entropy = entropy
         self.buildTag = purpose == .link ? buildTag : nil
         self.stranger = stranger
+        self.relaySeek = purpose == .link ? relaySeek : nil
     }
 }
 
 /// Known extensions of one identity block; the area itself is always 112 bytes.
 public struct Bmh3Extensions: Equatable {
     public static let typePad: UInt8 = 0, typeOpening: UInt8 = 1, typeIntent: UInt8 = 2, typeBuildTag: UInt8 = 3, typePseudonym: UInt8 = 4
+    /// Design OR (draft): the feature bits of a listener that would admit a route search now; responder LINK blocks only.
+    public static let typeRelaySeek: UInt8 = 5
     public static let criticalBit: UInt8 = 0x80
     public static let none = Bmh3Extensions()
 
@@ -126,10 +132,12 @@ public struct Bmh3Extensions: Equatable {
     /// True when a BUILD_TAG extension was on the wire, even one that decodes to no valid tag.
     var buildTagSeen = false
     public var pseudonym = false
+    /// `RELAY_SEEK` feature bits (bit 0 SEEK version 1; reserved bits are carried, not rejected).
+    public var relaySeek: UInt8?
 
-    public init(opening: Data? = nil, intent: UInt8? = nil, buildTag: BuildTag? = nil, pseudonym: Bool = false) {
+    public init(opening: Data? = nil, intent: UInt8? = nil, buildTag: BuildTag? = nil, pseudonym: Bool = false, relaySeek: UInt8? = nil) {
         self.opening = opening?.rebased; self.intent = intent; self.buildTag = buildTag
-        self.buildTagSeen = buildTag != nil; self.pseudonym = pseudonym
+        self.buildTagSeen = buildTag != nil; self.pseudonym = pseudonym; self.relaySeek = relaySeek
     }
 
     static func validOpening(_ value: Data) -> Bool {
@@ -147,6 +155,7 @@ public struct Bmh3Extensions: Equatable {
         if let intent { body.byte(Self.typeIntent); body.u16(1); body.byte(intent) }
         if let buildTag { body.byte(Self.typeBuildTag); body.u16(2); body.u16(buildTag.encoded) }
         if pseudonym { body.byte(Self.typePseudonym); body.u16(0) }
+        if let relaySeek { body.byte(Self.typeRelaySeek); body.u16(1); body.byte(relaySeek) }
         let spare = Bmh3Wire.extensionBytes - body.data.count
         guard spare >= 0, spare == 0 || spare >= 3 else { throw Bmh3Failure("Extensions do not fit the 112-byte area") }
         var area = BinaryWriter(capacity: Bmh3Wire.extensionBytes)
@@ -186,6 +195,9 @@ public struct Bmh3Extensions: Equatable {
             case typePseudonym:
                 guard value.isEmpty else { throw Bmh3Failure("pseudonym marker malformed") }
                 out.pseudonym = true
+            case typeRelaySeek:
+                guard value.count == 1 else { throw Bmh3Failure("relay seek malformed") }
+                out.relaySeek = value[value.startIndex]
             default:
                 if type & criticalBit != 0 { throw Bmh3Failure("unknown critical extension") }
             }
@@ -205,6 +217,8 @@ public struct Bmh3Peer {
     public var buildTag: BuildTag? { extensions.buildTag }
     /// True when the peer's block declared its key a throwaway: never admit, pin or display it as an identity.
     public var pseudonymous: Bool { extensions.pseudonym }
+    /// Design OR: the `RELAY_SEEK` bits the peer signed (0 when none).
+    public var relaySeek: UInt8 { extensions.relaySeek ?? 0 }
     public var fingerprint: IdentityFingerprint { IdentityFingerprint(publicKey: spki) }
     /// The opening entries the peer proved in its block, or nil when it sent none.
     public func openingEntries() throws -> [OpeningEntry]? {
@@ -417,7 +431,8 @@ public class Bmh3Party {
         prefix.u16(UInt16(Bmh3Wire.extensionBytes))
         // A pseudonymous block never carries an opening: the salt of a rotating ID confirms the owner of a node ID.
         let own = Bmh3Extensions(opening: presented.pseudonym ? nil : extensions.opening, intent: extensions.intent,
-                                 buildTag: config.buildTag, pseudonym: presented.pseudonym)
+                                 buildTag: config.buildTag, pseudonym: presented.pseudonym,
+                                 relaySeek: role == "Responder" ? config.relaySeek : nil)
         prefix.bytes(try own.encodeArea())
         let prefixBytes = prefix.data
         let thSig = Bmh3Crypto.th(config.purpose, transcript + carrierPrefix + prefixBytes)
@@ -463,6 +478,7 @@ public class Bmh3Party {
     private func checkPlacement(_ extensions: Bmh3Extensions, responderBlock: Bool, message: Int, blockOrder: Bmh3Order) throws {
         if extensions.buildTagSeen && config.purpose != .link { throw Bmh3Failure("build tag outside the link handshake") }
         if extensions.opening != nil && !responderBlock { throw Bmh3Failure("opening outside a responder block") }
+        if extensions.relaySeek != nil && (!responderBlock || config.purpose != .link) { throw Bmh3Failure("relay seek outside a responder link block") }
         // A throwaway key must not open a rotating ID: the salt would let a prober confirm the owner of a node ID.
         if extensions.opening != nil && extensions.pseudonym { throw Bmh3Failure("opening in a pseudonymous block") }
         if extensions.intent != nil && (responderBlock || message != 3 || blockOrder != .iFirst) {

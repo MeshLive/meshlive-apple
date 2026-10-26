@@ -131,7 +131,7 @@ public final class RelayHelperDuty {
             ready(relays: relays + 1)
         case .fail(_, let reason):
             failUpstream(reason, "Next relay: \(reason.label)")
-        case .setup:
+        case .setup, .seek:
             throw ProtocolError.state("A setup reply was expected")
         }
     }
