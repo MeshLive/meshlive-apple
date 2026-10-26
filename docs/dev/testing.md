@@ -232,6 +232,10 @@ Sensitive delivery, Start at login across a real logout/login with the ad-hoc bu
 approval in Login Items), and whether the activities change call or reachability survival behind other apps,
 during idle sleep or on battery. These need a person at the Mac and a nearby phone.
 
+Verification on 2026-10-26: all 307 package checks pass (including 9 reachability and 5 login-item
+regressions), all 21 native Mac UI tests pass, the native Release build passes strict ad-hoc code-signature
+verification with the existing five entitlements, and the iPhone simulator build succeeds.
+
 ### Hardware results (Release app, Mac with Android phones over GATT)
 
 These are short manual checks on one Mac, not a scored test suite.
