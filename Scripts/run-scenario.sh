@@ -7,7 +7,7 @@
 # Output: .build/device-logs/<stamp>-<scenario>/ (launch output, pulled app logs, summary of BENCHMARK lines).
 set -uo pipefail
 cd "$(dirname "$0")/.."
-device="${DEVICE:?Set DEVICE to the iPhone UDID}"; bundle="${BUNDLE:-org.nearbyintercom.ios}"
+device="${DEVICE:?Set DEVICE to the iPhone UDID}"; bundle="${BUNDLE:-io.github.meshlive.app}"
 scenario="${1:?call, answer or launch}"; shift
 args=(); wait_seconds=10
 case "$scenario" in

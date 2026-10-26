@@ -3,7 +3,7 @@ import CoreBluetooth
 
 #if os(iOS)
 @main
-struct NearbyIntercomApp: App {
+struct MeshLivePhoneApp: App {
     @StateObject private var model = AppModel()
     @AppStorage("onboardingComplete") private var onboardingComplete = false
     @Environment(\.scenePhase) private var scenePhase

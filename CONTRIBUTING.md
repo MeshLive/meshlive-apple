@@ -108,7 +108,7 @@ hashes) in the pull request or issue instead of raw logs.
 - [ ] The problem is described, with evidence that it is real.
 - [ ] The change is narrow, and a focused test covers it.
 - [ ] `bash Scripts/test.sh` and `python3 Scripts/tokens.py --check` pass, `bash Scripts/build.sh iphonesimulator`
-  builds, and Mac changes also build the **MeshLive** scheme and pass `bash Scripts/run-macos-uitest.sh`.
+  builds, and Mac changes also build the Mac **MeshLive** scheme and pass `bash Scripts/run-macos-uitest.sh`.
 - [ ] Streaming-related changes name the phones, OS versions and the same-settings comparison.
 - [ ] New behaviour is default off, labelled Experimental, and listed in [switches.md](docs/dev/switches.md).
 - [ ] Protocol or security changes link to a reviewed design in the Android repository.

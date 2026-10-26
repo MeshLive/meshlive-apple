@@ -16,7 +16,7 @@ PY
 )" || exit 1
 [[ ! -e "$out/result.xcresult" ]] || { echo "Choose a fresh output for this execution" >&2; exit 1; }
 mkdir -p "$out"
-xcodebuild test -project NearbyIntercom.xcodeproj -scheme MeshLive -destination 'platform=macOS' -derivedDataPath "${DERIVED:-.build/dd-mac}" -resultBundlePath "$out/result.xcresult" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 45 -maximum-test-execution-time-allowance 60 >"$out/xcodebuild.log" 2>&1 &
+xcodebuild test -project MeshLive.xcodeproj -scheme MeshLive -destination 'platform=macOS' -derivedDataPath "${DERIVED:-.build/dd-mac}" -resultBundlePath "$out/result.xcresult" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 45 -maximum-test-execution-time-allowance 60 >"$out/xcodebuild.log" 2>&1 &
 pid=$!
 cleanup() { if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid"; wait "$pid"; fi; }
 trap cleanup EXIT

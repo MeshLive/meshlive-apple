@@ -11,7 +11,7 @@ OS versions, and a before/after comparison at the same settings. Builds and simu
 
 - [ ] The change is narrow, and a focused test covers it.
 - [ ] `bash Scripts/test.sh` and `python3 Scripts/tokens.py --check` pass, and `bash Scripts/build.sh iphonesimulator` builds.
-- [ ] Mac changes: the **MeshLive** scheme builds and `bash Scripts/run-macos-uitest.sh` passes.
+- [ ] Mac changes: the Mac **MeshLive** scheme builds and `bash Scripts/run-macos-uitest.sh` passes.
 - [ ] New behaviour is off by default, labelled Experimental and listed in [docs/dev/switches.md](../docs/dev/switches.md).
 - [ ] Protocol or security changes link to a reviewed design in the Android repository.
 - [ ] The documents that own the changed behaviour are updated.

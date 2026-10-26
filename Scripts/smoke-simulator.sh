@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 device="${1:-$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for v in d["devices"].values() for x in v if "iPhone" in x["name"]))')}"
-app="${DERIVED:-.build/xcode}/Build/Products/Debug-iphonesimulator/NearbyIntercom.app"
+app="${DERIVED:-.build/xcode}/Build/Products/Debug-iphonesimulator/MeshLive.app"
 [[ -d "$app" ]] || bash Scripts/build.sh iphonesimulator
 state="$(xcrun simctl list devices -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["state"] for v in d["devices"].values() for x in v if x["udid"]==sys.argv[1]))' "$device")"
 if [[ "$state" != Booted ]]; then xcrun simctl boot "$device"; fi

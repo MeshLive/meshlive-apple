@@ -1,7 +1,7 @@
 import SwiftUI
 import NearbyCore
 
-@main struct NearbyIntercomApp: App {
+@main struct MeshLiveV1App: App {
     @StateObject private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
@@ -104,7 +104,7 @@ struct ContentView: View {
                 if let image = model.videoImage { Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180) }
                 Section { Button("Diagnostics") { diagnostics = true } }
             }
-            .navigationTitle("Nearby Intercom")
+            .navigationTitle("MeshLive v1 (experimental)")
             .sheet(isPresented: $diagnostics) {
                 NavigationStack {
                     ScrollView {

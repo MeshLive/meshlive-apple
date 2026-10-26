@@ -18,7 +18,7 @@ yourself. This page is the developer view; the [user guide](../user-guide.md#ins
 ```sh
 bash Scripts/prepare-opus.sh      # pinned libopus 1.6.1 -> Vendor/Opus.xcframework (ignored)
 bash Scripts/prepare-libvpx.sh    # pinned libvpx 1.15.2, SHA256 26fcd3db... -> Vendor/VPX.xcframework (ignored)
-python3 Scripts/project.py        # regenerate NearbyIntercom.xcodeproj (no signing data)
+python3 Scripts/project.py        # regenerate MeshLive.xcodeproj (no signing data)
 python3 Scripts/tokens.py --check # design tokens are up to date
 bash Scripts/test.sh              # swift test: core, media, desktop and v1-experiment suites
 bash Scripts/build.sh iphoneos    # unsigned device build; iphonesimulator = ad-hoc signed simulator build
@@ -29,8 +29,8 @@ These are the same offline checks the CI workflow runs on every pull request
 ([.github/workflows/ci.yml](../../.github/workflows/ci.yml)). A green run says nothing about Bluetooth, the camera or
 the microphone.
 
-To run on a phone, open `NearbyIntercom.xcodeproj`, choose your team and a unique bundle identifier, and run the
-**NearbyIntercom** scheme, or use `TEAM=<team> BUNDLE=<id> bash Scripts/run-device.sh`. The bundle identifier is
+To run on a phone, open `MeshLive.xcodeproj`, choose your team and a unique bundle identifier, and run the
+**MeshLive-iOS** scheme, or use `TEAM=<team> BUNDLE=<id> bash Scripts/run-device.sh`. The bundle identifier is
 `io.github.meshlive.app`, the same as the Android app; pass `BUNDLE=<id>` only if your Apple team cannot register it.
 The phone must have Bluetooth, Camera and Microphone allowed; for test launches it must be unlocked with the screen
 on. Do not commit your team ID, provisioning data or a personal bundle identifier.
@@ -44,8 +44,8 @@ transport. To prepare only the Mac dependencies:
 bash Scripts/prepare-opus-macos.sh      # pinned Opus for macOS arm64 under .build/opus (iOS artifacts untouched)
 bash Scripts/prepare-libvpx.sh macos-only   # Vendor/VPX-macos.xcframework
 python3 Scripts/project.py
-xcodebuild -project NearbyIntercom.xcodeproj -scheme MeshLive -destination "platform=macOS" build
-xcodebuild -project NearbyIntercom.xcodeproj -scheme MeshLive -configuration Release -destination "platform=macOS" build
+xcodebuild -project MeshLive.xcodeproj -scheme MeshLive -destination "platform=macOS" build
+xcodebuild -project MeshLive.xcodeproj -scheme MeshLive -configuration Release -destination "platform=macOS" build
 bash Scripts/check-macos-media.sh       # offline Opus bridge check with ASan/UBSan
 bash Scripts/run-macos-uitest.sh        # native UI tests in DEBUG preview mode
 ```

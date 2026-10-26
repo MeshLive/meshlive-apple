@@ -12,8 +12,8 @@ real devices and the results are public. Until then you build it yourself on a M
 1. Install Xcode 26 or later and Python 3.
 2. Get the source: `git clone https://github.com/MeshLive/meshlive-ios.git`.
 3. Follow [Building from source](dev/building.md): prepare the pinned codecs, generate the Xcode project, then
-   - **iPhone:** open `NearbyIntercom.xcodeproj`, choose your Apple developer team (a free personal team works) and
-     run the **NearbyIntercom** scheme on your iPhone (iOS 16 or newer);
+   - **iPhone:** open `MeshLive.xcodeproj`, choose your Apple developer team (a free personal team works) and
+     run the **MeshLive-iOS** scheme on your iPhone (iOS 16 or newer);
    - **Mac:** build and run the **MeshLive** scheme (Apple Silicon, macOS 14 or newer; no account needed).
 4. On first launch, allow Bluetooth, and camera and microphone when you want video and calls.
 

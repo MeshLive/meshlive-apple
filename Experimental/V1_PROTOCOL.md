@@ -1,6 +1,10 @@
 > **Experimental, default off.** This is the original standalone v1 (Noise XX) protocol of the first iPhone prototype. It cannot talk to Android. The app now speaks the Android protocol (see ../PROTOCOL.md).
 
-# Nearby Intercom wire protocol v1
+# Experimental v1 wire protocol (`NearbyIntercom/v1`)
+
+`NearbyIntercom` was the project's working name before MeshLive. The v1 Noise prologue, the safety-code label and
+the fixtures still use it, because they are hashed into every handshake and test vector; they are left unchanged on
+purpose.
 
 This documents the current independent iPhone prototype protocol. It is a default-off experiment that only iPhones speak; MeshLive itself uses the Android protocol. Swift and a portable Java **v1 reference** pass cross-language checks, but the actual iPhone/Android custom-protocol agreement and adapters remain pending. Another implementation needs the complete contract below and implementations of BLE roles, Noise and the negotiated codecs. All integer fields are unsigned, **big endian**, unless explicitly identified as PCM or a Noise nonce. Strings are strict UTF-8. UUID strings below are conventional hexadecimal notation, not wire byte strings. Fields have no implicit padding. Extra bytes, unknown versions/types/flag bits, unsupported selections, bad lengths, failed authentication or sequences terminate the session; there is no permissive upgrade/downgrade behavior in v1.
 

@@ -1,1 +1,1 @@
-{"Simulator Target Bundle":"org.nearbyintercom.ios","aps":{"alert":{"title":"Incoming video call","body":"Open the app to see who is calling."},"category":"INCOMING_CALL","sound":"default"}}
+{"Simulator Target Bundle":"io.github.meshlive.app","aps":{"alert":{"title":"Incoming video call","body":"Open the app to see who is calling."},"category":"INCOMING_CALL","sound":"default"}}

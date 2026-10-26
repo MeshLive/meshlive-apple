@@ -9,7 +9,7 @@ read -r action rest < "$request"
 out=$(cat .build/device-gui/outdir)
 rm -f "$request"
 mkdir -p "$out"
-: "${TEAM:?Set TEAM to your Apple team ID}" "${DEVICE:?Set DEVICE to the iPhone UDID}"; export TEAM DEVICE BUNDLE="${BUNDLE:-org.nearbyintercom.ios}"
+: "${TEAM:?Set TEAM to your Apple team ID}" "${DEVICE:?Set DEVICE to the iPhone UDID}"; export TEAM DEVICE BUNDLE="${BUNDLE:-io.github.meshlive.app}"
 echo "MeshLive device action: $action $rest (log: $out)"
 case "$action" in
     install) bash Scripts/run-device.sh "$DEVICE" > "$out/build.log" 2>&1 ;;

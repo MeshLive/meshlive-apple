@@ -40,7 +40,7 @@ targets += [
 if hasVPX { targets.append(.binaryTarget(name: "VPX", path: vpxPath)) }
 
 let package = Package(
-    name: "NearbyIntercom",
+    name: "MeshLive",
     platforms: [.iOS(.v16), .macOS(.v13)],
     products: [
         .library(name: "NearbyCore", targets: ["NearbyCore"]),

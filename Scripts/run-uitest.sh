@@ -12,13 +12,13 @@ out="${OUT:-.build/device-logs/$(date +%Y%m%d-%H%M%S)-uitest}"
 mkdir -p "$out"
 case "$scenario" in
     call) export TEST_RUNNER_NEARBY_TARGET="${1:-first}" TEST_RUNNER_NEARBY_CALL_TYPE="${2:-voice}" TEST_RUNNER_NEARBY_HOLD_SECONDS="${3:-20}"
-          only=NearbyIntercomUITests/ScenarioTests/testCall ;;
-    people) export TEST_RUNNER_NEARBY_SCAN_SECONDS="${1:-8}"; only=NearbyIntercomUITests/ScenarioTests/testPeopleList ;;
-    screens) only=NearbyIntercomUITests/SimulatorScreensTests${1:+/$1}
+          only=MeshLive-iOS-UITests/ScenarioTests/testCall ;;
+    people) export TEST_RUNNER_NEARBY_SCAN_SECONDS="${1:-8}"; only=MeshLive-iOS-UITests/ScenarioTests/testPeopleList ;;
+    screens) only=MeshLive-iOS-UITests/SimulatorScreensTests${1:+/$1}
              mkdir -p "$out/shots"
              export TEST_RUNNER_NEARBY_CONTENT_SIZE="${NEARBY_CONTENT_SIZE:-}" TEST_RUNNER_NEARBY_RTL="${NEARBY_RTL:-}"
              export TEST_RUNNER_NEARBY_SHOT_DIR="$(cd "$out/shots" && pwd)" ;;
-    alerts) only=NearbyIntercomUITests/CallAlertUITests${1:+/$1}
+    alerts) only=MeshLive-iOS-UITests/CallAlertUITests${1:+/$1}
              mkdir -p "$out/shots"
              export TEST_RUNNER_NEARBY_ALERT_ANSWER="${NEARBY_ALERT_ANSWER:-deny}" TEST_RUNNER_NEARBY_SHOT_DIR="$(cd "$out/shots" && pwd)" ;;
     *) echo "Unknown scenario $scenario (call|people|screens|alerts)" >&2; exit 2 ;;
@@ -33,7 +33,7 @@ if [[ -n "${SIMULATOR:-}" ]]; then
         # Notification permission has no simctl privacy service: only an uninstall resets it.
         xcrun simctl uninstall "$SIMULATOR" io.github.meshlive.app > /dev/null 2>&1 || true
     fi
-    xcodebuild test -project NearbyIntercom.xcodeproj -scheme NearbyIntercom -configuration Debug -destination "id=$SIMULATOR" \
+    xcodebuild test -project MeshLive.xcodeproj -scheme MeshLive-iOS -configuration Debug -destination "id=$SIMULATOR" \
         -derivedDataPath "${DERIVED:-.build/xcode}" -resultBundlePath "$out/result.xcresult" \
         CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES -only-testing:"$only" > "$out/xcodebuild.log" 2>&1 &
     pid=$!
@@ -55,7 +55,7 @@ if [[ -n "${SIMULATOR:-}" ]]; then
     fi
 else
     device="${DEVICE:?Set DEVICE to the iPhone UDID (or SIMULATOR to a simulator UDID)}"; team="${TEAM:?Set TEAM to your Apple team ID}"
-    xcodebuild test -project NearbyIntercom.xcodeproj -scheme NearbyIntercom -configuration Debug -destination "id=$device" \
+    xcodebuild test -project MeshLive.xcodeproj -scheme MeshLive-iOS -configuration Debug -destination "id=$device" \
         -derivedDataPath .build/xcode-device -resultBundlePath "$out/result.xcresult" -allowProvisioningUpdates \
         DEVELOPMENT_TEAM="$team" CODE_SIGN_STYLE=Automatic -only-testing:"$only" > "$out/xcodebuild.log" 2>&1
     code=$?
