@@ -25,10 +25,17 @@ enum KeychainItem {
     }
     static func write(_ account: String, _ data: Data) throws {
         if DesktopPreview.enabled { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)) }
-        SecItemDelete(base(account) as CFDictionary)
-        var add = base(account); add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let status = SecItemAdd(add as CFDictionary, nil)
+        // Update in place (add only when missing): a failed write never leaves the account without its old value.
+        let status = KeychainReplace.write(
+            update: {
+                SecItemUpdate(base(account) as CFDictionary, [kSecValueData as String: data,
+                                                              kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly] as CFDictionary)
+            },
+            add: {
+                var add = base(account); add[kSecValueData as String] = data
+                add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                return SecItemAdd(add as CFDictionary, nil)
+            })
         guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
     }
     static func delete(_ account: String) throws {
