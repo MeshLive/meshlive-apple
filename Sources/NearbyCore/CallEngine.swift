@@ -56,6 +56,26 @@ public struct PresenceCallHooks {
 }
 
 /// EXPERIMENTAL BMH3 for one call (Android "Hidden identities" and "Pseudonymous toward strangers"; nil = BMH2 only).
+/// EXPERIMENTAL relayed calls (Design C) for one call connection. With `featureOn` the link hello signs bit 4
+/// ("understands RELAY_SETUP"); a caller with `route` connects to the route's first helper, sends SETUP after the link
+/// handshake and starts the endpoint handshake only after READY.
+public struct RelayedCallOptions {
+    public var featureOn: Bool
+    public var route: RelayRoute?
+    /// Amendment CP: a first hop that declared a throwaway is not bound to the chosen helper (a real key still is).
+    public var pseudonymousEdges: Bool
+    /// When the dial started (uptime): the 20 s setup deadline counts from here, connect time included.
+    public var setupStartedAt: TimeInterval?
+    /// Benchmark rule: only a chain of exactly this many relays counts (0 = any).
+    public var requireRelays: Int
+    public var maxRelays: Int
+    public init(featureOn: Bool, route: RelayRoute? = nil, pseudonymousEdges: Bool = true, setupStartedAt: TimeInterval? = nil,
+                requireRelays: Int = 0, maxRelays: Int = RelayedCalls.defaultMaxRelays) {
+        self.featureOn = featureOn; self.route = route; self.pseudonymousEdges = pseudonymousEdges
+        self.setupStartedAt = setupStartedAt; self.requireRelays = requireRelays; self.maxRelays = maxRelays
+    }
+}
+
 public struct Bmh3CallOptions {
     /// Pseudonym mode (rule P): strangers meet a throwaway key; needs rotating IDs, as on Android. It also means this
     /// phone never speaks BMH2 and refuses a BMH2 caller (PR1).
@@ -78,6 +98,8 @@ public struct Bmh3CallOptions {
     /// Amendment CP (Android `test_relayed_pseudonymous_edges`, on; false is the control arm): toward a relay the caller's
     /// fresh link throwaway declares PSEUDONYM instead of posing as a real key.
     public var pseudonymousRelayEdges = true
+    /// Design C: the first helper's own offer when the call takes an on-demand relayed route.
+    public var relayHop: DiscoveryAnnouncement?
     public init(pseudonyms: Bool, selected: DiscoveryAnnouncement? = nil, pins: Bmh3Pins? = nil,
                 budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
         self.pseudonyms = pseudonyms; self.selected = selected; self.pins = pins; self.budget = budget; self.wallEpoch = wallEpoch
@@ -87,8 +109,10 @@ public struct Bmh3CallOptions {
     func settings(role: PrivateCallRole, openingEntries: (() -> [OpeningEntry])?) -> Bmh3CallSettings? {
         switch role {
         case .caller:
-            let pinned = selected.map { pins?.isPinned($0.nodeIdPrefix) ?? false } ?? false
-            guard Bmh3Choice.decide(enabled: true, only: pseudonyms, offer: selected, pinned: pinned).bmh3 else { return nil }
+            // A Design C route decides BMH3 on its first helper's own offer (Android relayHopUsesBmh3).
+            let choiceOffer = relayHop ?? selected
+            let pinned = choiceOffer.map { pins?.isPinned($0.nodeIdPrefix) ?? false } ?? false
+            guard Bmh3Choice.decide(enabled: true, only: pseudonyms, offer: choiceOffer, pinned: pinned).bmh3 else { return nil }
             let towardRelay = (selected?.routeCost ?? 0) > 0
             let settings = Bmh3CallSettings(
                 speak: true,
@@ -136,6 +160,8 @@ public final class CallEngine: MeshConnection {
         case peerReport(LinkCapacityReport)
         /// Verified self-chosen name and/or call subject of the peer (experimental labels).
         case peerLabels(name: String?, subject: String?)
+        /// Experimental relayed calls: the first hop answered READY with this many relays to the callee.
+        case relayReady(Int)
         case ended(String, error: Bool)
     }
 
@@ -189,8 +215,9 @@ public final class CallEngine: MeshConnection {
     public init(role: PrivateCallRole, transport: MeshTransport, identity: SigningIdentity, requestedType: CallType,
                 encodeMask: UInt8, decodeMask: UInt8, settings: CallMediaSettings = CallMediaSettings(),
                 expectedPeerPrefix: Data? = nil, relayHops: UInt8 = 0, videoFragments: Bool = false, labels: CallLabelOptions? = nil,
-                rotating: RotatingCallOptions? = nil, bmh3: Bmh3CallOptions? = nil) {
+                rotating: RotatingCallOptions? = nil, bmh3: Bmh3CallOptions? = nil, relayed: RelayedCallOptions? = nil) {
         labelOptions = labels
+        relayedOptions = relayed
         rotatingOptions = rotating
         bmh3Options = bmh3
         callRole = role
@@ -202,6 +229,8 @@ public final class CallEngine: MeshConnection {
         var link = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: encodeMask & NodeCapabilities.codecMask,
                                     decodeCodecMask: decodeMask & NodeCapabilities.codecMask, maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 0)
         var endpointCaps = link
+        // Relayed calls: every endpoint with the experiment on signs link bit 4 (the end-to-end hello is unchanged).
+        link = RelayedCalls.linkCapabilities(link, featureOn: relayed?.featureOn == true, helperActive: false)
         // Rotating IDs: bit 3 only in the call-endpoint link hello (never the endpoint hello).
         if rotating != nil { link.transportMask |= NodeCapabilities.transportDiscoveryOpening }
         if videoFragments { endpointCaps.transportMask |= NodeCapabilities.transportVideoFragments }
@@ -216,6 +245,100 @@ public final class CallEngine: MeshConnection {
             discoveryOpeningEntries = { [weak self] in self?.callRole == .callee ? (rotating.entries?() ?? []) : [] }
             onDiscoveryOpening = { [weak self] entries in try self?.checkOpening(entries) }
         }
+        if role == .caller, relayed?.route != nil {
+            // The SETUP wait (up to 20 s plus 2 s grace) runs before the endpoint handshake.
+            setupTimeout += TimeInterval(RelayedCalls.setupDeadlineMs + RelayedCalls.setupReplyGraceMs) / 1000
+        }
+    }
+
+    // MARK: Experimental relayed calls (Design C), caller side
+
+    private let relayedOptions: RelayedCallOptions?
+    private var relayRoute: RelayRoute? { callRole == .caller ? relayedOptions?.route : nil }
+    private var relaySetupId: Data?
+    private var relaySetupDeadline: TimeInterval?
+    /// Relays the first hop reported in READY (nil until READY).
+    public private(set) var relayReadyRelays: Int?
+    /// Why the relayed route failed before READY (a closure before READY counts as a timeout, PROTOCOL rule 5).
+    public private(set) var relaySetupFailure: RelaySetupFailure?
+    /// The hop answered something invalid (not a reason code): the route is skipped like a failure.
+    public private(set) var relaySetupInvalid = false
+    public var relayedRouteFailed: Bool {
+        relayRoute != nil && relayReadyRelays == nil && (relaySetupFailure != nil || relaySetupInvalid || phase == .closed)
+    }
+    public override var defersEndpointHello: Bool { relayRoute != nil }
+
+    /// Fails the relayed route: the call ends with the plain reason.
+    private func failRelay(_ reason: RelaySetupFailure?, _ text: String) {
+        if let reason { relaySetupFailure = reason } else { relaySetupInvalid = true }
+        acceptRelaySetup = false
+        fail("Relayed route failed: \(text)")
+    }
+
+    /// The first hop must be the chosen helper: a real key equals (fixed prefix) or opens (rotating) the helper's
+    /// offer; a declared throwaway is accepted only under Amendment CP. Its hello must show bits 4 and 6 and capacity.
+    private func relayHopProblem() -> (RelaySetupFailure, String)? {
+        guard let route = relayRoute, let peer = link.peerNodeId, let caps = link.peerCapabilities else { return (.childAuthentication, "No first hop") }
+        let throwaway = link.peerPseudonymous
+        if throwaway && relayedOptions?.pseudonymousEdges != true {
+            return (.childAuthentication, "The phone that answered is not the helper that was chosen")
+        }
+        if !throwaway && !route.rotating && peer.prefix != route.helperPrefix {
+            return (.childAuthentication, "The phone that answered is not the helper that was chosen")
+        }
+        if !RelayedCalls.linkAcceptsSetup(caps) { return (.refused, RelaySetupFailure.refused.userText) }
+        return nil
+    }
+
+    private func sendRelaySetup() {
+        guard let route = relayRoute, relaySetupId == nil else { return }
+        if let (reason, text) = relayHopProblem() { failRelay(reason, text); return }
+        let spentMs = Int(((now - (relayedOptions?.setupStartedAt ?? startedAt)) * 1000).rounded())
+        let remaining = min(max(RelayedCalls.setupDeadlineMs - spentMs, 0), RelayedCalls.setupDeadlineMs)
+        guard remaining >= RelayedCalls.minRemainingMs else { failRelay(.timeout, RelaySetupFailure.timeout.userText); return }
+        let id = RelaySetupCodec.newSetupId()
+        do {
+            acceptRelaySetup = true
+            try sendRelaySetup(.setup(target: route.target, budget: route.relays, remainingMs: remaining, setupId: id, rotating: route.rotating))
+            relaySetupId = id
+            relaySetupDeadline = now + TimeInterval(remaining + RelayedCalls.setupReplyGraceMs) / 1000
+        } catch {
+            failRelay(nil, "The relayed route could not be requested")
+        }
+    }
+
+    public override func handleRelaySetupRecord(_ record: SecureRecord) throws {
+        guard let route = relayRoute, let id = relaySetupId, relayReadyRelays == nil else { throw ProtocolError.state("Unexpected relay setup record") }
+        acceptRelaySetup = false   // exactly one reply
+        guard let reply = try? RelaySetupCodec.decode(record.payload), reply.setupId == id else {
+            failRelay(nil, "The helping phone sent an invalid answer"); return
+        }
+        switch reply {
+        case .ready(_, let relays):
+            let required = relayedOptions?.requireRelays ?? 0
+            guard relays <= route.relays, relays <= (relayedOptions?.maxRelays ?? CallRelayChain.maxRelays) else {
+                failRelay(nil, "The helping phone reported more relays than were asked for"); return
+            }
+            if required > 0 && relays != required {
+                failRelay(nil, "The route used \(relays) relays, but exactly \(required) were required"); return
+            }
+            relayReadyRelays = relays
+            relayHops = UInt8(relays)
+            relaySetupDeadline = nil
+            onEvent?(.relayReady(relays))
+            try sendDeferredEndpointHello()
+        case .fail(_, let reason):
+            failRelay(reason, reason.userText)
+        case .setup:
+            failRelay(nil, "The helping phone sent an invalid answer")
+        }
+    }
+
+    public override func tickSetup(now: TimeInterval) {
+        if let deadline = relaySetupDeadline, relayReadyRelays == nil, now > deadline {
+            relaySetupDeadline = nil
+            failRelay(.timeout, RelaySetupFailure.timeout.userText)
+        }
     }
 
     // MARK: Experimental rotating discovery IDs (RV15)
@@ -223,6 +346,13 @@ public final class CallEngine: MeshConnection {
     private var selectedRotating: DiscoveryAnnouncement? { rotatingOptions?.selected.flatMap { $0.rotating ? $0 : nil } }
 
     public override func validateLinkPeer() throws {
+        if let route = relayRoute {
+            if route.rotating, !link.peerPseudonymous,
+               (link.peerCapabilities?.transportMask ?? 0) & NodeCapabilities.transportDiscoveryOpening == 0 {
+                throw ProtocolError.authentication
+            }
+            return
+        }
         // A selected rotating advert needs the opening; a peer without bit 3 fails like a prefix mismatch. A pseudonymous
         // BMH3 answerer withholds its opening until its reveal; a relay (route cost above 0) cannot open the callee's ID.
         if selectedRotating != nil, !link.peerPseudonymous, (selectedRotating?.routeCost ?? 0) == 0,
@@ -404,6 +534,17 @@ public final class CallEngine: MeshConnection {
     }
 
     private func checkOpening(_ entries: [OpeningEntry]) throws {
+        if let route = relayRoute {
+            // Design C rotating route: the first hop's opening must open the helper offer that was chosen.
+            if route.rotating, !link.peerPseudonymous, let peer = link.peerNodeId,
+               DiscoverySelectionCheck.check(selected: RelayedCalls.helperOfferFor(route.helperPrefix, rotating: true),
+                                             expectedRole: RotatingDiscoveryIds.roleCallOffer, peerNodeId: peer.bytes, openingEntries: entries,
+                                             verifierWallEpoch: rotatingOptions?.wallEpoch()) != .pass {
+                failRelay(.childAuthentication, "The phone that answered is not the helper that was chosen"); return
+            }
+            sendRelaySetup()
+            return
+        }
         guard let selected = selectedRotating, let peer = link.peerNodeId else { return }
         guard DiscoverySelectionCheck.check(selected: selected, expectedRole: RotatingDiscoveryIds.roleCallOffer, peerNodeId: peer.bytes,
                                             openingEntries: entries, verifierWallEpoch: rotatingOptions?.wallEpoch()) == .pass else { throw ProtocolError.authentication }
@@ -412,7 +553,11 @@ public final class CallEngine: MeshConnection {
     // A relayed caller's adjacent link is the relay; the endpoint must still match the callee prefix.
     public override var expectedPrefixAppliesToEndpoint: Bool { true }
 
-    public override func linkDidAuthenticate() { if let id = link.peerNodeId { onEvent?(.linkAuthenticated(id)) } }
+    public override func linkDidAuthenticate() {
+        if let id = link.peerNodeId { onEvent?(.linkAuthenticated(id)) }
+        // A relayed route sends SETUP now, or after the helper's BDO1 opening when one was negotiated.
+        if relayRoute != nil, !(openingExpected && peerOpening == nil) { sendRelaySetup() }
+    }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
         discoveryNegotiated = rotatingOptions != nil &&

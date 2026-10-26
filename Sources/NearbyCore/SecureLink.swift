@@ -40,6 +40,8 @@ public final class SecureLink {
     }
     public var isEstablished: Bool { sealer != nil }
     public var acceptDiscoveryOpening = false
+    /// Experimental relayed calls: hop type 12 parses while true (a helper's first record, a caller's single reply).
+    public var acceptRelaySetup = false { didSet { opener?.acceptRelaySetup = acceptRelaySetup } }
     public var acceptStoreForward: Bool {
         get { opener?.acceptStoreForward ?? false }
         set { opener?.acceptStoreForward = newValue }
@@ -116,6 +118,7 @@ public final class SecureLink {
         let opener = SecureRecordOpener(key: keys.receiveKey)
         opener.acceptDiscoveryOpening = acceptDiscoveryOpening && presentedCapabilities.transportMask & NodeCapabilities.transportDiscoveryOpening != 0
         opener.maxCiphertextBytes = maxIncomingCiphertextBytes
+        opener.acceptRelaySetup = acceptRelaySetup
         self.opener = opener
     }
 

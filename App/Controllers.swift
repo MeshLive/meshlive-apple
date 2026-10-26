@@ -272,6 +272,9 @@ final class CallController: ObservableObject, Identifiable {
                 label = updated; peerName = updated.title
             }
             self.subject = subject
+        case .relayReady(let relays):
+            relayed = true; markStage("relay_ready")
+            AppLog.event("relayed_setup", ["role": "caller", "result": "ready", "relays": "\(relays)"])
         case .ended(let reason, let error):
             // An error before the call was ever active stays readable longer and is repeated on the Call screen.
             #if os(macOS)
@@ -357,7 +360,7 @@ final class CallController: ObservableObject, Identifiable {
                                       "videoTx": "\(engine.sentVideoPackets)", "videoRx": "\(engine.receivedVideoPackets)", "decoded": "\(remote.decodedFrames)",
                                       "rxBytes": "\(engine.receivedBytes)", "txBytes": "\(engine.sentBytes)"])
             AppLog.flush()
-        case .remoteAudio, .remoteVideo, .remoteRotation, .peerReport: break
+        case .remoteAudio, .remoteVideo, .remoteRotation, .peerReport, .relayReady: break
         }
     }
 

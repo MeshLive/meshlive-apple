@@ -66,6 +66,10 @@ public final class CallRelayLink: MeshConnection {
     public var onClosed: ((String, Bool) -> Void)?
     /// Called after a record was queued on this link (the app pumps its driver).
     public var onRecordCopied: (() -> Void)?
+    /// Experimental relayed calls: a hop-type-12 message read on this link (only while `acceptRelaySetup`).
+    public var onRelaySetup: ((RelaySetupMessage) throws -> Void)?
+    /// Message 4 (`SETUP_RDI`) is understood (rotating IDs and relayed calls both on).
+    public var acceptRdiSetup = false
     private var ordered: [(type: SecureRecordType, payload: Data)] = []
     public private(set) var copiedRecords = 0
 
@@ -87,9 +91,11 @@ public final class CallRelayLink: MeshConnection {
 
     /// - Parameter bmh3: EXPERIMENTAL BMH3 on this hop (Android: a relay is an R_FIRST responder toward its parent and an
     ///   initiator toward its child, always with its real key; nil = BMH2 only).
-    public init(role: HandshakeRole, transport: MeshTransport, identity: SigningIdentity, bmh3: Bmh3CallSettings? = nil) {
-        let caps = NodeCapabilities(transportMask: transport.capabilityBit | NodeCapabilities.transportCallRelay, encodeCodecMask: 0, decodeCodecMask: 0,
+    /// - Parameter relaySetup: Design C helper link: the hello also signs bit 4 ("understands RELAY_SETUP").
+    public init(role: HandshakeRole, transport: MeshTransport, identity: SigningIdentity, bmh3: Bmh3CallSettings? = nil, relaySetup: Bool = false) {
+        var caps = NodeCapabilities(transportMask: transport.capabilityBit | NodeCapabilities.transportCallRelay, encodeCodecMask: 0, decodeCodecMask: 0,
                                     maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 1)
+        if relaySetup { caps.transportMask |= RelayedCalls.linkHelloSetupBit }
         super.init(role: role, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: caps, bmh3: bmh3)
         maxHeldIngressBytes = Self.maxHeldBytes
     }
@@ -100,6 +106,12 @@ public final class CallRelayLink: MeshConnection {
         guard let id = link.peerNodeId, let caps = link.peerCapabilities else { throw ProtocolError.authentication }
         if let expectedPeerPrefix, id.prefix != expectedPeerPrefix { throw ProtocolError.authentication }
         try onAuthenticated?(id, caps)
+    }
+
+    public override func handleRelaySetupRecord(_ record: SecureRecord) throws {
+        guard let onRelaySetup else { throw ProtocolError.state("Unexpected relay setup record") }
+        acceptRelaySetup = false   // exactly one setup message per link direction
+        try onRelaySetup(try RelaySetupCodec.decode(record.payload, acceptRdi: acceptRdiSetup))
     }
 
     public override func handleOpenRecord(_ record: SecureRecord) throws {

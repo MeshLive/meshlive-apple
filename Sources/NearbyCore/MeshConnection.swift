@@ -210,6 +210,11 @@ open class MeshConnection {
     }
 
     public var peerLinkNodeId: NodeId? { link.peerNodeId }
+    /// Experimental relayed calls: hop type 12 is read while true.
+    public var acceptRelaySetup: Bool {
+        get { link.acceptRelaySetup }
+        set { link.acceptRelaySetup = newValue }
+    }
     public var peerLinkCapabilities: NodeCapabilities? { link.peerCapabilities }
     /// BMH3: the link peer presented a throwaway key / this phone did.
     public var linkPeerPseudonymous: Bool { link.peerPseudonymous }
@@ -312,7 +317,8 @@ open class MeshConnection {
         let handshake = EndToEndHandshake(role: role, identity: identity, capabilities: endpointCapabilities, gate: identityGate,
                                           bmh3: bmh3, speakBmh3: role == .initiator && link.usedBmh3)
         endpointHandshake = handshake
-        if role == .initiator { enqueue(.record(.endToEndHandshake, try handshake.initiatorHello()), .control) }
+        // A relayed-call caller sends its endpoint hello only after the first hop's READY.
+        if role == .initiator && !defersEndpointHello { enqueue(.record(.endToEndHandshake, try handshake.initiatorHello()), .control) }
         linkDidAuthenticate()
     }
 
@@ -325,6 +331,10 @@ open class MeshConnection {
             return
         }
         if record.type == .discoveryOpening { throw ProtocolError.malformed("Unknown secure record type 13") }
+        if record.type == .relaySetup {
+            try handleRelaySetupRecord(record)
+            return
+        }
         if phase == .endpointHandshake {
             guard record.type == .endToEndHandshake, let handshake = endpointHandshake else {
                 throw ProtocolError.state("Expected an end-to-end handshake")
@@ -351,6 +361,21 @@ open class MeshConnection {
     /// True for a relay hop: no endpoint handshake of its own (the endpoints' records are copied).
     open var linkOnly: Bool { false }
     open var expectedPrefixAppliesToEndpoint: Bool { true }
+    /// Timers while the handshakes are still running (relayed-call setup deadline).
+    open func tickSetup(now: TimeInterval) {}
+    /// Experimental relayed calls: the initiator holds its endpoint hello until `sendDeferredEndpointHello`.
+    open var defersEndpointHello: Bool { false }
+    /// Hop type 12 (only reaches here while `acceptRelaySetup`); the default rejects it.
+    open func handleRelaySetupRecord(_ record: SecureRecord) throws { throw ProtocolError.state("Unexpected relay setup record") }
+    /// Sends the endpoint hello that `defersEndpointHello` held back.
+    public func sendDeferredEndpointHello() throws {
+        guard role == .initiator, phase == .endpointHandshake, let handshake = endpointHandshake else { return }
+        enqueue(.record(.endToEndHandshake, try handshake.initiatorHello()), .control)
+    }
+    /// Queues one hop-local relay setup message (control priority).
+    public func sendRelaySetup(_ message: RelaySetupMessage) throws {
+        enqueue(.record(.relaySetup, try RelaySetupCodec.encode(message)), .control)
+    }
     open func validateLinkPeer() throws {}
     open func linkDidAuthenticate() {}
     open func endpointDidAuthenticate(_ session: EndToEndSession) throws {}
@@ -443,6 +468,7 @@ open class MeshConnection {
         guard phase != .closed else { return }
         self.now = now
         if phase != .open, now - startedAt > setupTimeout { fail("Secure setup timed out"); return }
+        if phase != .open { tickSetup(now: now); if phase == .closed { return } }
         if phase == .open { tickOpen(now: now) }
     }
 
