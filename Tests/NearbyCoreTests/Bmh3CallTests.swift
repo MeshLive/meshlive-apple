@@ -140,6 +140,30 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertFalse(pins.isPinned(six, now: Date().addingTimeInterval(Bmh3Pins.ttl + 60)))
     }
 
+    /// Android Bmh3Pins: pins survive a restart for 30 days (one `hex ms` line each), expire from storage, and keep
+    /// only the newest `capacity`; damaged lines are ignored.
+    func testPinsAreStoredForThirtyDaysAcrossRestarts() {
+        final class Store: Bmh3PinStorage {
+            var text: String?
+            func read() -> String? { text }
+            func write(_ value: String) { text = value }
+        }
+        let store = Store(), six = Data([1, 2, 3, 4, 5, 6]), other = Data([10, 11, 12, 13, 14, 15])
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        Bmh3Pins(storage: store).pin(six + Data([7]), now: t0)
+        XCTAssertEqual(store.text, "010203040506 1800000000000")
+        XCTAssertTrue(Bmh3Pins(storage: store).isPinned(six, now: t0.addingTimeInterval(Bmh3Pins.ttl - 60)), "kept across a restart")
+        XCTAssertFalse(Bmh3Pins(storage: store).isPinned(six, now: t0.addingTimeInterval(Bmh3Pins.ttl + 60)))
+        XCTAssertEqual(store.text, "", "an expired pin is deleted from storage")
+        store.text = "zz 1\n0102030405 5\n0a0b0c0d0e0f 1800000000000"
+        let small = Bmh3Pins(capacity: 1, storage: store)
+        XCTAssertTrue(small.isPinned(other, now: t0))
+        small.pin(six, now: t0)
+        XCTAssertFalse(small.isPinned(other, now: t0), "the oldest pin leaves at capacity")
+        XCTAssertTrue(Bmh3Pins(storage: store).isPinned(six, now: t0))
+        XCTAssertFalse(Bmh3Pins(storage: store).isPinned(Data([1, 2, 3]), now: t0), "a short prefix is never pinned")
+    }
+
     func testABmh3CallerToAFixedOfferWithoutHintStillSpeaksBmh2AndAnEveryoneResponderAcceptsIt() throws {
         // Hidden identities on, pseudonyms off: an old (BMH2) callee stays reachable through a version 2 offer.
         let calleeId = SoftwareSigningIdentity()

@@ -11,7 +11,8 @@ protocol is the same as Android's; this page covers what is different on Apple d
 - While the app advertises, its Bluetooth announcement carries a **stable ID prefix** that a scanner can use to
   recognise the same device over time. Rotating IDs exist only as an experiment.
 - Your identity key stays in the Keychain on the device. Wipe everything (and the optional quick wipe) erases it, your
-  contacts and settings, but cannot reach backups or copies outside the app.
+  contacts, settings and the list of phones that used hidden identities with yours (kept 30 days, outside backups),
+  but cannot reach backups or copies outside the app.
 - Nothing has had an independent security audit. Do not rely on MeshLive where your safety depends on it.
 
 ## What nearby phones can see

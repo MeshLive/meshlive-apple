@@ -163,7 +163,8 @@ final class AppModel: ObservableObject {
     /// EXPERIMENTAL BMH3 (Settings > Advanced "Hidden identities" and its child "Pseudonymous toward strangers").
     @Published var hiddenIdentities = AppSettings.hiddenIdentities { didSet { AppSettings.hiddenIdentities = hiddenIdentities } }
     @Published var bmh3Pseudonyms = AppSettings.bmh3Pseudonyms { didSet { AppSettings.bmh3Pseudonyms = bmh3Pseudonyms } }
-    let bmh3Pins = Bmh3Pins()
+    /// Kept for 30 days across restarts, as Android (a stripped hint cannot downgrade a pinned peer to BMH2).
+    let bmh3Pins = Bmh3Pins(storage: DesktopPreview.enabled ? nil : Bmh3PinFile())
     /// The BMH3 options of one call, or nil (BMH2 only). Mac compatibility can use a per-attempt
     /// pseudonym for a selected rotating offer independently of this Mac's own advertising setting.
     func bmh3Options(selected: DiscoveryAnnouncement?) -> Bmh3CallOptions? {
@@ -903,6 +904,7 @@ final class AppModel: ObservableObject {
         radio.stopAll()
         streamRoutePenalties.reset(); streamNotice = nil
         audioRelayMemory.reset()
+        bmh3Pins.clear()
         _ = EmergencyWipe.run()
         identity = nil; contacts = []; book.reset(); authenticated = [:]; people = []; streams = []; recentCalls = []
         wiped = true

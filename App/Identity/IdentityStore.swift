@@ -98,6 +98,19 @@ enum VerifiedContactsStore {
     static func reset() { if !DesktopPreview.enabled { try? FileManager.default.removeItem(at: url) } }
 }
 
+/// BMH3 pins (Android `hidden-identity-pins.txt`): next to the verified contacts, excluded from backup, readable after
+/// the first unlock (an incoming call can arrive while the phone is locked), deleted by the emergency wipe.
+final class Bmh3PinFile: Bmh3PinStorage {
+    static var url: URL { VerifiedContactsStore.url.deletingLastPathComponent().appendingPathComponent("hidden-identity-pins.txt") }
+    func read() -> String? { try? String(contentsOf: Self.url, encoding: .utf8) }
+    func write(_ value: String) {
+        var dir = Self.url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var values = URLResourceValues(); values.isExcludedFromBackup = true; try? dir.setResourceValues(values)
+        try? Data(value.utf8).write(to: Self.url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+}
+
 /// Emergency wipe (Android EmergencyWipe semantics, adapted to iOS): marker first, keys first, then
 /// data, a second sweep, and the marker last. A remaining marker resumes the wipe on the next launch.
 enum EmergencyWipe {

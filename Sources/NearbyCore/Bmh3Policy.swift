@@ -25,25 +25,68 @@ public enum Bmh3Choice {
     }
 }
 
-/// Node prefixes that completed a BMH3 handshake with this phone (Android Bmh3Pins): a later version 2 offer with a
-/// pinned prefix is contacted with BMH3 even when its hint was stripped. In memory here (an app restart forgets them).
+/// Where BMH3 pins are kept (the app: a small file outside backups, deleted by the emergency wipe).
+public protocol Bmh3PinStorage: AnyObject {
+    func read() -> String?
+    func write(_ value: String)
+}
+
+/// Node prefixes (6 bytes) that completed a BMH3 handshake with this phone (Android Bmh3Pins), newest last, at most
+/// `capacity`, each valid for 30 days after its last success: a later version 2 offer with a pinned prefix is
+/// contacted with BMH3 even when its hint was stripped (a downgrade). Stored as Android does, one `hex ms` line per
+/// pin, so an app restart keeps them; without storage they live in memory only.
 public final class Bmh3Pins {
     public static let ttl: TimeInterval = 30 * 24 * 3600
-    private var entries: [Data: Date] = [:]
+    /// A pin dated more than this far in the future (a clock moved back) is dropped.
+    static let clockSlack: TimeInterval = 24 * 3600
+    private var entries: [(key: String, atMs: Int64)] = []
     private let capacity: Int
+    private let storage: Bmh3PinStorage?
+    private var loaded = false
     private let lock = NSLock()
-    public init(capacity: Int = 256) { self.capacity = capacity }
+    public init(capacity: Int = 256, storage: Bmh3PinStorage? = nil) { self.capacity = capacity; self.storage = storage }
+
     public func isPinned(_ prefix: Data, now: Date = Date()) -> Bool {
+        guard let key = Self.key(prefix) else { return false }
         lock.lock(); defer { lock.unlock() }
-        guard let at = entries[prefix.prefix(6).rebased] else { return false }
-        return now.timeIntervalSince(at) <= Self.ttl
+        load(now); expire(now)
+        return entries.contains { $0.key == key }
     }
     public func pin(_ prefix: Data, now: Date = Date()) {
+        guard let key = Self.key(prefix) else { return }
         lock.lock(); defer { lock.unlock() }
-        entries[prefix.prefix(6).rebased] = now
-        if entries.count > capacity, let oldest = entries.min(by: { $0.value < $1.value })?.key { entries.removeValue(forKey: oldest) }
+        load(now)
+        entries.removeAll { $0.key == key }
+        entries.append((key, Int64(now.timeIntervalSince1970 * 1000)))
+        expire(now)
+        save()
     }
-    public func clear() { lock.lock(); entries.removeAll(); lock.unlock() }
+    public func clear() { lock.lock(); load(Date()); entries.removeAll(); save(); lock.unlock() }
+
+    private static func key(_ prefix: Data) -> String? { prefix.count >= 6 ? prefix.prefix(6).rebased.hex : nil }
+
+    private func load(_ now: Date) {
+        guard !loaded else { return }
+        loaded = true
+        for line in (storage?.read() ?? "").split(separator: "\n") {
+            let parts = line.split(separator: " ")
+            guard parts.count == 2, parts[0].count == 12, Data(hex: String(parts[0])) != nil, String(parts[0]) == parts[0].lowercased(),
+                  let at = Int64(parts[1]) else { continue }
+            entries.removeAll { $0.key == String(parts[0]) }
+            entries.append((String(parts[0]), at))
+        }
+        expire(now)
+    }
+
+    private func expire(_ now: Date) {
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let before = entries.count
+        entries.removeAll { nowMs - $0.atMs > Int64(Self.ttl * 1000) || $0.atMs > nowMs + Int64(Self.clockSlack * 1000) }
+        if entries.count > capacity { entries.removeFirst(entries.count - capacity) }
+        if entries.count != before { save() }
+    }
+
+    private func save() { storage?.write(entries.map { "\($0.key) \($0.atMs)" }.joined(separator: "\n")) }
 }
 
 /// The signing budget of a stranger-facing R_FIRST responder (Android Bmh3SigningBudget): 8 signatures in a burst, one
