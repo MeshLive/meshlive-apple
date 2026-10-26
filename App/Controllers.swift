@@ -195,6 +195,8 @@ final class CallController: ObservableObject, Identifiable {
         remote.onFirstPicture = { [weak self] in self?.markStage("first_frame") }
         relayed = relayHops > 0
         engine.acceptRelayedCalls = model.relayedCalls
+        // Android connection review A3: 15 s (relayed 30 s) from hop authentication to Ringing; `-callerAnswerDeadline NO`.
+        engine.callerAnswerDeadline = UserDefaults.standard.object(forKey: "callerAnswerDeadline") as? Bool ?? true
         // EXPERIMENTAL overhead trim (Android test_call_audio_coalesce, off): `-callAudioCoalesce YES`.
         engine.queues.coalesceAudio = UserDefaults.standard.bool(forKey: "callAudioCoalesce")
         engine.acceptRelayedStrangerCalls = AppSettings.relayedStrangerCalls

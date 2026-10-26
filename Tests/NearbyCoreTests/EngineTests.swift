@@ -68,6 +68,25 @@ final class EngineTests: XCTestCase {
         }
     }
 
+    /// Connection review A3: a callee that completes the handshakes but never rings ends the caller's call after 15 s
+    /// (not 60 s), with a plain reason; the control arm keeps waiting.
+    func testACallerStopsWaitingForAnAnswerAfterFifteenSeconds() throws {
+        for armed in [true, false] {
+            let (caller, callee, pipe, _, _) = try makeCall()
+            callee.testingIgnoreInvite = true
+            caller.callerAnswerDeadline = armed
+            try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+            XCTAssertEqual(caller.state?.phase, .outgoingInvite)
+            for t in stride(from: 1.0, through: 16.0, by: 1.0) { try pipe.advance(1); _ = t }
+            if armed {
+                XCTAssertEqual(caller.phase, .closed)
+                XCTAssertEqual(caller.closeReason, CallEngine.callerAnswerReason)
+            } else {
+                XCTAssertNotEqual(caller.phase, .closed, "control arm: only the 60 s ring timeout")
+            }
+        }
+    }
+
     /// Busy rule (Android F14): a phone already in a call answers an Invite with Decline BUSY and never rings.
     func testABusyPhoneDeclinesWithBusyBeforeRinging() throws {
         let (caller, callee, pipe, _, _) = try makeCall()

@@ -377,6 +377,7 @@ final class ConnectionDriver {
     /// The link moves to another engine (a helper listener's link adopted by a relay duty): this driver stops
     /// without closing it and without reporting a finish.
     private var detached = false
+    private var gracefulCloseArmed = false
     func detach() {
         detached = true; closing = true
         timer?.invalidate(); timer = nil
@@ -460,6 +461,17 @@ final class ConnectionDriver {
         }
         // Sealing or send() can synchronously fail after the initial check.
         guard !releaseFailedEngine() else { return }
+        if engine.phase == .closed && !gracefulCloseArmed {
+            // Android connection review A1: a local End/Cancel/Decline on a link that no longer drains must still finish
+            // (media, the radio slot and advertising come back): the link closes 2.5 s after the end whatever is queued.
+            gracefulCloseArmed = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self, !self.closing else { return }
+                self.closing = true
+                AppLog.event("link_closed", ["link": self.link.label, "reason": "end did not drain", "queued": "\(self.link.queuedBytes)"])
+                self.link.close(); self.finish(self.engine.closeReason ?? "Closed")
+            }
+        }
         if engine.phase == .closed && !engine.hasPendingOutput && link.queuedBytes == 0 {
             closing = true
             // Give the final record (hang-up, END_ACK, route ack) time to reach the peer, as Android waits for it.

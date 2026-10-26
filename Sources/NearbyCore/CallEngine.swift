@@ -434,6 +434,20 @@ public final class CallEngine: MeshConnection {
     }
     /// Test seam: a caller that opens the link but never sends its Invite.
     var testingWithholdInvite = false
+    /// Test seam: a callee that reads the Invite but never answers it (no Ringing).
+    var testingIgnoreInvite = false
+
+    /// Android connection review A3: the caller's bound from hop authentication to the callee's Ringing (or Accept).
+    /// Direct 15 s; relayed: the 20 s SETUP budget plus 10 s. `callerAnswerDeadline = false` is the control arm.
+    public static let callerAnswerDirect: TimeInterval = 15
+    public static let callerAnswerRelayExtra: TimeInterval = 10
+    public static let callerAnswerReason = "The other phone connected but did not answer the call. It may be out of range or busy. Try again in a moment."
+    public var callerAnswerDeadline = true
+    private var linkAuthenticatedAt: TimeInterval?
+    private var callerAnswerLimit: TimeInterval {
+        relayedOptions?.route != nil || relayHops > 0
+            ? TimeInterval(RelayedCalls.setupDeadlineMs) / 1000 + Self.callerAnswerRelayExtra : Self.callerAnswerDirect
+    }
     /// Test seam: a peer that never sends its stream header or media.
     var testingWithholdLocalMedia = false
     /// Test seam: a peer that sends its stream header before the call was answered (a misbehaving peer).
@@ -587,6 +601,7 @@ public final class CallEngine: MeshConnection {
     public override var expectedPrefixAppliesToEndpoint: Bool { true }
 
     public override func linkDidAuthenticate() {
+        linkAuthenticatedAt = now
         if let id = link.peerNodeId { onEvent?(.linkAuthenticated(id)) }
         // A relayed route sends SETUP now, or after the helper's BDO1 opening when one was negotiated.
         if relayRoute != nil, !(openingExpected && peerOpening == nil) { sendRelaySetup() }
@@ -774,6 +789,7 @@ public final class CallEngine: MeshConnection {
     }
 
     private func handleSignal(_ message: PrivateCallSignalMessage) throws {
+        if testingIgnoreInvite { return }
         guard let current = state else {
             guard callRole == .callee, message.signal == .invite else { throw ProtocolError.state("Expected a private-call invitation") }
             relayHops = message.relayHops
@@ -991,6 +1007,10 @@ public final class CallEngine: MeshConnection {
                 endForCallerReveal()
                 return
             }
+        }
+        if callerAnswerDeadline, callRole == .caller, state?.phase == .outgoingInvite, let since = linkAuthenticatedAt,
+           now - since > callerAnswerLimit {
+            fail(Self.callerAnswerReason); return
         }
         if let phase = state?.phase, now - ringingSince > CallEngine.ringTimeout {
             if phase == .outgoingInvite || phase == .outgoingRinging { try? cancel(); return }
