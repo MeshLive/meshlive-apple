@@ -434,8 +434,4 @@ struct AppSettings {
         get { (d.data(forKey: "relayLearnedCapacity")).flatMap { try? JSONDecoder().decode(LearnedLinkCapacity.self, from: $0) } ?? LearnedLinkCapacity() }
         set { d.set(try? JSONEncoder().encode(newValue), forKey: "relayLearnedCapacity") }
     }
-    static var onboardingDone: Bool {
-        get { d.bool(forKey: "onboardingDone") }
-        set { d.set(newValue, forKey: "onboardingDone") }
-    }
 }

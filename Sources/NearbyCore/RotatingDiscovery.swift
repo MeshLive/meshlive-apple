@@ -11,8 +11,6 @@ public enum RotatingDiscoveryIds {
     public static let epochSeconds: Int64 = 900
     public static let idBytes = 6, saltBytes = 32, presenceKeyBytes = 32
     public static let roleCallOffer: UInt8 = 0, roleStreamOffer: UInt8 = 1, roleViewerRequest: UInt8 = 2
-    /// Link hello transport-mask bit 3: "sends and accepts BDO1 as the first hop record".
-    public static let linkHelloBit: UInt8 = 1 << 3
     public static let saltDomain = Data("BluetoothVideoMesh/Discovery/Salt/1".utf8) + Data([0])
     public static let idDomain = Data("BluetoothVideoMesh/Discovery/Id/1".utf8) + Data([0])
     public static let leaseDomain = Data("BluetoothVideoMesh/Discovery/Lease/1".utf8) + Data([0])

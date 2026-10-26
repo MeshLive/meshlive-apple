@@ -43,7 +43,6 @@ public struct OutboundQueues {
 
     var isEmpty: Bool { control.isEmpty && audio.isEmpty && video.isEmpty && fragmentRemainder.isEmpty }
     var count: Int { control.count + audio.count + video.count + fragmentRemainder.count }
-    public var videoBacklog: Int { video.count }
 
     mutating func push(_ item: OutboundItem, _ priority: OutboundPriority) -> Bool {
         switch priority {
@@ -176,6 +175,8 @@ open class MeshConnection {
     public var responderHelloDelay: ((NodeId) -> TimeInterval)?
     private var heldHello: (bytes: Data, releaseAt: TimeInterval)?
     private var responderHelloHandled = false
+    /// Also the helper's pre-setup wait (Android `preSetupWaitMs`, 20 s): an accepted link that has not finished its
+    /// handshake, which needs the peer's first record, is closed by then.
     public var setupTimeout: TimeInterval = 20
     /// Stream child links (source and relay sender): writes paced at the child-measured rate (Android LinkPacer).
     /// Control records are never held; audio, video and ordered envelopes wait their turn in the app queue.

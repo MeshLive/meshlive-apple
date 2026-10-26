@@ -108,9 +108,6 @@ public final class LinkPacer {
         modelDrainNs = max(modelDrainNs, start) + Int64(bytes) * 1_000_000_000 / baseRate
     }
 
-    /// Un-gained link time still ahead of the writes (what the stack is assumed to hold), for logs.
-    public func modelLeadMs() -> Int64 { max(0, modelDrainNs - nanoTime()) / 1_000_000 }
-
     /// Seed pace after `silenceNs` without any report: halved per step beyond the grace, with a floor.
     public static func decayedSeed(_ seedBytesPerSecond: Int64, silenceNs: Int64) -> Int64 {
         if silenceNs <= silenceGraceNs { return seedBytesPerSecond }

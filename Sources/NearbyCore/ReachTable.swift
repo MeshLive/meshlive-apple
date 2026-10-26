@@ -335,12 +335,6 @@ public final class ReachTable<P> {
             }
     }
 
-    /// Entries by cost heard (`c0` own offers, `cN` pages naming N relays) for the debug table line.
-    public func costSummary() -> String {
-        let counts = Dictionary(grouping: observations.values, by: \.rawCost).mapValues(\.count)
-        return counts.isEmpty ? "none" : counts.keys.sorted().map { "c\($0)=\(counts[$0]!)" }.joined(separator: ",")
-    }
-
     public func clear() {
         observations.removeAll(); observationOrder.removeAll(); pending.removeAll(); offers.removeAll()
         skipUntil.removeAll(); intake.removeAll(); holdDown.removeAll()

@@ -173,12 +173,11 @@ public enum RelayedCalls {
     public static let perHopReserveMs = 1_000
     /// Reply grace after the setup deadline: cleanup time for the last hop, not extra setup time.
     public static let setupReplyGraceMs = 2_000
-    /// A helper closes an accepted link that has not finished the handshake and delivered its first record by then.
-    public static let preSetupWaitMs = 20_000
     /// A connectable offer older than this is not dialled (it may have a new address).
     public static let offerFreshMs: Int64 = 30_000
+    /// Relays a caller tries for one call attempt (Android also bounds them by a 60 s window; an Apple attempt ends
+    /// within 40 s, so the count is the whole rule).
     public static let maxCandidates = 3
-    public static let candidateWindowMs: Int64 = 60_000
 
     /// Consent as seen in a call offer; `rotating` selects the population (version 5 vs version 2).
     public static func consents(_ offer: DiscoveryAnnouncement, rotating: Bool = false) -> Bool {
@@ -249,32 +248,10 @@ public enum RelayedCalls {
     }
 }
 
-/// Why a helper refused a SETUP before touching the radio, in PROTOCOL's order.
-public struct RelaySetupInputs {
-    public var featureOn = true, helperAllowed = true, paused = false, busy = false, rateLimited = false
-    public var parentIsSelf = false, parentIsTarget = false, targetIsSelf = false
-    public var budget = 1, maxRelays = RelayedCalls.defaultMaxRelays, routeAvailable = true
-    public init() {}
-}
-
-public enum RelaySetupAdmission {
-    /// Nil accepts; otherwise the FAIL reason. A SETUP for this phone's own ID answers like a missing entry (review CP-1).
-    public static func refusal(_ i: RelaySetupInputs) -> RelaySetupFailure? {
-        if !i.featureOn || !i.helperAllowed || i.paused { return .refused }
-        if i.busy { return .busy }
-        if i.rateLimited { return .refused }
-        if i.targetIsSelf { return .noRoute }
-        if i.parentIsSelf || i.parentIsTarget { return .loop }
-        if i.budget < 1 || i.budget > i.maxRelays { return .refused }
-        if !i.routeAvailable { return .noRoute }
-        return nil
-    }
-}
-
 /// SETUP rate limits: `perParent` per parent key per minute, `overall` per minute (identities are free, so the overall
-/// cap and one relay at a time are the bounds that hold). A pseudonymous parent is keyed by its link address.
+/// cap and one relay at a time are the bounds that hold). A pseudonymous parent is keyed by its CoreBluetooth peer
+/// identifier (`key`). The admission order itself is `RelayHelperGate.decide`.
 public final class RelaySetupRateLimiter {
-    public static let unknownAddressBucket = "addr:unknown"
     private let perParent: Int, overall: Int, windowMs: Int64
     private var byParent: [String: [Int64]] = [:]
     private var all: [Int64] = []
@@ -282,9 +259,7 @@ public final class RelaySetupRateLimiter {
     public init(perParent: Int = 3, overall: Int = 10, windowMs: Int64 = 60_000) {
         self.perParent = perParent; self.overall = overall; self.windowMs = windowMs
     }
-    public var trackedParents: Int { byParent.count }
 
-    /// The limiter key: a real parent's prefix, or the link address of a pseudonymous one (unknown: one shared bucket).
     /// The per-parent key: a real parent's prefix; a pseudonymous parent's CoreBluetooth peer identifier (it mints keys for
     /// free); nil when that is unknown, which applies only the overall cap (one stranger must not block everyone).
     public static func key(parentPrefixHex: String, pseudonymous: Bool, peerIdentifier: UUID?) -> String? {

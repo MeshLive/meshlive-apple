@@ -59,8 +59,6 @@ enum Palette {
     static let card = Color(meshRGB: 0x121212)
     /// Secondary capsules, chips and icon discs.
     static let chip = Color(meshRGB: 0x262626)
-    /// A switch that is on: light grey track (the iPhone's white thumb stays visible on it).
-    static let switchOn = Color(meshRGB: 0xB8B8B8)
     /// Inset separators in lists and between card rows (Android card outline grey).
     static let separator = Color(meshRGB: 0x262626)
 }
@@ -99,13 +97,6 @@ struct PeerLabel: Equatable {
     let title: String
     /// The peer's signed self-chosen name (experimental labels), shown quoted and marked self-named.
     let selfName: String?
-    /// List/ringing line: the contact label, or the quoted self-name beside the full handle, or the handle.
-    var listName: String {
-        #if os(macOS)
-        if handle.isEmpty { return title }
-        #endif
-        return contactName ?? selfName.map { "\u{201C}\($0)\u{201D}  \(handle)" } ?? handle
-    }
     let contactName: String?
     /// Full handle `XXXXX-XXXXX` (authenticated to 48 bits only after connecting).
     let handle: String

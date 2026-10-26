@@ -94,12 +94,14 @@ final class RelayedCallsWireTests: XCTestCase {
     }
 
     func testHelperAdmissionOrderAndRateLimits() {
-        var i = RelaySetupInputs(); i.targetIsSelf = true; i.parentIsTarget = true
-        XCTAssertEqual(RelaySetupAdmission.refusal(i), .noRoute, "own ID answers like a missing entry, before loop")
-        i = RelaySetupInputs(); i.busy = true; i.rateLimited = true
-        XCTAssertEqual(RelaySetupAdmission.refusal(i), .busy)
-        i = RelaySetupInputs(); i.budget = 3
-        XCTAssertEqual(RelaySetupAdmission.refusal(i), .refused)
+        func decide(_ change: (inout RelayHelperGate.Facts) -> Void) -> RelayHelperGate.Decision {
+            var f = RelayHelperGate.Facts(); f.parentPrefixHex = "aabbccddeeff"; change(&f)
+            return RelayHelperGate.decide(f, remainingMs: 20_000, limiter: RelaySetupRateLimiter(), budgets: RelaySeekBudgets(), nowMs: 0,
+                                          routeAvailable: { true })
+        }
+        XCTAssertEqual(decide { $0.targetIsSelf = true; $0.parentIsTarget = true }, .refuse(.noRoute, reason: "no_route"),
+                       "own ID answers like a missing entry, before loop")
+        XCTAssertEqual(decide { $0.budget = 3 }, .refuse(.refused, reason: "budget"))
         let limiter = RelaySetupRateLimiter()
         XCTAssertEqual((0..<4).map { _ in limiter.tryAdmit("a", nowMs: 0) }, [true, true, true, false])
         XCTAssertTrue(limiter.tryAdmit("a", nowMs: 60_000))

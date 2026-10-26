@@ -120,9 +120,6 @@ public final class PresenceVaultCore {
         return state != nil ? .loaded : corrupt ? .corrupt : .unreadable
     }
 
-    /// Loads (or creates) the vault; true when persistent. Call again to retry a transient failure.
-    @discardableResult
-    public func ensureLoaded() -> Bool { lock.lock(); defer { lock.unlock() }; return ensureLoadedLocked() }
 
     private func ensureLoadedLocked() -> Bool {
         if state != nil { return true }

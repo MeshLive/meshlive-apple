@@ -40,7 +40,6 @@ public final class SecureLink {
     public var maxIncomingCiphertextBytes = SecureRecordProtocol.maxPlaintextBytes + MeshAead.tagBytes {
         didSet { opener?.maxCiphertextBytes = maxIncomingCiphertextBytes }
     }
-    public var isEstablished: Bool { sealer != nil }
     public var acceptDiscoveryOpening = false
     /// Experimental relayed calls: hop type 12 parses while true (a helper's first record, a caller's single reply).
     public var acceptRelaySetup = false { didSet { opener?.acceptRelaySetup = acceptRelaySetup } }
@@ -191,6 +190,5 @@ public final class SecureLink {
         guard let sealer else { throw ProtocolError.state("Link is not authenticated") }
         return try sealer.seal(type, payload)
     }
-    public var sentRecords: UInt64 { sealer?.nextSequence ?? 0 }
     public var receivedRecords: UInt64 { opener?.nextSequence ?? 0 }
 }

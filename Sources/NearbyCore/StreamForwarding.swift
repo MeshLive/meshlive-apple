@@ -166,7 +166,6 @@ public final class StreamForwardingCore {
     }
 
     public func removeChild(_ child: NodeId) { if childNodeId == child { childNodeId = nil; childWaitsForKeyFrame = false } }
-    public var hasChild: Bool { childNodeId != nil }
 
     private func remember(_ envelope: MeshEnvelope) throws {
         guard let type = try? EndToEndContentProtocol.inspect(envelope.payload, acceptVideoFragments: true, acceptLabels: true).type else { return }

@@ -9,7 +9,6 @@ final class RotatingDiscoveryRuntime {
     let pins = OpeningPins()
     let tarpit = StrangerTarpit()
     private var clock: DiscoveryEpochClock
-    private static let keyAccount = "presence-key"
 
     init() {
         let state = (defaults.data(forKey: "rotatingEpochClock")).flatMap { try? JSONDecoder().decode(EpochClockState.self, from: $0) } ?? EpochClockState()
@@ -79,5 +78,4 @@ final class RotatingDiscoveryRuntime {
         windowStartedElapsedMs = Self.elapsedMs
         AppLog.event("rotating_ids", ["event": "visible_by_handle", "endEpoch": "\(windowEndEpoch)"])
     }
-    var visibleWindowEnds: Date? { windowEndEpoch >= 0 ? Date(timeIntervalSince1970: TimeInterval(windowEndEpoch * RotatingDiscoveryIds.epochSeconds)) : nil }
 }

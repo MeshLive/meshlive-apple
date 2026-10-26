@@ -55,9 +55,9 @@ public struct NodeCapabilities: Equatable {
     public static let transportClassic: UInt8 = 1
     public static let transportL2CAP: UInt8 = 1 << 1
     public static let transportGATT: UInt8 = 1 << 2
-    /// Android private-call relay chain capability (signed in link hellos only).
     /// EXPERIMENTAL rotating discovery IDs: sends and accepts BDO1 as the first hop record (link hellos only).
     public static let transportDiscoveryOpening: UInt8 = 1 << 3
+    /// Android private-call relay chain capability (signed in link hellos only).
     public static let transportCallRelay: UInt8 = 1 << 6
     /// Experimental call video fragments (end-to-end hellos only).
     public static let transportVideoFragments: UInt8 = 1 << 7

@@ -99,7 +99,6 @@ final class Gr1History {
     private var entries: [Entry] = []
     private(set) var heldBytes = 0
     private(set) var lastSent: UInt32?
-    var heldValues: Int { entries.count }
 
     func record(_ sequence: UInt32, _ value: Data, now: TimeInterval) {
         entries.append(Entry(sequence, Data(value), now)); heldBytes += value.count; lastSent = sequence
@@ -153,8 +152,6 @@ public final class GattChunkRecovery {
     private var holes: [Hole] = []
     private var highHeard: UInt32?
     private var nackTimes: [TimeInterval] = []
-    /// Set by a GONE or HIGH the reader must act on at its next update.
-    var goneReason: String?
 
     public init(log: @escaping (String) -> Void) { self.log = log }
 

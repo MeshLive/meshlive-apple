@@ -31,8 +31,6 @@ struct MonoList: ViewModifier {
 }
 extension View {
     func monoList() -> some View { modifier(MonoList()) }
-    /// Row background for flat lists.
-    func monoRow() -> some View { listRowBackground(Palette.ground).listRowSeparatorTint(Palette.outline) }
 }
 
 /// Section footer text for flat lists (footnote, grey): plain lists do not style footers.
@@ -61,36 +59,6 @@ struct RowLabel: View {
     }
 }
 
-/// The one status line: state and what it means; an action only when something is wrong.
-struct StatusRow: View {
-    let title: String, detail: String
-    var ok: Bool
-    var action: (title: String, perform: () -> Void)? = nil
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            RowLabel(title: title, subtitle: detail, icon: ok ? AppIcon.ready : AppIcon.problem, tint: ok ? Palette.connected : Palette.ink)
-            if let action { SecondaryButton(title: action.title, action: action.perform) }
-        }
-        .accessibilityAddTraits(.updatesFrequently)
-    }
-}
-
-/// Primary action: amber, prominent, large (one per screen).
-struct PrimaryButton: View {
-    let title: String
-    var systemImage: String? = nil
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            Group {
-                if let systemImage { Label(title, systemImage: systemImage) } else { Text(title) }
-            }
-            .font(Typo.heading).frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent).controlSize(.large).tint(Palette.accent).foregroundStyle(Palette.onAccent)
-    }
-}
-
 /// Secondary action: bordered, white text.
 struct SecondaryButton: View {
     let title: String
@@ -104,35 +72,6 @@ struct SecondaryButton: View {
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered).controlSize(.large).tint(Palette.ink)
-    }
-}
-
-/// Destructive action: white outline, never red (red is reserved for live).
-struct DestructiveButton: View {
-    let title: String
-    var systemImage: String? = nil
-    let action: () -> Void
-    var body: some View {
-        Button(role: .destructive, action: action) {
-            Group {
-                if let systemImage { Label(title, systemImage: systemImage) } else { Text(title) }
-            }
-            .font(Typo.heading).frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.bordered).controlSize(.large).tint(Palette.ink)
-    }
-}
-
-/// A dismissible notice row (for example "Couldn't reach ...").
-struct NoticeRow: View {
-    let text: String
-    let dismiss: () -> Void
-    var body: some View {
-        Button(action: dismiss) {
-            Label { Text(text).font(Typo.secondary).foregroundStyle(Palette.ink).multilineTextAlignment(.leading) }
-                icon: { Image(systemName: AppIcon.problem).fontWeight(.light).foregroundStyle(Palette.dimInk) }
-        }
-        .accessibilityHint("Dismiss")
     }
 }
 

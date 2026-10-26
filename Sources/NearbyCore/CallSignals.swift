@@ -104,7 +104,6 @@ public final class VoiceCallNegotiation {
     /// iOS always supports the voice experiment (it is the default way to call from an iPhone).
     public var localType: CallType { role == .caller ? requested : (peerOfferedVoice ? .voice : requested) }
     public func inviteSignals() -> [PrivateCallSignal] { localType == .voice ? [.invite, .cameraOff] : [.invite] }
-    public func acceptSignals() -> [PrivateCallSignal] { localType == .voice ? [.accept, .cameraOff] : [.accept] }
     /// Camera off/on while ringing changes the offered type (callee). Returns true when it changed.
     @discardableResult
     public func onRemoteCameraSignal(phase: PrivateCallPhase, enabled: Bool) -> Bool {
