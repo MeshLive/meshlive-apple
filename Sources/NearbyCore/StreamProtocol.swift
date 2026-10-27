@@ -14,7 +14,7 @@ public enum StreamProtocol {
     public static let flagDiscardable: UInt8 = 128
     public static let codecVP9: UInt8 = 2
     public static let codecAV1: UInt8 = 3
-    /// Proposed (PROTOCOL addendum B): accepted only when `h264Enabled`.
+    /// Proposed (Interop/ANDROID_DISCOVERY_ADDENDUM.md section B): accepted only when `h264Enabled`.
     public static let codecH264: UInt8 = 4
     public static var h264Enabled = false
     public static let audioCodecNone: UInt8 = 0

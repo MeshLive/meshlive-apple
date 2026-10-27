@@ -1,6 +1,6 @@
 import Foundation
 
-/// A call that arrives while the user is dialling (Android F14 DialCollision). No wire change: Decline with BUSY (2).
+/// A call that arrives while the user is dialling (Android DialCollision). No wire change: Decline with BUSY (2).
 /// - A call from anyone else while the user's own dial is still looking for its person is declined as busy at once
 ///   (no ring), and the dial goes on.
 /// - A call from the very person being dialled is that conversation: it rings and the user's own dial stops. This is

@@ -57,7 +57,7 @@ public final class StreamViewerEngine: MeshConnection {
     ///   - decodeMask: codecs this phone can actually decode.
     ///   - maxChildren: 1 when this iPhone offers to forward the stream (viewer-forwarder), else 0.
     /// EXPERIMENTAL rotating IDs phase 1b: the selected offer carries a role-1 rotating ID (Android version 5), so the
-    /// connector must open it in its link BDO1 (RV15, with the RD4 epoch window) instead of matching a fixed prefix.
+    /// connector must open it in its link BDO1 instead of matching a fixed prefix.
     public let rotatingOffer: DiscoveryAnnouncement?
     private let wallEpoch: () -> Int64
     /// Experimental audio-only live: the selected offer carried the `0x40` marker. The header must agree
@@ -365,7 +365,7 @@ public final class StreamViewerEngine: MeshConnection {
 
     public var silentTimeout: TimeInterval { transport == .gatt ? 6 : 8 }
 
-    /// Measured link reports (Android viewers, workstream B, always on there): the parent link's arrival rate from
+    /// Measured link reports (Android viewers, always on there): the parent link's arrival rate from
     /// record trains (`ArrivalTrainMeter`) goes to the parent at most once a second when a new train was measured, so a
     /// source or relay paces to what this link delivers. This viewer has no adaptive playout clock, so the report never
     /// says late and adds no delay. Off (control arm), only the on-time reports remain.
@@ -573,7 +573,7 @@ public final class StreamSourceEngine: MeshConnection {
         }
     }
 
-    /// Hop-local listener withdrawal (PROTOCOL "Health and withdrawal"): more than 20% of the records queued for this
+    /// Hop-local listener withdrawal (Android protocol reference "Health and withdrawal"): more than 20% of the records queued for this
     /// listener shed over 10 s, or its oldest queued record older than 30 s, withdraws the route so it reroutes.
     private func checkAudioHealth(now: TimeInterval) -> Bool {
         if audioAgeBound {

@@ -30,7 +30,7 @@ public final class SecureLink {
     public private(set) var presentedCapabilities: NodeCapabilities
     /// BMH3 only: the peer's block declared a throwaway key / this phone presented one.
     public private(set) var peerPseudonymous = false
-    /// Design OR: the `RELAY_SEEK` bits the BMH3 responder signed (0 for BMH2 or none).
+    /// Route search: the `RELAY_SEEK` bits the BMH3 responder signed (0 for BMH2 or none).
     public private(set) var peerRelaySeek: UInt8 = 0
     public private(set) var ownPseudonymous = false
     public private(set) var usedBmh3 = false

@@ -1,4 +1,4 @@
-> **Experimental, default off.** This is the original standalone v1 (Noise XX) protocol of the first iPhone prototype. It cannot talk to Android. The app now speaks the Android protocol (see ../PROTOCOL.md).
+> **Experimental, default off.** This is the original standalone v1 (Noise XX) protocol of the first iPhone prototype. It cannot talk to Android. The app now speaks the Android protocol (the Android project's protocol reference, docs/dev/protocol/).
 
 # Experimental v1 wire protocol (`NearbyIntercom/v1`)
 

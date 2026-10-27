@@ -8,7 +8,7 @@ public enum SecureRecordType: UInt8 {
     case groupControl = 8, routeControl = 9, routeControlAck = 10
     /// Experimental store-and-forward; rejected unless a reader explicitly opts in.
     case storeForward = 11
-    /// EXPERIMENTAL relayed calls (Design C): `BRS1` SETUP/READY/FAIL, rejected unless the reader opted in.
+    /// EXPERIMENTAL relayed calls : `BRS1` SETUP/READY/FAIL, rejected unless the reader opted in.
     case relaySetup = 12
     /// EXPERIMENTAL rotating discovery IDs: the BDO1 link opening, only as the first hop record each way when
     /// both link hellos carry bit 3; anywhere else it is rejected like an unknown type.
@@ -93,7 +93,7 @@ public final class SecureRecordOpener {
     }
 }
 
-/// Link heartbeat payloads (PROTOCOL "Lifecycle, liveness and route withdrawal").
+/// Link heartbeat payloads (Android protocol reference "Lifecycle, liveness and route withdrawal").
 public struct LinkCapacityReport: Equatable {
     public var arrivalKbps: Int
     public var linkLate: Bool

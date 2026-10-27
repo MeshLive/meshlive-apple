@@ -1,6 +1,6 @@
 import Foundation
 
-// Reach pages (Android ReachPage.kt; PROTOCOL "Reach page"): the manufacturer 0xFFFF scan response of a relay's legacy,
+// Reach pages (Android ReachPage.kt; Android protocol reference "Reach page"): the manufacturer 0xFFFF scan response of a relay's legacy,
 // non-connectable set. `version 4 | relay prefix (6) | relay flags | page (index << 4 | count) | entries (1..2) x
 // (target (6) | cost << 5 | age units | via (2))`, 18 or 27 bytes. Version 6 is the same layout with role-0 RDIs.
 

@@ -212,7 +212,7 @@ final class AudioLiveTests: XCTestCase {
 
 /// Android StreamRoutePenalties: route-local hints, authenticated-node scope, expiry and bounded storage.
 final class StreamRoutePenaltyTests: XCTestCase {
-    /// PROTOCOL "Penalties are scoped to the attempted route" (QV R1): a marker mismatch seen over an authenticated
+    /// Android protocol reference "Penalties are scoped to the attempted route": a marker mismatch seen over an authenticated
     /// link costs only that route; the honest source behind it stays reachable on its other routes for 10 minutes.
     func testAMarkerMismatchNeverPenalisesTheAuthenticatedNode() throws {
         let p = StreamRoutePenalties()

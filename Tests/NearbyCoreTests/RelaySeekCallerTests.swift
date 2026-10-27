@@ -1,7 +1,7 @@
 import XCTest
 @testable import NearbyCore
 
-/// Design OR caller side, ported from Android RelaySeekTest: selectors, rings, memory, first hops, the planner order.
+/// Route searches, caller side, ported from Android RelaySeekTest: selectors, rings, memory, first hops, the planner order.
 final class RelaySeekCallerTests: XCTestCase {
     private func d(_ hex: String) -> Data { Data(hex: hex)! }
     private lazy var ids: [Int64: Data] = [99: d("aaaaaaaaa099"), 100: d("aaaaaaaaa100"), 101: d("aaaaaaaaa101")]

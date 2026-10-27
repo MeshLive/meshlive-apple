@@ -44,7 +44,7 @@ public enum CallRelayChain {
     /// The call-offer capabilitySummary bits a relayed offer keeps: the codec bits (0-2) and the relay-consent bit 4
     /// (0x10). Bit 3 (0x08, Android's dual-listening CoC hint, d58b604) is cleared: a relay is single-bearer, a
     /// caller ignores the hint at route cost above 0, and the compact encoder would throw on it and stop the relay
-    /// advertising (PROTOCOL "Experimental dual listening", Announcement hint). Bits 5-7 stay zero.
+    /// advertising (Android protocol reference "Experimental dual listening", Announcement hint). Bits 5-7 stay zero.
     public static let relayedSummaryMask: UInt8 = NodeCapabilities.codecMask | CompactAnnouncement.relayConsent
 
     /// The relayed offer: the callee's prefix, call + relay flags, the child's cost + 1.
@@ -91,15 +91,15 @@ public final class CallRelayLink: MeshConnection {
 
     /// - Parameter bmh3: EXPERIMENTAL BMH3 on this hop (Android: a relay is an R_FIRST responder toward its parent and an
     ///   initiator toward its child, always with its real key; nil = BMH2 only).
-    /// Design C onward link: the next hop's `BDO1` must open this offer when it answers with a real key (rotating IDs).
+    /// Relayed-call onward link: the next hop's `BDO1` must open this offer when it answers with a real key (rotating IDs).
     public let openingCheck: DiscoveryAnnouncement?
     /// Called once the link is authenticated and, when one was negotiated, the peer's opening checked.
     public var onReady: (() throws -> Void)?
     /// The peer failed this link's own identity checks (prefix, opening).
     public private(set) var identityRejected = false
 
-    /// - Parameter relaySetup: Design C helper link: the hello also signs bit 4 ("understands RELAY_SETUP").
-    /// - Parameter openingCheck: Design C onward link toward a rotating hop: sign bit 3 and check its `BDO1`.
+    /// - Parameter relaySetup: Relayed-call helper link: the hello also signs bit 4 ("understands RELAY_SETUP").
+    /// - Parameter openingCheck: Relayed-call onward link toward a rotating hop: sign bit 3 and check its `BDO1`.
     public init(role: HandshakeRole, transport: MeshTransport, identity: SigningIdentity, bmh3: Bmh3CallSettings? = nil, relaySetup: Bool = false,
                 openingCheck: DiscoveryAnnouncement? = nil, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
         self.openingCheck = openingCheck
@@ -142,7 +142,7 @@ public final class CallRelayLink: MeshConnection {
 
     public override func validateLinkPeer() throws {
         guard let id = link.peerNodeId, let caps = link.peerCapabilities else { throw ProtocolError.authentication }
-        // A declared throwaway is not bound by prefix (Amendment CP); a real key is.
+        // A declared throwaway is not bound by prefix (pseudonymous relay edges); a real key is.
         if let expectedPeerPrefix, !link.peerPseudonymous, id.prefix != expectedPeerPrefix { identityRejected = true; throw ProtocolError.authentication }
         // A real-key rotating hop must open the selected offer.
         if openingCheck != nil, !link.peerPseudonymous, caps.transportMask & NodeCapabilities.transportDiscoveryOpening == 0 {
@@ -215,7 +215,7 @@ public final class CallRelayHop {
     public let hiddenIdentities: Bool
     private let pins: Bmh3Pins?
 
-    /// Amendment CP (pseudonym mode with `test_relayed_pseudonymous_edges` on): the child hop always speaks BMH3 with a
+    /// pseudonymous relay edges (pseudonym mode with `test_relayed_pseudonymous_edges` on): the child hop always speaks BMH3 with a
     /// declared throwaway, fresh for this connection, no tag and nothing pinned. A child that answers with a real key
     /// must be the callee at route cost 0; a child that declared a throwaway is not bound (the caller's end-to-end check
     /// authenticates the callee).

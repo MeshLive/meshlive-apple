@@ -1,8 +1,8 @@
 import Foundation
 import CryptoKit
 
-// Experimental audio-only live streams ("radio"): Android AudioLiveProtocol.kt. Wire rules: Android's protocol reference (docs/dev/protocol/streams.md)
-// "Experimental audio-only live streams" in the Android project; design and reasons: DECISIONS "Design AL".
+// Experimental audio-only live streams ("radio"): Android AudioLiveProtocol.kt. Wire rules: the Android project's
+// protocol reference (docs/dev/protocol/streams.md, "Experimental audio-only live streams").
 // The offer marker, the BTL1 header with its signer block, source-signed records and the receiver's guard
 // (Opus profile, ingress budgets, clock rules). Nothing here touches video streams.
 
@@ -370,7 +370,7 @@ public final class AudioLiveStreamGuard {
     }
 }
 
-/// Android StreamRoutePenalties (Design AL review 17). A forged advert never bans a logical stream.
+/// Android StreamRoutePenalties. A forged advert never bans a logical stream.
 /// The app owns this bounded, process-local table on its main queue.
 public final class StreamRoutePenalties {
     public struct Route: Equatable {
@@ -388,7 +388,7 @@ public final class StreamRoutePenalties {
     public init() {}
 
     /// What a viewer records when the offer's audio-only marker disagreed with the authenticated header: the
-    /// advertising route only, never the node behind it, even over an authenticated link (PROTOCOL "Penalties are
+    /// advertising route only, never the node behind it, even over an authenticated link (Android protocol reference "Penalties are
     /// scoped to the attempted route", Design QV review R1). The marker is in the unauthenticated advert, so a phone
     /// that re-advertises an honest source's stream with a false marker must not get that source refused.
     public func onMarkerMismatch(_ route: Route, now: TimeInterval) {

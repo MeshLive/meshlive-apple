@@ -54,10 +54,10 @@ the compact UUID); and hardware VP9/AV1 encoding (the iPhone encodes VP9 in soft
 **Not implemented yet:** store-and-forward messages, group (BGK1) relays, relay re-anchor and parent-silence recovery,
 the route-recovery hint and CallKit. See [testing](testing.md#remaining-work).
 
-## Relayed calls (Design C) on Apple
+## Relayed calls on Apple (Experimental)
 
-Experimental and off ("Relayed calls"); the wire and rules are Android's (PROTOCOL "Experimental relayed calls" and
-"Draft: on-demand route seek"), with byte-exact vector tests. None of it has run on a phone yet.
+Experimental and off ("Relayed calls"); the wire and rules are Android's (relayed calls and route searches in the
+Android project's protocol reference, docs/dev/protocol/), with byte-exact vector tests. None of it has run on a phone yet.
 
 - **Target.** With the switch on the call offer carries the consent bit and every call link hello signs bit 4. A
   relayed call (the Invite says so, or the link peer is not the call peer) rings only with the switch on, a relayed
@@ -66,7 +66,7 @@ Experimental and off ("Relayed calls"); the wire and rules are Android's (PROTOC
   two reach tables (`ReachTable`). A saved contact reachable only through helpers is listed "Via N phone(s) · not
   confirmed"; dialling it connects to the first helper, sends `SETUP` after the link handshake and starts the call after
   `READY` (`CallEngine` with `RelayedCallOptions`). The first hop is bound to the chosen helper unless it declared a
-  throwaway (Amendment CP); failures skip the pair and the next helper is tried (at most 3 within 60 s). A Contacts call
+  throwaway (a pseudonymous relay edge); failures skip the pair and the next helper is tried (at most 3 within 60 s). A Contacts call
   to someone not listed waits up to 45 s and, with route searches on, starts a search (below).
 - **Helper.** With "Help calls nearby" on and the device idle and not paused, the call offer carries the helper flag
   and the listener signs bits 4 and 6. A first record `SETUP` hands the listener's authenticated link to a
@@ -75,18 +75,18 @@ Experimental and off ("Relayed calls"); the wire and rules are Android's (PROTOC
 - **The reach-page limitation.** CoreBluetooth cannot advertise manufacturer data, so an iPhone or Mac publishes no
   reach pages: callers never learn a route through an Apple helper from pages, and an Apple helper answers `SETUP` only
   for targets it hears itself or learned from Android helpers' pages.
-- **Route searches (Design OR) are the Apple path.** With `-relayedOnDemand YES` (and rotating IDs and hidden
+- **Route searches (Experimental) are the Apple path.** With `-relayedOnDemand YES` (and rotating IDs and hidden
   identities) a helping listener signs BMH3 `RELAY_SEEK` and answers `SEEK` from what it scans: the target whose role-0
   ID gives the token, or for two relays a next helper with a regenerated `SEEK`, within search budgets. The Apple caller
   searches the same way for a contact that is not listed (rings 1, 1b near an epoch boundary, and 2 with a skip list;
   give-up at 45 s; the contact's own offer appearing first wins). Searches need no pages, so Apple helpers are found.
-- **Admission** (`RelayHelperGate`, review 2026-10-27): the rotating-helper and control-arm refusals, then switches,
+- **Admission** (`RelayHelperGate`): the rotating-helper and control-arm refusals, then switches,
   pause (Low Power Mode, heat, battery) and busy, then the SETUP rate limiter keyed by the parent's prefix, or for a
   throwaway parent by CoreBluetooth's per-peer identifier (unknown: only the overall cap); a relay that reached READY
   and satisfied the chain guard refunds its token. Searches are bounded by their own budgets.
 - **Consent** is its own sub-switch ("Let phones nearby relay calls to me"): without it the offer carries no consent
   bit and a callee closes, unanswered, on the first end-to-end record from a link peer that signed the relay mark.
-- **Not built:** client puzzles (OR-PZ) and the automatic-retry backoff use (the memory exists).
+- **Not built:** client puzzles for searches and the automatic-retry backoff use (the memory exists).
 
 ## Screens and design
 

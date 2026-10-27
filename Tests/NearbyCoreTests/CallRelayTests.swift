@@ -51,7 +51,7 @@ final class CallRelayTests: XCTestCase {
         XCTAssertEqual(decoded.routeCost, 2); XCTAssertEqual(decoded.nodeIdPrefix, callee.prefix)
     }
 
-    /// PROTOCOL "Experimental dual listening": a child offer may carry capabilitySummary bit 3 (0x08, dual-listening
+    /// Android protocol reference "Experimental dual listening": a child offer may carry capabilitySummary bit 3 (0x08, dual-listening
     /// hint) and bit 4 (0x10, relay consent). The relayed offer keeps the codec bits and the consent bit and clears
     /// everything else, so the compact encoder (which throws on an unrepresentable bit) still advertises it.
     func testRelayedOfferMasksTheDualHintAndKeepsConsent() throws {
@@ -272,7 +272,7 @@ final class CallRelayTests: XCTestCase {
         }
     }
 
-    // MARK: Amendment CP: pseudonymous relay edges
+    // MARK: Pseudonymous relay edges
 
     private func pseudonymousCalleeChain(edges: Bool, consent: Bool = true) throws -> (caller: CallEngine, callee: CallEngine, hop: CallRelayHop,
                                                                                          pairs: [(MeshConnection, MeshConnection)]) {

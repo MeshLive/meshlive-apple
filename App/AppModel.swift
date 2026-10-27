@@ -12,7 +12,7 @@ struct PersonRow: Identifiable, Equatable {
     let transport: MeshTransport
     let relays: Int
     let isIPhone: Bool
-    /// Experimental relayed calls (Design C): an on-demand route through helpers, dialled at `hopRowId`.
+    /// Experimental relayed calls : an on-demand route through helpers, dialled at `hopRowId`.
     var relayRoute: RelayRoute? = nil
     var hopRowId: UUID? = nil
     /// One plain sentence: where the person is, never technical words.
@@ -205,7 +205,7 @@ final class AppModel: ObservableObject {
         didSet { AppSettings.relayedCalls = relayedCalls; configureRelayedCalls(); refreshAdvertising(); rebuildLists() }
     }
 
-    /// Design C reach tables while "Relayed calls" is on; the rotating population only with rotating IDs on.
+    /// Relayed-call reach tables while "Relayed calls" is on; the rotating population only with rotating IDs on.
     func configureRelayedCalls() {
         guard let identity else { radio.configureRelayedCalls(on: false, rotating: false, ownPrefix: Data(), ownRdis: { [] }); return }
         let nodeId = identity.nodeId
@@ -251,7 +251,7 @@ final class AppModel: ObservableObject {
     let bmh3Pins = Bmh3Pins(storage: DesktopPreview.enabled ? nil : Bmh3PinFile())
     /// The BMH3 options of one call, or nil (BMH2 only). Mac compatibility can use a per-attempt
     /// pseudonym for a selected rotating offer independently of this Mac's own advertising setting.
-    /// The call listener's BMH3 options: RELAY_SEEK is signed while this device would admit a search (Design OR).
+    /// The call listener's BMH3 options: RELAY_SEEK is signed while this device would admit a search (route search, Experimental).
     private func listenerBmh3Options() -> Bmh3CallOptions? {
         var options = bmh3Options(selected: nil)
         if relaySeekSigning { options?.relaySeek = RelaySeek.featureSeekV1 }
@@ -267,7 +267,7 @@ final class AppModel: ObservableObject {
         options.pseudonymousRelayEdges = AppSettings.relayedPseudonymousEdges
         #endif
         if rotatingIds {
-            // Phase 2: real keys between contacts through the lease-derived contact tag (PROTOCOL "Real lease keys").
+            // Phase 2: real keys between contacts through the lease-derived contact tag (Android protocol reference "Real lease keys").
             let vault = rotating.vault, pins = rotating.pins
             if let selected {
                 options.contactTag = PresenceContactTags.initiatorTag(selected: selected, recognition: vault.recognition) { vault.leaseKey(of: $0, day: $1) }
@@ -319,9 +319,9 @@ final class AppModel: ObservableObject {
 
     private var reachTableEpoch: Int64?
 
-    /// At each epoch boundary: stop, stay silent a uniform 1-8 s (RV12), then advertise the new ID.
+    /// At each epoch boundary: stop, stay silent a uniform 1-8 s, then advertise the new ID.
     private func checkRotation() {
-        // Relayed calls (RV6): the rotating reach table flushes at this device's own boundary.
+        // Relayed calls: the rotating reach table flushes at this device's own boundary.
         if rotatingIds, radio.reachRotating != nil {
             let epoch = rotating.currentEpoch()
             if epoch != reachTableEpoch { if reachTableEpoch != nil { radio.reachRotating?.clear() }; reachTableEpoch = epoch }
@@ -335,7 +335,7 @@ final class AppModel: ObservableObject {
         #else
         guard rotatingIds, advertisedEpoch >= 0, boundarySilenceUntil == nil else { return }
         guard rotating.currentEpoch() != advertisedEpoch else { return }
-        // Phase 2: the recognition table follows the epoch (RV10).
+        // Phase 2: the recognition table follows the epoch.
         rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch())
         let silence = Double.random(in: 1...8)
         boundarySilenceUntil = Date().addingTimeInterval(silence)
@@ -736,7 +736,7 @@ final class AppModel: ObservableObject {
         refreshAdvertising()
     }
 
-    /// Busy rule (Android F14): an incoming call while this device is in a call, dialling or relaying finishes its
+    /// Busy rule (as Android): an incoming call while this device is in a call, dialling or relaying finishes its
     /// handshake as an ordinary (hidden) callee and is declined with BUSY before it rings. Glare (DialCollision): when
     /// the caller is the very person being dialled, their call rings instead and the user's own dial stops; whichever
     /// Invite arrives first while the other is still looking becomes the call. `-dialCollisionRing NO` is the control arm.
@@ -819,7 +819,7 @@ final class AppModel: ObservableObject {
     /// Asks for the microphone (and camera for video) first, so the system prompt never interrupts media.
     /// A call is just a call with Mute; while muted, holding Mute talks (no separate push-to-talk mode).
     func startCall(to person: PersonRow, type: CallType) {
-        relayDuty?.preempt()   // the user's own activity ends a relay at once (Design C, C5)
+        relayDuty?.preempt()   // the user's own activity ends a relay at once
         guard call == nil, !placingCall, identity != nil else { return }
         placingCall = true; callNotice = nil
         pendingDialTarget = dialTarget(for: person); dialSuperseded = false
@@ -882,7 +882,7 @@ final class AppModel: ObservableObject {
         controller.connectHandle?.onStage = { [weak controller] stage in controller?.markStage(stage) }
     }
 
-    // MARK: Experimental relayed calls (Design C), caller
+    // MARK: Experimental relayed calls, caller
 
     /// One relayed dial's candidate routes (Android RelayCandidates): at most 3 helpers within 60 s of the tap.
     private struct RelayCandidates { var person: PersonRow; let type: CallType; let tappedAt: TimeInterval; var tried: [Data]; var firstDialAt: TimeInterval }
@@ -972,7 +972,7 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    // MARK: Experimental relayed calls (Design C), helper
+    // MARK: Experimental relayed calls, helper
 
     @Published var relayedCallsConsent = AppSettings.relayedCallsConsent {
         didSet { AppSettings.relayedCallsConsent = relayedCallsConsent; refreshAdvertising() }
@@ -980,7 +980,7 @@ final class AppModel: ObservableObject {
     @Published var relayedCallsHelp = AppSettings.relayedCallsHelp {
         didSet { AppSettings.relayedCallsHelp = relayedCallsHelp; refreshAdvertising() }
     }
-    /// The relayed call this device is passing on (at most one, PROTOCOL rule 7).
+    /// The relayed call this device is passing on (at most one, protocol rule).
     @Published var relayDuty: RelayDutyController?
     private let relaySetupLimiter = RelaySetupRateLimiter()
 
@@ -1023,7 +1023,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// A helper listener read SETUP or SEEK as its first record: admit it in PROTOCOL order (RelayHelperGate), take over
+    /// A helper listener read SETUP or SEEK as its first record: admit it in protocol order (RelayHelperGate), take over
     /// the link and dial the next hop from this device's own table, search for the target, or answer FAIL.
     func relaySetupRequested(by controller: CallController, message: RelaySetupMessage) {
         guard let request = RelayHelperDuty.Request(message), let identity,
@@ -1106,7 +1106,7 @@ final class AppModel: ObservableObject {
                 rotating.vault.entry(nodeId: identity.nodeId, epoch: epoch - 1, role: RotatingDiscoveryIds.roleCallOffer).rdi]
     }
 
-    // MARK: Design OR searches (helper)
+    // MARK: Route searches (helper)
 
     let relaySeekBudgets = RelaySeekBudgets()
     private let relaySeekFails = RelaySeekFailCache()
@@ -1119,7 +1119,7 @@ final class AppModel: ObservableObject {
             && relaySeekBudgets.signing(now: MeshRadio.reachClockMs)
     }
 
-    /// A search (PROTOCOL Design OR helper rules 2 and 5-11): the FAIL cache, then what this device heard (offers of the
+    /// A search (the route-search helper rules): the FAIL cache, then what this device heard (offers of the
     /// last 5 s, else up to 3 s more of its scan, keeping the onward minimum), collecting addresses for 1 s after the
     /// first match; the target's addresses first, then (budget 2) up to two next helpers; at most 3 dials; the final
     /// reason by rule 10. `plain` is a plain SETUP's ID searched without a token.
@@ -1231,7 +1231,7 @@ final class AppModel: ObservableObject {
         search()
     }
 
-    /// Amendment CP: an onward relay edge in pseudonym mode speaks BMH3 with a declared throwaway, fresh per
+    /// Pseudonymous relay edges: an onward relay edge in pseudonym mode speaks BMH3 with a declared throwaway, fresh per
     /// connection, no tag, nothing pinned; otherwise the direct-call choice with this device's real key.
     private func relayOnwardBmh3(hop: DiscoveryAnnouncement) -> Bmh3CallSettings? {
         guard hiddenIdentities else { return nil }
@@ -1276,10 +1276,10 @@ final class AppModel: ObservableObject {
         if seekAttempt != nil { seekAttempt = nil; AppLog.event("relayed_seek", ["role": "caller", "result": "cancelled"]) }
     }
 
-    // MARK: Design OR searches (caller)
+    // MARK: Route searches (caller)
 
     let relaySeekMemory = RelaySeekCallerMemory()
-    /// One search for a contact (PROTOCOL OR caller rules 1-7): ring requests through helpers this device hears, ending at
+    /// One search for a contact (route-search caller rule): ring requests through helpers this device hears, ending at
     /// READY, the contact's own offer, or 45 s.
     final class SeekAttempt {
         let contact: VerifiedContact, type: CallType, rings: RelaySeekRings, epoch: Int64, tappedAt: TimeInterval
@@ -1396,7 +1396,7 @@ final class AppModel: ObservableObject {
     }
 
     private func resumeContactDialWait() {
-        // Design OR caller rule 2: the contact's own offer appearing before READY ends the search and calls directly.
+        // Route-search caller rule: the contact's own offer appearing before READY ends the search and calls directly.
         if let attempt = seekAttempt, let direct = people.first(where: { $0.relayRoute == nil && $0.prefixHex == attempt.contact.nodePrefixHex }),
            let current = call, current.relayRoute?.seek != nil, !current.relayReady {
             AppLog.event("relayed_seek", ["role": "caller", "result": "direct"])
@@ -1419,7 +1419,7 @@ final class AppModel: ObservableObject {
         guard !controller.closedBeforeRinging, let prefix = controller.peerPrefixHex else { return }
         let seconds = controller.activeSince.map { Int(Date().timeIntervalSince($0)) } ?? 0
         let direction: CallRecord.Direction = controller.role == .caller ? .outgoing : (controller.activeSince == nil ? .missed : .incoming)
-        // Only a verified contact is kept by ID; anyone else by the generated name and the time (PROTOCOL "After the
+        // Only a verified contact is kept by ID; anyone else by the generated name and the time (Android protocol reference "After the
         // reveal").
         let contact = contactName(prefixHex: prefix) != nil
         CallHistory.add(CallRecord(prefixHex: contact ? prefix : "", direction: direction, video: controller.callType == .video,

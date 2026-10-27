@@ -4,7 +4,7 @@ import Foundation
 // responder's dispatch and cost guards, and the per-connection settings that SecureLink (link layer) and
 // EndToEndHandshake (end-to-end layer) read. With `Bmh3CallSettings` nil every byte is exactly BMH2 as before.
 
-/// Which handshake an initiator speaks, decided once before the first byte and never revisited (PROTOCOL "Negotiation").
+/// Which handshake an initiator speaks, decided once before the first byte and never revisited (Android protocol reference "Negotiation").
 public enum Bmh3Choice {
     public enum Reason: String { case off, rotating, only, hint, pin, none }
     /// Android `capabilitySummary` bit 5 of a version 2 private-call offer: "this identity accepts BMH3 handshakes".
@@ -71,7 +71,7 @@ public final class Bmh3Pins {
         let text: String
         do { text = try storage?.read() ?? "" }
         catch {
-            // Unreadable is not empty (review 2026-10-27): keep this session's pins in memory, never save over the
+            // Unreadable is not empty: keep this session's pins in memory, never save over the
             // stored ones (30-day downgrade protection), and try reading again next time.
             return
         }
@@ -146,10 +146,10 @@ public final class Bmh3CallSettings {
     public var contactTag: Bmh3ContactTag?
     /// Initiator: the tag applies at the link layer only toward the advert's owner (route cost 0), never a relay.
     public var linkTag: Bool = true
-    /// Initiator (Amendment CP): the link override is presented as a declared throwaway (extension PSEUDONYM), so a
+    /// Initiator (pseudonymous relay edges): the link override is presented as a declared throwaway (extension PSEUDONYM), so a
     /// pseudonym-mode answerer may answer with its own throwaway; false presents it as an undeclared key.
     public var declareLinkOverride = false
-    /// Responder (Design OR): the `RELAY_SEEK` bits this call listener signs while it would admit a search; nil none.
+    /// Responder (route search, Experimental): the `RELAY_SEEK` bits this call listener signs while it would admit a search; nil none.
     public var relaySeek: UInt8?
     /// Responder (phase 2): `K_tag` checks of this phone's own day keys against the adverts it has on air or just left.
     public var tagChecks: () -> [Bmh3ContactTag] = { [] }

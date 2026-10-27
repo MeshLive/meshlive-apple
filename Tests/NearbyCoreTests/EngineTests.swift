@@ -70,7 +70,7 @@ final class EngineTests: XCTestCase {
         }
     }
 
-    /// Connection review A3: a callee that completes the handshakes but never rings ends the caller's call after 15 s
+    /// As Android: a callee that completes the handshakes but never rings ends the caller's call after 15 s
     /// (not 60 s), with a plain reason; the control arm keeps waiting.
     func testACallerStopsWaitingForAnAnswerAfterFifteenSeconds() throws {
         for armed in [true, false] {
@@ -89,7 +89,7 @@ final class EngineTests: XCTestCase {
         }
     }
 
-    /// Busy rule (Android F14): a phone already in a call answers an Invite with Decline BUSY and never rings.
+    /// Busy rule (as Android): a phone already in a call answers an Invite with Decline BUSY and never rings.
     func testABusyPhoneDeclinesWithBusyBeforeRinging() throws {
         let (caller, callee, pipe, _, _) = try makeCall()
         var calleeEvents: [CallEngine.Event] = []
@@ -102,7 +102,7 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(caller.closeReason?.contains("busy") == true, caller.closeReason ?? "-")
     }
 
-    /// Glare (Android F14 DialCollision): only the person being dialled rings while a dial still looks for its person.
+    /// Glare (Android DialCollision): only the person being dialled rings while a dial still looks for its person.
     func testDialCollisionRingsOnlyThePersonBeingDialled() {
         XCTAssertEqual(DialCollision.decide(dialling: true, target: "a1b2c3d4e5f6", callerPrefix: "A1B2C3D4E5F6"), .ring)
         XCTAssertEqual(DialCollision.decide(dialling: true, target: "a1b2c3d4e5f6", callerPrefix: "0102030405a8"), .declineBusy)
@@ -635,7 +635,7 @@ final class AudioLiveSheddingTests: XCTestCase {
     }
 }
 
-/// PROTOCOL ingress budgets: reject an over-limit ciphertext from its length alone, before reading its body.
+/// Protocol ingress budgets: reject an over-limit ciphertext from its length alone, before reading its body.
 final class AudioLiveRecordLimitTests: XCTestCase {
     private func pair(_ transport: MeshTransport) throws -> (StreamSourceEngine, StreamViewerEngine, AudioLiveSigner) {
         let sourceId = SoftwareSigningIdentity(), viewerId = SoftwareSigningIdentity()

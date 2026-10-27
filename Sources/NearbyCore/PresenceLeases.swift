@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 
 // EXPERIMENTAL rotating discovery IDs, phase 2: daily keys, presence leases and recognition (Android
-// PresenceLeases.kt, RotatingEndpoint.kt PresenceSession; PROTOCOL "Keys and epochs" and "Recognition and presence
+// PresenceLeases.kt, RotatingEndpoint.kt PresenceSession; Android protocol reference "Keys and epochs" and "Recognition and presence
 // leases"). Pure and unit-tested against the Android vectors. A day key L_d is an independent random 32-byte key (the
 // GAEN daily key model): no master key, no derivation between days; every salt, the owner's own included, is keyed by
 // L_d(e). Mutual verified contacts exchange 28 days of keys in an answered call (BDX1 OFFER + LEASE).
@@ -121,7 +121,7 @@ public final class RecognitionTable {
     public static let staleAfter: TimeInterval = 14 * 24 * 3600
     public static let recognisedRoles: [UInt8] = [RotatingDiscoveryIds.roleCallOffer, RotatingDiscoveryIds.roleStreamOffer]
     private var table: [Data: [Hit]] = [:]
-    /// Design OR: each contact's search window (node ID -> centre, staleness, role-0 IDs by epoch).
+    /// Route search: each contact's search window (node ID -> centre, staleness, role-0 IDs by epoch).
     private var windows: [Data: RelaySeekSelectors.Window] = [:]
     private let lock = NSLock()
     public init() {}
@@ -150,7 +150,7 @@ public final class RecognitionTable {
         lock.lock(); table = next; windows = nextWindows; lock.unlock()
     }
 
-    /// Design OR: the search window of the one contact whose node ID starts with `prefixHex`; nil without IDs.
+    /// Route search: the search window of the one contact whose node ID starts with `prefixHex`; nil without IDs.
     public func seekWindow(prefixHex: String) -> RelaySeekSelectors.Window? {
         lock.lock(); defer { lock.unlock() }
         let hits = windows.filter { $0.key.hex.hasPrefix(prefixHex) }

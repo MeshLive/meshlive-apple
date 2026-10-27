@@ -1,7 +1,7 @@
 import XCTest
 @testable import NearbyCore
 
-/// Design C caller side: the caller dials a helper, sends SETUP after the link handshake, starts the endpoint handshake
+/// Relayed calls, caller side: the caller dials a helper, sends SETUP after the link handshake, starts the endpoint handshake
 /// only after READY, and fails cleanly on FAIL, a wrong helper, a helper without the marks, an invalid READY or silence.
 /// The helper here is scripted from `CallRelayLink`s (a parent that reads SETUP, a child it dials, records copied).
 final class RelayedCallSetupTests: XCTestCase {
@@ -151,7 +151,7 @@ final class RelayedCallSetupTests: XCTestCase {
         XCTAssertNotEqual(caller.state?.phase, .active)
     }
 
-    /// Amendment CP: in pseudonym mode the caller's link toward the helper is BMH3 with a declared throwaway (not its
+    /// Pseudonymous relay edges: in pseudonym mode the caller's link toward the helper is BMH3 with a declared throwaway (not its
     /// end-to-end attempt key); the helper answers with its real key, which must be the helper that was chosen.
     func testThePseudonymModeCallerDeclaresAThrowawayTowardTheHelper() throws {
         let net = Net()

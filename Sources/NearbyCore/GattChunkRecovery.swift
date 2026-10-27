@@ -1,7 +1,7 @@
 import Foundation
 
-/// Experimental `GR1` lost-chunk recovery (DECISIONS "Design GR" option C, PROTOCOL "Draft: lost-chunk recovery";
-/// Android GattChunkRecovery.kt). Every message is a type-2 GATT value, which every older reader ignores. The constants
+/// Experimental `GR1` lost-chunk recovery (Android GattChunkRecovery.kt; a draft in the Android project's protocol
+/// reference, docs/dev/protocol/). Every message is a type-2 GATT value, which every older reader ignores. The constants
 /// are part of the contract: every platform uses the same values. Default off (`-gattChunkRecovery YES` turns it on).
 public enum Gr1 {
     public static let type: UInt8 = 2

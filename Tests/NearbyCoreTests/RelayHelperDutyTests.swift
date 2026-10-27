@@ -1,7 +1,7 @@
 import XCTest
 @testable import NearbyCore
 
-/// Design C helper side: a call listener whose first record is SETUP hands its link to a duty, which dials the next
+/// Relayed calls, helper side: a call listener whose first record is SETUP hands its link to a duty, which dials the next
 /// hop (the target, or the next helper with a regenerated SETUP) and answers READY or FAIL upstream.
 final class RelayHelperDutyTests: XCTestCase {
     let vp9 = NodeCapabilities.codecVP9

@@ -24,11 +24,11 @@ public struct CallLabelOptions {
 
 /// EXPERIMENTAL rotating discovery IDs for one call (nil = off: every byte unchanged).
 public struct RotatingCallOptions {
-    /// Caller: the advert the user selected (a rotating one requires the BDO1 opening, RV15).
+    /// Caller: the advert the user selected (a rotating one requires the BDO1 opening).
     public var selected: DiscoveryAnnouncement?
     /// Callee: this phone's pinned role-0 opening entries (pin rule).
     public var entries: (() -> [OpeningEntry])?
-    /// The verifier's wall-clock epoch for the RD4 window of an opening.
+    /// The verifier's wall-clock epoch for the opening window of an opening.
     public var wallEpoch: () -> Int64
     /// Phase 2: the presence-lease exchange with a mutual verified contact (nil = no OFFER/LEASE).
     public var presence: PresenceCallHooks?
@@ -56,13 +56,13 @@ public struct PresenceCallHooks {
 }
 
 /// EXPERIMENTAL BMH3 for one call (Android "Hidden identities" and "Pseudonymous toward strangers"; nil = BMH2 only).
-/// EXPERIMENTAL relayed calls (Design C) for one call connection. With `featureOn` the link hello signs bit 4
+/// EXPERIMENTAL relayed calls for one call connection. With `featureOn` the link hello signs bit 4
 /// ("understands RELAY_SETUP"); a caller with `route` connects to the route's first helper, sends SETUP after the link
 /// handshake and starts the endpoint handshake only after READY.
 public struct RelayedCallOptions {
     public var featureOn: Bool
     public var route: RelayRoute?
-    /// Amendment CP: a first hop that declared a throwaway is not bound to the chosen helper (a real key still is).
+    /// Pseudonymous relay edges: a first hop that declared a throwaway is not bound to the chosen helper (a real key still is).
     public var pseudonymousEdges: Bool
     /// When the dial started (uptime): the 20 s setup deadline counts from here, connect time included.
     public var setupStartedAt: TimeInterval?
@@ -101,12 +101,12 @@ public struct Bmh3CallOptions {
     /// budget (Android `epoch`, review PR3). Nil keeps the process-wide pair.
     public var epoch: (() -> Int64)?
     public var epochGuards: Bmh3EpochGuards = Bmh3CallSettings.epochGuards
-    /// Amendment CP (Android `test_relayed_pseudonymous_edges`, on; false is the control arm): toward a relay the caller's
+    /// pseudonymous relay edges (Android `test_relayed_pseudonymous_edges`, on; false is the control arm): toward a relay the caller's
     /// fresh link throwaway declares PSEUDONYM instead of posing as a real key.
     public var pseudonymousRelayEdges = true
-    /// Design C: the first helper's own offer when the call takes an on-demand relayed route.
+    /// Relayed calls: the first helper's own offer when the call takes an on-demand relayed route.
     public var relayHop: DiscoveryAnnouncement?
-    /// Design OR (listener): the `RELAY_SEEK` bits signed while this device would admit a search; nil none.
+    /// route search (listener): the `RELAY_SEEK` bits signed while this device would admit a search; nil none.
     public var relaySeek: UInt8?
     public init(pseudonyms: Bool, selected: DiscoveryAnnouncement? = nil, pins: Bmh3Pins? = nil,
                 budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
@@ -117,7 +117,7 @@ public struct Bmh3CallOptions {
     func settings(role: PrivateCallRole, openingEntries: (() -> [OpeningEntry])?) -> Bmh3CallSettings? {
         switch role {
         case .caller:
-            // A Design C route decides BMH3 on its first helper's own offer (Android relayHopUsesBmh3).
+            // A relayed route decides BMH3 on its first helper's own offer (Android relayHopUsesBmh3).
             let choiceOffer = relayHop ?? selected
             let pinned = choiceOffer.map { pins?.isPinned($0.nodeIdPrefix) ?? false } ?? false
             guard Bmh3Choice.decide(enabled: true, only: pseudonyms, offer: choiceOffer, pinned: pinned).bmh3 else { return nil }
@@ -179,10 +179,8 @@ public final class CallEngine: MeshConnection {
     public static let heartbeatInterval: TimeInterval = 1
     public static let silentLinkTimeout: TimeInterval = 8
     public static let ringTimeout: TimeInterval = 60
-    /// A link that finished both handshakes must carry the call's Invite within this time, or a peer could hold an
-    /// authenticated link open with heartbeats and never ring. Apple-local for now (review 2026-10-27): the 10 s
-    /// matches Android's HOP_AUTH_MS, which bounds the caller's handshake wait; PROTOCOL gains the rule once Android
-    /// has the matching callee fix.
+    /// An authenticated link must carry an Invite within 10 s, or a peer could hold it open with heartbeats and never
+    /// ring (the same 10 s bounds a caller's handshake wait).
     public static let inviteTimeout: TimeInterval = 10
     public static let inviteTimeoutReason = "No call arrived after the secure setup"
 
@@ -264,7 +262,7 @@ public final class CallEngine: MeshConnection {
         }
     }
 
-    // MARK: Experimental relayed calls (Design C), caller side
+    // MARK: Experimental relayed calls, caller side
 
     private let relayedOptions: RelayedCallOptions?
     private var relayRoute: RelayRoute? { callRole == .caller ? relayedOptions?.route : nil }
@@ -272,7 +270,7 @@ public final class CallEngine: MeshConnection {
     private var relaySetupDeadline: TimeInterval?
     /// Relays the first hop reported in READY (nil until READY).
     public private(set) var relayReadyRelays: Int?
-    /// Why the relayed route failed before READY (a closure before READY counts as a timeout, PROTOCOL rule 5).
+    /// Why the relayed route failed before READY (a closure before READY counts as a timeout, protocol rule).
     public private(set) var relaySetupFailure: RelaySetupFailure?
     /// The hop answered something invalid (not a reason code): the route is skipped like a failure.
     public private(set) var relaySetupInvalid = false
@@ -299,7 +297,7 @@ public final class CallEngine: MeshConnection {
     }
 
     /// The first hop must be the chosen helper: a real key equals (fixed prefix) or opens (rotating) the helper's
-    /// offer; a declared throwaway is accepted only under Amendment CP. Its hello must show bits 4 and 6 and capacity.
+    /// offer; a declared throwaway is accepted only as a pseudonymous relay edge. Its hello must show bits 4 and 6 and capacity.
     private func relayHopProblem() -> (RelaySetupFailure, String)? {
         guard let route = relayRoute, let peer = link.peerNodeId, let caps = link.peerCapabilities else { return (.childAuthentication, "No first hop") }
         let throwaway = link.peerPseudonymous
@@ -327,7 +325,7 @@ public final class CallEngine: MeshConnection {
         do {
             acceptRelaySetup = true
             if let seek = route.seek {
-                // Design OR: a search goes only to a helper that signed RELAY_SEEK.
+                // Route search: a search goes only to a helper that signed RELAY_SEEK.
                 guard link.peerRelaySeek & RelaySeek.featureSeekV1 != 0 else { failRelay(nil, "The helping phone does not search for routes"); return }
                 try sendRelaySetup(.seek(budget: route.relays, remainingMs: remaining, setupId: id, nonce: seek.nonce, token: seek.token, skip: seek.skip))
             } else {
@@ -388,7 +386,7 @@ public final class CallEngine: MeshConnection {
         }
     }
 
-    // MARK: Experimental rotating discovery IDs (RV15)
+    // MARK: Experimental rotating discovery IDs
     private let rotatingOptions: RotatingCallOptions?
     private var selectedRotating: DiscoveryAnnouncement? { rotatingOptions?.selected.flatMap { $0.rotating ? $0 : nil } }
 
@@ -429,14 +427,14 @@ public final class CallEngine: MeshConnection {
     private var callerRevealDeadlineStart: TimeInterval?
     /// Test seam: a caller that never reveals itself (a misbehaving peer).
     var testingWithholdOwnReveal = false
-    /// Target-side rules for relayed calls (Android Design C target rule, Amendment CP): a relayed call is declined
+    /// Target-side rules for relayed calls (the relayed-call target rule): a relayed call is declined
     /// before it rings unless this phone's relayed calls are on, and a relayed stranger call also needs
     /// `acceptRelayedStrangerCalls`. The app sets both; they default to true only for the engine's own tests.
     public var acceptRelayedCalls = true
     public var acceptRelayedStrangerCalls = true
     /// Why an incoming call was declined before it rang, or nil.
     public private(set) var relayedDecline: RelayedCallPolicy.Incoming?
-    /// Android F14 busy rule: this phone is already in a call or dialling, so an Invite is declined with BUSY (wire
+    /// Busy rule (as Android): this phone is already in a call or dialling, so an Invite is declined with BUSY (wire
     /// value 2) before it rings; the caller shows "Busy" instead of a dropped link.
     public var declineAsBusy = false
     public private(set) var declinedBusy = false
@@ -455,7 +453,7 @@ public final class CallEngine: MeshConnection {
     /// Test seam: a callee that reads the Invite but never answers it (no Ringing).
     var testingIgnoreInvite = false
 
-    /// Android connection review A3: the caller's bound from hop authentication to the callee's Ringing (or Accept).
+    /// As Android: the caller's bound from hop authentication to the callee's Ringing (or Accept).
     /// Direct 15 s; relayed: the 20 s SETUP budget plus 10 s. `callerAnswerDeadline = false` is the control arm.
     public static let callerAnswerDirect: TimeInterval = 15
     public static let callerAnswerRelayExtra: TimeInterval = 10
@@ -483,7 +481,7 @@ public final class CallEngine: MeshConnection {
     private var openSince: TimeInterval?
     private var callerRevealPending: Bool { callRole == .callee && endpoint?.reveal?.peerRevealRequired == true }
 
-    /// Header and media from the peer (review 2026-10-27, both roles; Android CallMediaGate): allowed once the call was
+    /// Header and media from the peer (both roles; Android CallMediaGate): allowed once the call was
     /// answered and the peer's required reveal verified; late media after the end is dropped; anything else ends the
     /// call. The caller thus never decodes or shows a pseudonymous callee's video before its reveal, and nobody's
     /// media plays before the answer.
@@ -600,7 +598,7 @@ public final class CallEngine: MeshConnection {
 
     private func checkOpening(_ entries: [OpeningEntry]) throws {
         if let route = relayRoute {
-            // Design C rotating route: the first hop's opening must open the helper offer that was chosen.
+            // Relayed rotating route: the first hop's opening must open the helper offer that was chosen.
             if route.rotating, !link.peerPseudonymous, let peer = link.peerNodeId,
                DiscoverySelectionCheck.check(selected: RelayedCalls.helperOfferFor(route.helperPrefix, rotating: true),
                                              expectedRole: RotatingDiscoveryIds.roleCallOffer, peerNodeId: peer.bytes, openingEntries: entries,
@@ -639,7 +637,7 @@ public final class CallEngine: MeshConnection {
                 guard selected.routeCost > 0 || session.peerNodeId == link.peerNodeId else { throw ProtocolError.authentication }
                 awaitingReveal = true
             } else if selected.rotating {
-                // RV15: the check follows the selected version 5 offer. A direct call keeps the link opening and requires
+                // the check follows the selected version 5 offer. A direct call keeps the link opening and requires
                 // the endpoint to be the link peer; with bit 3 on both sides the callee's first record is its OPENING.
                 if selected.routeCost == 0 {
                     guard session.peerNodeId == link.peerNodeId, peerOpening != nil || link.usedBmh3 else { throw ProtocolError.authentication }
@@ -837,7 +835,7 @@ public final class CallEngine: MeshConnection {
             }
             ringingSince = now
             onEvent?(.phase(incoming.phase))
-            // Rotating IDs phase 1b: the OPENING goes first, ahead of any label or answer (RD6). A pseudonymous callee
+            // Rotating IDs phase 1b: the OPENING goes first, ahead of any label or answer. A pseudonymous callee
             // keeps its salt until its reveal at Accept.
             if discoveryNegotiated, endpoint?.reveal?.ownPseudonymous != true {
                 enqueue(.content(.discoveryExchange, 0, try DiscoveryExchange.encode(.opening(calleeEntries))), .control)

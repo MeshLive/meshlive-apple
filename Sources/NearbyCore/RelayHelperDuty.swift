@@ -1,7 +1,7 @@
 import Foundation
 
-// EXPERIMENTAL relayed calls (Design C), helper side (Android BluetoothPrivateCallRelay on-demand duty; PROTOCOL setup
-// rules 2-7). Sans-I/O: the app admits the request, dials the next hop and pumps the links; this object checks the next
+// EXPERIMENTAL relayed calls, helper side (Android BluetoothPrivateCallRelay on-demand duty; the relayed-call setup
+// rules). Sans-I/O: the app admits the request, dials the next hop and pumps the links; this object checks the next
 // hop, regenerates SETUP downstream, answers READY or FAIL upstream, enforces the one deadline, then copies the
 // endpoints' records opaquely (the helper never opens BME1) under the chain guard.
 
@@ -26,7 +26,7 @@ public struct RelayChainGuard {
     public var satisfied: Bool { handshakeSeen && answerSeen }
 }
 
-/// A helper listener's decision on its first-record SETUP or SEEK (PROTOCOL setup rule 2, Amendment CP, Design OR), in
+/// A helper listener's decision on its first-record SETUP or SEEK (setup and search rules), in
 /// order: the rotating-helper and control-arm refusals, the cheap switch, pause and busy checks, then the rate limiter
 /// (SETUP only; a SEEK is bounded by the search budgets), then the route. Pure apart from the limiter and budgets.
 public enum RelayHelperGate {
@@ -58,7 +58,7 @@ public enum RelayHelperGate {
 
     public static func decide(_ f: Facts, remainingMs: Int, limiter: RelaySetupRateLimiter, budgets: RelaySeekBudgets, nowMs: Int64,
                               routeAvailable: () -> Bool) -> Decision {
-        // Amendment CP: a rotating helper answers a fixed-prefix SETUP (message 1) with FAIL 5.
+        // Pseudonymous relay edges: a rotating helper answers a fixed-prefix SETUP (message 1) with FAIL 5.
         if !f.isSeek && f.rotatingHelper && !f.rotatingRequest && f.pseudonymousEdges { return .refuse(.refused, reason: "rotating_helper") }
         // Control arm parity: without pseudonymous edges a throwaway parent is never served.
         if f.pseudonymousParent && !f.pseudonymousEdges { return .refuse(.refused, reason: "throwaway_parent") }
@@ -94,7 +94,7 @@ public final class RelayHelperDuty {
         /// The target ID (a role-0 RDI on a rotating route). For a search, empty until the search found it.
         public var target: Data
         public let budget: Int, remainingMs: Int, setupId: Data, rotating: Bool
-        /// Design OR: a search (`SEEK`): the target is matched by token; a next helper gets a regenerated SEEK.
+        /// Route search: a search (`SEEK`): the target is matched by token; a next helper gets a regenerated SEEK.
         public let seek: Seek?
         public struct Seek: Equatable {
             public let nonce: Data, token: Data, skip: [Data]
@@ -129,12 +129,12 @@ public final class RelayHelperDuty {
     public let parent: CallRelayLink
     public private(set) var child: CallRelayLink?
     public private(set) var request: Request
-    /// Design OR: a next-hop attempt failed before READY; return true when the app will try another candidate (the
+    /// Route search: a next-hop attempt failed before READY; return true when the app will try another candidate (the
     /// duty then waits for the next `makeChildLink` instead of answering FAIL).
     public var onChildAttemptFailed: ((RelaySetupFailure) -> Bool)?
     /// The last child failure of a search (FAIL reason when nothing is left).
     public private(set) var lastChildFailure: RelaySetupFailure?
-    /// Design OR: the search matched this target RDI (budget-1 target link).
+    /// Route search: the search matched this target RDI (budget-1 target link).
     public func setSearchTarget(_ rdi: Data) { request.target = rdi.rebased }
     public private(set) var next: NextHop?
     public private(set) var state: State = .connectingNext
@@ -152,10 +152,10 @@ public final class RelayHelperDuty {
     /// - Parameters:
     ///   - parent: the authenticated parent link (adopted from the call listener) whose first record was the SETUP.
     ///   - now: when the SETUP was accepted; every later wait counts from it.
-    /// Amendment CP edges: a failed target dial is FAIL 4 (the pair is skipped briefly), not "no route", which would drop a
+    /// Pseudonymous relay edges: a failed target dial is FAIL 4 (the pair is skipped briefly), not "no route", which would drop a
     /// working table entry; the control arm keeps FAIL 1.
     public let pseudonymousEdges: Bool
-    /// Design OR: one deadline from the allowance (the request's time, shortened to the duty time left).
+    /// Route search: one deadline from the allowance (the request's time, shortened to the duty time left).
     public init(identity: SigningIdentity, transport: MeshTransport, parent: CallRelayLink, request: Request, now: TimeInterval,
                 allowanceMs: Int? = nil, pseudonymousEdges: Bool = true) {
         self.identity = identity; self.transport = transport; self.parent = parent; self.request = request
@@ -171,7 +171,7 @@ public final class RelayHelperDuty {
         failUpstream(reason, "Refused: \(reason.label)")
     }
 
-    /// The app chose the next hop: returns the onward link to start on the new connection (BMH3 per Amendment CP when
+    /// The app chose the next hop: returns the onward link to start on the new connection (BMH3 as a pseudonymous relay edge when
     /// `bmh3` is set). A real-key target must be `request.target` (or open it on a rotating route); a real-key helper
     /// must be `next.hopPrefix`; a declared throwaway is not bound (the caller's end-to-end check authenticates).
     public func makeChildLink(next: NextHop, bmh3: Bmh3CallSettings?, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) -> CallRelayLink {
@@ -187,7 +187,7 @@ public final class RelayHelperDuty {
             guard caps.supports(transport: transport.capabilityBit) else { throw ProtocolError.incompatible("Next hop did not authenticate the bearer") }
             if id == identity.nodeId { throw ProtocolError.state("The relay cannot be its own child") }
             if next.hopPrefix != nil, !RelayedCalls.linkAcceptsSetup(caps) { throw ProtocolError.state("Next relay did not authenticate as a relayed-call helper") }
-            // Review 2026-10-27: on a search the target must prove the sought ID; an unbound throwaway could be a copy.
+            // on a search the target must prove the sought ID; an unbound throwaway could be a copy.
             if next.hopPrefix == nil, request.seek != nil, self.child?.linkPeerPseudonymous == true { throw ProtocolError.state("A searched target answered with a throwaway") }
             childIdentityProblem = false
         }

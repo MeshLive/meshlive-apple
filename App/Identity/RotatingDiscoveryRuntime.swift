@@ -2,7 +2,7 @@ import Foundation
 import Security
 import NearbyCore
 
-/// EXPERIMENTAL rotating discovery IDs (Settings > Advanced, off): the presence vault (day keys and leases), the RV4 epoch clock, the opening pins, the stranger tarpit and
+/// EXPERIMENTAL rotating discovery IDs (Settings > Advanced, off): the presence vault (day keys and leases), the monotonic epoch clock, the opening pins, the stranger tarpit and
 /// the Visible-by-handle window. Call-ready presence advertises the role-0 RDI as compact UUID v2.
 final class RotatingDiscoveryRuntime {
     private let defaults = DesktopPreview.preferences
@@ -43,7 +43,7 @@ final class RotatingDiscoveryRuntime {
         return reading.epoch
     }
 
-    /// Role-0 entry for this epoch: the salt keyed by today's independent random day key (PROTOCOL "Keys and epochs").
+    /// Role-0 entry for this epoch: the salt keyed by today's independent random day key (Android protocol reference "Keys and epochs").
     func callEntry(nodeId: NodeId) -> OpeningEntry {
         vault.entry(nodeId: nodeId, epoch: currentEpoch(), role: RotatingDiscoveryIds.roleCallOffer)
     }

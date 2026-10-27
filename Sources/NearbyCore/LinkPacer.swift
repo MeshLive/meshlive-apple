@@ -4,7 +4,7 @@ import Foundation
 /// constants), so the backlog stays in the app queue (where audio goes first and rate control sees it) instead of in
 /// the Bluetooth stack. Until the child's first measurement the link is paced from a seed (the learned capacity, or a
 /// conservative prior); with no report the seed is halved every 2 s after a 4 s grace, down to 150 kbps. On-time
-/// reports from an unmeasured child hold the seed (DECISIONS "Starting pace of an unmeasured stream link"), and the
+/// reports from an unmeasured child hold the seed (the Android project's docs/dev/decisions/), and the
 /// on-time seed raise (default ON on Android since 2026-10-16) grows a held seed 25% per report, up to 1500 kbps,
 /// while this sender's own queue is at least 0.5 s old. All times are nanoseconds of a monotonic clock.
 public final class LinkPacer {

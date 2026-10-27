@@ -2,7 +2,7 @@ import XCTest
 import CryptoKit
 @testable import NearbyCore
 
-/// Relayed-call wire formats against Android's vectors (RelayedCallsWireTest, ReachRotatingTest, PROTOCOL).
+/// Relayed-call wire formats against Android's vectors (RelayedCallsWireTest, ReachRotatingTest, the Android protocol reference).
 final class RelayedCallsWireTests: XCTestCase {
     private func d(_ hex: String) -> Data { Data(hex: hex)! }
     private let target = Data(hex: "010203040506")!
@@ -111,7 +111,7 @@ final class RelayedCallsWireTests: XCTestCase {
         XCTAssertEqual(RelaySetupRateLimiter.key(parentPrefixHex: "aa", pseudonymous: false, peerIdentifier: peer), "aa")
     }
 
-    // MARK: Design OR SEEK (Android RelaySeekTest vectors)
+    // MARK: Route search SEEK (Android RelaySeekTest vectors)
 
     func testSeekTokenAndMessageMatchAndroidBytes() throws {
         let nonce = d("0102030405060708"), target = d("974ae410ea91")

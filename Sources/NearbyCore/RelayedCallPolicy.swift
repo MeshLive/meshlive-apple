@@ -1,7 +1,6 @@
 import Foundation
 
-// Relayed calls under the BMH3 pseudonym defaults (Android RelayIdentityPolicy; DECISIONS Design C "Amendment CP",
-// review CP-1). Pure rules: what a target does with a relayed call before it rings, and the ring status of a relayed
+// EXPERIMENTAL relayed calls under the BMH3 pseudonym defaults (Android RelayIdentityPolicy). Pure rules: what a target does with a relayed call before it rings, and the ring status of a relayed
 // stranger call.
 
 public enum RelayedCallPolicy {

@@ -1,10 +1,10 @@
-# Review of the iPhone discovery / H.264 addendum (Android owner, 2026-10-10)
+# iPhone discovery and optional H.264: Android review of the addendum (2026-10-10)
 
 ## Verdict
 
 **Section A** is sound. Android implements it behind a default-off switch, with the corrections below. The bit layout sums to 128 bits. All four vectors were recomputed independently in Python and by the Kotlin encoder and decoder.
 
-**Section B** has no bit conflicts, but it is not coded. It is a PLAN entry and needs a PROTOCOL design review on points B2-B6 first.
+**Section B** has no bit conflicts, but it is not coded. It is planned work and needs a protocol design review on points B2-B6 first.
 
 ## Corrections the iOS side must adopt (exact)
 
@@ -59,9 +59,9 @@
 
 ---
 
-# PROTOCOL addendum (proposal, for review): iPhone discovery and optional H.264
+# Protocol addendum (proposal): iPhone discovery and optional H.264
 
-Status: design proposal from the iOS owner, 2026-10-10. Nothing here changes BMH2, BMS1, BME1, BMC2, BTV3 framing, BFG1, BGK1 or any record type. Section A changes only discovery hints; section B adds an optional codec behind capability bits. Android ships section A behind default-off `test_ios_compact_discovery` / Advanced setting "Experimental: find iPhones"; section B is a PLAN entry, not coded (future flag `test_h264_codec`). [Review R9]
+Status: design proposal for the iPhone, 2026-10-10. Nothing here changes BMH2, BMS1, BME1, BMC2, BTV3 framing, BFG1, BGK1 or any record type. Section A changes only discovery hints; section B adds an optional codec behind capability bits. Android ships section A behind default-off `test_ios_compact_discovery` / Advanced setting "Experimental: find iPhones"; section B is planned, not coded (future flag `test_h264_codec`). [Review R9]
 
 ## A. Compact announcement in one 128-bit service UUID
 

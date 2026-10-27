@@ -67,7 +67,7 @@ public struct NodeCapabilities: Equatable {
     public static let endpointDiscoveryExchange: UInt8 = 1 << 3
     public static let codecVP9: UInt8 = 1
     public static let codecAV1: UInt8 = 1 << 1
-    /// Proposed (PROTOCOL addendum B, not yet in Android): H.264.
+    /// Proposed (Interop/ANDROID_DISCOVERY_ADDENDUM.md section B, not yet in Android): H.264.
     public static let codecH264: UInt8 = 1 << 2
     public static let codecMask: UInt8 = codecVP9 | codecAV1 | codecH264
     /// End-to-end call hello decode mask: prefer VP9 when the peer can encode it.

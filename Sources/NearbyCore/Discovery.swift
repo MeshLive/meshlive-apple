@@ -1,7 +1,7 @@
 import Foundation
 
 // BLE discovery: Android's 22-byte announcement (manufacturer data 0xFFFF), the iPhone compact
-// announcement UUID (PROTOCOL addendum A), route tokens and the GATT/CoC UUIDs.
+// announcement UUID (Interop/ANDROID_DISCOVERY_ADDENDUM.md section A), route tokens and the GATT/CoC UUIDs.
 
 public enum MeshUUIDs {
     /// Advertised by Android; primary service holding the CoC PSM characteristic.
@@ -162,7 +162,7 @@ public enum StreamRouteToken {
     }
 }
 
-/// iPhone compact announcement in one 128-bit service UUID (PROTOCOL addendum A, version 1, with review R1-R10).
+/// iPhone compact announcement in one 128-bit service UUID (Interop/ANDROID_DISCOVERY_ADDENDUM.md section A, version 1).
 /// Decoders reject exactly: wrong magic, version != 1, kind 3, paused with kind != stream offer, a call offer with
 /// any of bits 49..0 set, a viewer request with any of bits 11..0 set (review R2). Bitrate units are
 /// min(floor(kbps / 25), 127) (R4); a viewer request always carries a discovered route token (R3).

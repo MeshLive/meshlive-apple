@@ -117,7 +117,7 @@ public struct OutboundQueues {
     func oldestAge(now: TimeInterval) -> TimeInterval {
         [control.first, audio.first, video.first].compactMap { $0?.enqueuedAt }.min().map { now - $0 } ?? 0
     }
-    /// Audio-only live age bound (PROTOCOL "Age shedding"): when the oldest queued audio record is older than
+    /// Audio-only live age bound (Android protocol reference "Age shedding"): when the oldest queued audio record is older than
     /// `trigger`, drops the oldest whole records until the oldest is at most `keep` old. Only the audio queue is
     /// touched (signed media records); control (header, OpusHead, lifecycle) never sheds. Returns the count dropped.
     mutating func shedAudio(now: TimeInterval, trigger: TimeInterval, keep: TimeInterval) -> Int {
@@ -166,12 +166,12 @@ open class MeshConnection {
     public private(set) var closedWithError = false
     /// EXPERIMENTAL rotating discovery IDs: this side's BDO1 entries (a callee's pinned role-0 IDs; a caller none).
     public var discoveryOpeningEntries: (() -> [OpeningEntry])?
-    /// The peer's BDO1 entries arrived (the caller's RV15 check); throw to refuse the link.
+    /// The peer's BDO1 entries arrived (the caller's opening check); throw to refuse the link.
     public var onDiscoveryOpening: (([OpeningEntry]) throws -> Void)?
     /// The peer's opening, or nil when none was negotiated or it has not arrived.
     public private(set) var peerOpening: [OpeningEntry]?
     public private(set) var openingExpected = false
-    /// EXPERIMENTAL rotating IDs (RV8 tarpit): delay before the responder's link hello for this initiator.
+    /// EXPERIMENTAL rotating IDs (stranger tarpit): delay before the responder's link hello for this initiator.
     public var responderHelloDelay: ((NodeId) -> TimeInterval)?
     private var heldHello: (bytes: Data, releaseAt: TimeInterval)?
     private var responderHelloHandled = false
@@ -251,7 +251,7 @@ open class MeshConnection {
     /// BMH3: the link peer presented a throwaway key / this phone did.
     public var linkPeerPseudonymous: Bool { link.peerPseudonymous }
     public var linkUsedBmh3: Bool { link.usedBmh3 }
-    /// Design OR: the `RELAY_SEEK` bits the link peer signed as BMH3 responder.
+    /// Route search: the `RELAY_SEEK` bits the link peer signed as BMH3 responder.
     public var linkPeerRelaySeek: UInt8 { link.peerRelaySeek }
 
     /// Begins the connection once the byte stream is open. The initiator queues its link hello.
@@ -378,7 +378,7 @@ open class MeshConnection {
             try handleRelaySetupRecord(record)
             return
         }
-        // Design C first-record dispatch: once the endpoint handshake starts, a listener reads no SETUP.
+        // Relayed-call first-record dispatch: once the endpoint handshake starts, a listener reads no SETUP.
         if role == .responder, record.type == .endToEndHandshake, link.acceptRelaySetup { link.acceptRelaySetup = false }
         if phase == .endpointHandshake, role == .responder, record.type == .endToEndHandshake, !endpointHandshakeStarted {
             endpointHandshakeStarted = true

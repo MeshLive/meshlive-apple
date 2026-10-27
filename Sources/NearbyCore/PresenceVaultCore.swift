@@ -398,7 +398,7 @@ public final class PresenceVaultCore {
         return state?.contacts[contact.hex]?.leases[day]
     }
 
-    /// The lease for a verified contact (RD1): the window rolled and stored first, the delivery stored before the
+    /// The lease for a verified contact: the window rolled and stored first, the delivery stored before the
     /// lease is returned, keys and generation from the same state. Nil (nothing delivered) when any step fails, and
     /// always while a switch-off for the contact waits to be stored.
     public func deliverLease(to peer: NodeId, epoch: Int64, verified: Bool) -> DiscoveryExchange.PresenceLease? {

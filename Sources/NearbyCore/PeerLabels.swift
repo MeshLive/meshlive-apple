@@ -201,7 +201,7 @@ public enum SignedLabelCodec {
         catch { throw LabelRejected("truncated") }
     }
 
-    /// Receiver checks in PROTOCOL order; returns the kind or throws with a reason.
+    /// Receiver checks in protocol order; returns the kind or throws with a reason.
     @discardableResult
     public static func verify(_ label: SignedLabel, expectedSigner: NodeId, expectedBinding: LabelBinding) throws -> LabelKind {
         guard let kind = label.kind else { throw LabelRejected("unknown kind") }

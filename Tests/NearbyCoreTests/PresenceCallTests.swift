@@ -51,7 +51,7 @@ final class PresenceCallTests: XCTestCase {
                            rotating: calleeRotating, bmh3: pseudonyms.map { Bmh3CallOptions(pseudonyms: $0, budget: budget, wallEpoch: { e }) })
         try a.start(now: 0); try b.start(now: 0); pump(a, b)
         XCTAssertEqual(b.state?.phase, .incomingRinging, a.closeReason ?? b.closeReason ?? "")
-        XCTAssertTrue(caller.stored.isEmpty && callee.stored.isEmpty, "nothing moves before the call is answered (RD6)")
+        XCTAssertTrue(caller.stored.isEmpty && callee.stored.isEmpty, "nothing moves before the call is answered")
         try b.accept(as: .voice); pump(a, b)
         XCTAssertEqual(a.state?.phase, .active, a.closeReason ?? "")
         return (a, b)

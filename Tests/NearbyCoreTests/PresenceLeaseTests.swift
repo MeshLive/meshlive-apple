@@ -86,7 +86,7 @@ final class PresenceLeaseTests: XCTestCase {
         XCTAssertEqual(table.size, 22)
         XCTAssertEqual(table.lookup(own(presenceKey, nodeId, centre + 8, 1).rdi).count, 1)
         XCTAssertTrue(table.lookup(own(presenceKey, nodeId, centre - 8, 1).rdi).isEmpty)
-        // A lease does not resolve IDs before its first day (RD5) and expires after its 28 days.
+        // A lease does not resolve IDs before its first day and expires after its 28 days.
         let delivered = ContactPresence.receive(stored: nil, nodeId: nodeId, lease: delivery(presenceKey, 1, epoch + 96), myEpoch: epoch + 96, now: 0)
         table.rebuild([delivered], myEpoch: epoch + 96, now: 0)
         XCTAssertTrue(table.lookup(own(presenceKey, nodeId, epoch + 95, 0).rdi).isEmpty)

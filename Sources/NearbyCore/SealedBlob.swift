@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-/// Small local records sealed at rest with AES-GCM (review 2026-10-27, Android sealed stores): recent calls and BMH3
+/// Small local records sealed at rest with AES-GCM (as Android): recent calls and BMH3
 /// pins name peers by ID prefix, so they are not kept in plain text. The key is a this-device-only Keychain item;
 /// `purpose` is bound as associated data, so a blob of one store never opens as another. A blob that does not open
 /// (wrong key, damaged, another purpose) reads as absent, never as a crash.

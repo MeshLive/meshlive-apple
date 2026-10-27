@@ -1,7 +1,7 @@
 import XCTest
 @testable import NearbyCore
 
-/// Normative vectors of PROTOCOL addendum A (iPhone compact announcement UUID).
+/// Normative vectors of Interop/ANDROID_DISCOVERY_ADDENDUM.md section A (iPhone compact announcement UUID).
 final class CompactAnnouncementTests: XCTestCase {
     private let p1 = Data([1, 2, 3, 4, 5, 6])
     private let p2 = Data([0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6])

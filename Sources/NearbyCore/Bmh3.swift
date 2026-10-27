@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-// EXPERIMENTAL BMH3 identity-hiding handshake (Android Bmh3.kt; PROTOCOL "Experimental BMH3 identity-hiding link
+// EXPERIMENTAL BMH3 identity-hiding handshake (Android Bmh3.kt; Android protocol reference "Experimental BMH3 identity-hiding link
 // handshake"; executable specification tools/bmh3_reference.py in the Android repository). Pure state machines over
 // byte arrays, byte-for-byte checked against the Android vectors (Bmh3VectorTests). SIGMA in both reveal orders:
 // R_FIRST (three messages, the responder's identity block in msg2) and I_FIRST (four messages). The identity key only
@@ -100,7 +100,7 @@ public struct Bmh3Config {
     public let buildTag: BuildTag?
     /// What this phone presents to a peer that is not a recognised contact (rule P); nil: the real identity to everyone.
     public let stranger: Bmh3Presentation?
-    /// Design OR: the `RELAY_SEEK` bits this listener signs in its responder LINK block; nil signs nothing.
+    /// Route search: the `RELAY_SEEK` bits this listener signs in its responder LINK block; nil signs nothing.
     public let relaySeek: UInt8?
     public var identity: SigningIdentity { real.identity }
 
@@ -119,7 +119,7 @@ public struct Bmh3Config {
 /// Known extensions of one identity block; the area itself is always 112 bytes.
 public struct Bmh3Extensions: Equatable {
     public static let typePad: UInt8 = 0, typeOpening: UInt8 = 1, typeIntent: UInt8 = 2, typeBuildTag: UInt8 = 3, typePseudonym: UInt8 = 4
-    /// Design OR (draft): the feature bits of a listener that would admit a route search now; responder LINK blocks only.
+    /// Route search (Experimental): the feature bits of a listener that would admit a route search now; responder LINK blocks only.
     public static let typeRelaySeek: UInt8 = 5
     public static let criticalBit: UInt8 = 0x80
     public static let none = Bmh3Extensions()
@@ -217,7 +217,7 @@ public struct Bmh3Peer {
     public var buildTag: BuildTag? { extensions.buildTag }
     /// True when the peer's block declared its key a throwaway: never admit, pin or display it as an identity.
     public var pseudonymous: Bool { extensions.pseudonym }
-    /// Design OR: the `RELAY_SEEK` bits the peer signed (0 when none).
+    /// Route search: the `RELAY_SEEK` bits the peer signed (0 when none).
     public var relaySeek: UInt8 { extensions.relaySeek ?? 0 }
     public var fingerprint: IdentityFingerprint { IdentityFingerprint(publicKey: spki) }
     /// The opening entries the peer proved in its block, or nil when it sent none.

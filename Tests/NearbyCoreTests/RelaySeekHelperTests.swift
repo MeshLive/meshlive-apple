@@ -1,7 +1,7 @@
 import XCTest
 @testable import NearbyCore
 
-/// Design OR helper side: a listener that signed RELAY_SEEK reads a SEEK as its first record, matches the token against
+/// Route searches, helper side: a listener that signed RELAY_SEEK reads a SEEK as its first record, matches the token against
 /// offers it heard, and dials the target (whose opening must open the matched RDI) or, for budget 2, a next helper
 /// that gets a regenerated SEEK.
 final class RelaySeekHelperTests: XCTestCase {

@@ -99,7 +99,7 @@ final class PresenceVault {
         rebuildRecognition(myEpoch: epoch)
     }
 
-    /// The lease for a verified contact, recorded as delivered before it is returned (RD1); nil when not eligible.
+    /// The lease for a verified contact, recorded as delivered before it is returned; nil when not eligible.
     func deliverLease(to peer: NodeId, epoch: Int64, verified: Bool) -> DiscoveryExchange.PresenceLease? {
         core.deliverLease(to: peer, epoch: epoch, verified: verified)
     }

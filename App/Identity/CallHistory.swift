@@ -4,9 +4,9 @@ import CryptoKit
 import NearbyCore
 
 /// Local recent-calls history (Android v7 Home "Recent calls"): the last 20 calls on this device only, never sent
-/// anywhere. Sealed at rest (`SealedRecords`, review 2026-10-27), kept out of backups, so it does not move to a new
-/// device. A call with someone who is not a verified contact keeps only its generated name and the time (PROTOCOL
-/// "After the reveal", amending Phase 2 step 5): no ID, so a seized device holds no list of strangers' keys.
+/// anywhere. Sealed at rest (`SealedRecords`), kept out of backups, so it does not move to a new
+/// device. A call with someone who is not a verified contact keeps only its generated name and the time (as
+/// Android): no ID, so a seized device holds no list of strangers' keys.
 struct CallRecord: Codable, Identifiable, Equatable {
     enum Direction: String, Codable { case outgoing, incoming, missed }
     var id = UUID()
@@ -52,7 +52,7 @@ enum CallHistory {
 
 /// The records key in the Keychain (this device only, readable after the first unlock: a call can arrive while the
 /// phone is locked). Created add-only; a key that appeared meanwhile is read back. On the Mac it lives in the
-/// data-protection keychain (review 2026-10-27), where accessibility and device binding apply as on iOS; a build without
+/// data-protection keychain, where accessibility and device binding apply as on iOS; a build without
 /// the entitlement for it (`errSecMissingEntitlement`) falls back to the login keychain, and the log says which.
 final class KeychainRecordKeyStore: SealedRecordKeyStore {
     static let account = "records-key"

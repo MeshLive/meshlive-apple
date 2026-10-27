@@ -1,6 +1,6 @@
 import Foundation
 
-// EXPERIMENTAL Design OR, caller side (Android RelaySeekSelectors, RelaySeekRings, RelaySeekCallerMemory; PROTOCOL OR
+// EXPERIMENTAL route searches, caller side (Android RelaySeekSelectors, RelaySeekRings, RelaySeekCallerMemory; route-search rules
 // caller rules 1-7). Pure: the app supplies the contact's window, the first hops and the clock, and dials what `next`
 // returns.
 
@@ -35,7 +35,7 @@ public enum RelaySeekSelectors {
     }
 }
 
-/// One caller attempt's requests in expanding rings (PROTOCOL OR caller rule 4): ring 1 (budget 1, primary selector) to
+/// One caller attempt's requests in expanding rings (route-search caller rule): ring 1 (budget 1, primary selector) to
 /// each first hop, ring 1b (budget 1, neighbour selector) inside the boundary window, ring 2 (budget 2, primary, a skip
 /// list of the first hops that answered FAIL 1 in ring 1) with a relay cap of 2. Stops at READY; caps `N(S + 1)`
 /// requests and twice that many dials; a request is sent only while it fits its minimum allowance.
@@ -149,7 +149,7 @@ public final class RelaySeekCallerMemory {
     public func backoffMs(contact: String, now: Int64) -> Int64 { max(0, (backoff[contact]?.until ?? 0) - now) }
 }
 
-/// The first hops of a caller attempt (PROTOCOL OR caller rule 3): version 5 helper offers on the call's bearer heard in
+/// The first hops of a caller attempt (route-search caller rule): version 5 helper offers on the call's bearer heard in
 /// the last 10 s, not the contact itself, the helper that last reached this contact first, then the stronger signal; 3.
 public enum RelaySeekFirstHops {
     public static let freshMs: Int64 = 10_000

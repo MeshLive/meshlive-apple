@@ -73,7 +73,7 @@ final class CallAlertUITests: XCTestCase {
     }
 
     /// A call that stops ringing unanswered leaves a missed-call notification. The fixture caller is not a verified
-    /// contact, so (review 2026-10-27) it is neither named nor offered Call back.
+    /// contact, so it is neither named nor offered Call back.
     func testUnansweredCallLeavesAMissedCallNotificationWithCallBack() throws {
         guard env["NEARBY_ALERT_ANSWER"] == "allow" else { throw XCTSkip("needs NEARBY_ALERT_ANSWER=allow") }
         var app = openSettings()

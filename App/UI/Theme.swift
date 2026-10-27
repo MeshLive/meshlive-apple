@@ -107,7 +107,7 @@ struct PeerLabel: Equatable {
     let color: Color
     var monogram: String { ((contactName ?? selfName)?.first.map { String($0) } ?? (shortHandle.isEmpty ? "?" : String(shortHandle.prefix(1)))).uppercased() }
 
-    /// A rotating-ID advert (experimental): no handle and no contact match before the handshake (RV3).
+    /// A rotating-ID advert (experimental): no handle and no contact match before the handshake.
     static func nearbyPhone(seed: Data) -> PeerLabel {
         PeerLabel(title: "Nearby phone", handle: "", hue: Double(seed.last ?? 0) / 255)
     }

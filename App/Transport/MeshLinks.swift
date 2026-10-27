@@ -468,7 +468,7 @@ final class ConnectionDriver {
         // Sealing or send() can synchronously fail after the initial check.
         guard !releaseFailedEngine() else { return }
         if engine.phase == .closed && !gracefulCloseArmed {
-            // Android connection review A1: a local End/Cancel/Decline on a link that no longer drains must still finish
+            // As Android: a local End/Cancel/Decline on a link that no longer drains must still finish
             // (media, the radio slot and advertising come back): the link closes 2.5 s after the end whatever is queued.
             gracefulCloseArmed = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in

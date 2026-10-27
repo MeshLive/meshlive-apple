@@ -1,6 +1,6 @@
 import Foundation
 
-/// A link measures what it delivers from the media it already carries (Android `ArrivalTrainMeter`, workstream B).
+/// A link measures what it delivers from the media it already carries (as Android `ArrivalTrainMeter`).
 /// A sealed record is written back to back, so a large record crosses the link as a packet train: its bytes over its
 /// arrival time is the rate the link delivered then. The median train of the last 10 s is the estimate.
 ///

@@ -20,7 +20,7 @@ public enum SealedRead: Equatable {
     case unreadable(String)
 }
 
-/// Small local records sealed at rest (recent calls, BMH3 pins; review 2026-10-27): AES-GCM blobs (`SealedBlob`) in
+/// Small local records sealed at rest (recent calls, BMH3 pins): AES-GCM blobs (`SealedBlob`) in
 /// one directory under one key. When the key cannot be read nothing is written, never plain text instead; a blob that
 /// does not open reads as `unreadable` (callers must not overwrite it as if it were empty). Nothing is written once
 /// `latched` (after an emergency wipe in this run).

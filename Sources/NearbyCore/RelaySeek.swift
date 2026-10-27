@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-// EXPERIMENTAL Design OR (on-demand relayed route search, draft revision 3; Android RelaySeek.kt): a caller asks a
+// EXPERIMENTAL route search (on-demand relayed route search; Android RelaySeek.kt): a caller asks a
 // helper over the link with SEEK (hop type 12 message 5) and the helper looks for the target on demand, so no reach
 // page is needed. Effective only with relayed calls on and its own launch-argument switch.
 
@@ -49,7 +49,7 @@ public enum RelaySeek {
     }
 }
 
-/// What a helper tries for one search (PROTOCOL OR helper rules 7-9), from offers it heard itself: up to 3 target
+/// What a helper tries for one search (route-search helper rule), from offers it heard itself: up to 3 target
 /// sightings whose RDI gives the token (strongest first), and up to `fanout` version 5 helper offers on the same bearer
 /// whose RDI does not start with a skip prefix (budget 2 only). Peers are the app's dialable row IDs.
 public struct RelaySeekPlan<P> {
@@ -59,7 +59,7 @@ public struct RelaySeekPlan<P> {
     public init(offers allOffers: [OfferSighting<P>], nonce: Data, token: Data, skip: [Data], budget: Int, bearer: MeshTransport, ownRdis: [Data],
                 fanout: Int = RelaySeek.defaultFanout, badAddresses: Set<String> = [], plainId: Data? = nil) {
         let offers = allOffers.filter { !badAddresses.contains($0.address) }
-        // Heard twice first, then the stronger signal (PROTOCOL OR helper rule 7).
+        // Heard twice first, then the stronger signal (route-search helper rule).
         let strongest = offers.sorted { a, b in
             let ta = a.count >= 2, tb = b.count >= 2
             if ta != tb { return ta }

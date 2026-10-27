@@ -106,7 +106,7 @@ final class CallController: ObservableObject, Identifiable {
     @Published var remoteMuted = false
     @Published var ended: String?
     @Published var relayed = false
-    /// Design C: the on-demand route this caller dialled, and how it went.
+    /// Relayed calls: the on-demand route this caller dialled, and how it went.
     var relayRoute: RelayRoute?
     var relayConnectFailed = false
     var relayReady: Bool { engine.relayReadyRelays != nil }
@@ -130,7 +130,7 @@ final class CallController: ObservableObject, Identifiable {
     /// A search was not sent because the first hop did not sign RELAY_SEEK.
     var relaySeekRefusedLocally: Bool { engine.closeReason?.contains("does not search") == true }
 
-    /// Design C: this listener's link is taken over by a relay duty. The engine already stopped silently; the driver
+    /// Relayed calls: this listener's link is taken over by a relay duty. The engine already stopped silently; the driver
     /// stops without closing the link, timers stop, and nothing is shown or remembered. Returns the link.
     func abandonForRelay() -> (link: MeshLink, engine: CallEngine)? {
         guard let driver else { return nil }
@@ -198,7 +198,7 @@ final class CallController: ObservableObject, Identifiable {
                             decodeMask: VideoDecoderSupport.decodeMask, settings: settings, expectedPeerPrefix: expected, relayHops: relayHops,
                             labels: model.callLabelOptions(), rotating: rotating, bmh3: bmh3, relayed: relayedOptions)
         if rotating != nil, role == .callee {
-            // RV8 tarpit: strangers' link hellos wait 2^(n-6) s per epoch; verified contacts never wait.
+            // Stranger tarpit: strangers' link hellos wait 2^(n-6) s per epoch; verified contacts never wait.
             let runtime = model.rotating
             engine.responderHelloDelay = { [weak model] peer in
                 if model?.contacts.contains(where: { $0.nodePrefixHex == peer.prefix.hex }) == true { return 0 }
@@ -216,7 +216,7 @@ final class CallController: ObservableObject, Identifiable {
         remote.onFirstPicture = { [weak self] in self?.markStage("first_frame") }
         relayed = relayHops > 0
         engine.acceptRelayedCalls = model.relayedCalls && model.relayedCallsConsent
-        // Android connection review A3: 15 s (relayed 30 s) from hop authentication to Ringing; `-callerAnswerDeadline NO`.
+        // As Android: 15 s (relayed 30 s) from hop authentication to Ringing; `-callerAnswerDeadline NO`.
         engine.callerAnswerDeadline = AppSettings.labSwitch("callerAnswerDeadline", shipped: true)
         // EXPERIMENTAL overhead trim (Android test_call_audio_coalesce, off): `-callAudioCoalesce YES`.
         engine.queues.coalesceAudio = AppSettings.labSwitch("callAudioCoalesce", shipped: false)
@@ -855,9 +855,9 @@ final class WatchController: ObservableObject {
 
     /// When the join gives up waiting for the source (a link already in setup at that moment runs on).
     private var joinDeadline: TimeInterval = 0
-    /// The current link finished its hop handshake (Android review B9).
+    /// The current link finished its hop handshake (As Android).
     private var hopAuthenticated = false
-    /// The source ended the stream (its terminal record may still be on the way to a child, review S3).
+    /// The source ended the stream (its terminal record may still be on the way to a child).
     private var upstreamEnded = false
 
     private func armJoinTimeout(after seconds: TimeInterval) {
@@ -868,7 +868,7 @@ final class WatchController: ObservableObject {
         }
     }
 
-    /// Android review B9: a connection that failed before its hop handshake (a stranger, a stale dial, noise) no longer
+    /// As Android: a connection that failed before its hop handshake (a stranger, a stale dial, noise) no longer
     /// ends the join: it is dropped and the viewer waits again within the same deadline. `-watchKeepWaiting NO` is the
     /// control arm.
     private func linkFinished(_ reason: String) {
@@ -980,7 +980,7 @@ final class WatchController: ObservableObject {
             case .liveMutedCameraOff: state = "Muted, camera off"
             case .live: state = ""
             }
-            // An audio-only receiver never asks for a keyframe (PROTOCOL: no type 5 on a radio stream).
+            // An audio-only receiver never asks for a keyframe (protocol: no type 5 on a radio stream).
             if !isRadio, s == .live || (s.isLive && wasPaused) { remote.requestKeyFrame() }
         case .envelope(let e): relay(e)
         case .title(let t): signedTitle = t
@@ -989,7 +989,7 @@ final class WatchController: ObservableObject {
             if engine?.audioMarkerMismatch != nil {
                 model?.penalizeStreamRoute(routeKey)
             }
-            // Before the hop handshake the link's own finish decides whether the join keeps waiting (review B9).
+            // Before the hop handshake the link's own finish decides whether the join keeps waiting.
             if hopAuthenticated || joined { finish(reason) }
         }
     }
@@ -1170,7 +1170,7 @@ final class WatchController: ObservableObject {
         guard ended == nil else { return }
         healthTimer?.invalidate(); forwardOffer = nil
         if let f = forwarder {
-            // Android review S3: after an upstream loss nothing more will come, so the child link closes at once; after the
+            // As Android: after an upstream loss nothing more will come, so the child link closes at once; after the
             // source ended the stream, the child first gets the forwarded terminal record (the link driver closes once it
             // drained, at most 2.5 s later). `-forwarderGracefulEnd NO` closes at once in both cases (the earlier rule).
             let graceful = upstreamEnded && AppSettings.labSwitch("forwarderGracefulEnd", shipped: true)
@@ -1396,7 +1396,7 @@ final class LiveController: ObservableObject {
 
 /// One relay hop for one call: child (callee or next relay) first as central, then one parent as peripheral.
 /// End-to-end records are copied unchanged; this phone never sees the call's audio or video.
-/// EXPERIMENTAL relayed calls (Design C): this phone helps one call (its listener's first record was SETUP).
+/// EXPERIMENTAL relayed calls : this phone helps one call (its listener's first record was SETUP).
 final class RelayDutyController: ObservableObject {
     weak var model: AppModel?
     let duty: RelayHelperDuty

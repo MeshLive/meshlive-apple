@@ -1,7 +1,7 @@
 import XCTest
 @testable import NearbyCore
 
-/// Fixes from the independent review of the Apple Design C/OR port (2026-10-27): admission order and the limiter,
+/// Rules of the Apple relayed-call and route-search port (2026-10-27): admission order and the limiter,
 /// the rotating first hop's opening, pseudonymous helpers, copied adverts and search addresses, target consent.
 final class RelayReviewTests: XCTestCase {
     let vp9 = NodeCapabilities.codecVP9

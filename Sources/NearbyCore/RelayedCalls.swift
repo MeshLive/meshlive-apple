@@ -1,7 +1,7 @@
 import Foundation
 
-// EXPERIMENTAL relayed private calls and multi-hop discovery (Android RelayedCalls.kt / RelaySetup.kt; PROTOCOL
-// "Experimental relayed calls and multi-hop discovery", DECISIONS "Design C"). Off: no consent bit, no relay flag,
+// EXPERIMENTAL relayed private calls and multi-hop discovery (Android RelayedCalls.kt / RelaySetup.kt): a caller reaches
+// a contact through up to two helpers that set the route up hop by hop (SETUP, READY, FAIL). Off: no consent bit, no relay flag,
 // no link-hello bit, and hop type 12 is rejected as unknown, exactly as before.
 
 /// Why a hop refused or could not finish a relay setup (`FAIL` reason byte).
@@ -38,7 +38,7 @@ public enum RelaySetupMessage: Equatable {
     case setup(target: Data, budget: Int, remainingMs: Int, setupId: Data, rotating: Bool)
     case ready(setupId: Data, relays: Int)
     case fail(setupId: Data, reason: RelaySetupFailure)
-    /// Design OR message 5: a search for one target ID blinded as `token` under `nonce`, with up to 3 two-byte RDI
+    /// Route search (message 5): a search for one target ID blinded as `token` under `nonce`, with up to 3 two-byte RDI
     /// prefixes to skip. Regenerated per hop like SETUP; nonce, token and skip list travel unchanged.
     case seek(budget: Int, remainingMs: Int, setupId: Data, nonce: Data, token: Data, skip: [Data])
 
@@ -155,7 +155,7 @@ public struct RelayRoute: Equatable {
     public let helperPrefix: Data
     public let relays: Int
     public let rotating: Bool
-    /// Design OR: ask the helper to search (SEEK) for the target blinded by `token` under `nonce`, instead of SETUP.
+    /// Route search: ask the helper to search (SEEK) for the target blinded by `token` under `nonce`, instead of SETUP.
     public let seek: RelayHelperDuty.Request.Seek?
     public init(target: Data, helperPrefix: Data, relays: Int, rotating: Bool = false, seek: RelayHelperDuty.Request.Seek? = nil) {
         self.target = target; self.helperPrefix = helperPrefix; self.relays = relays; self.rotating = rotating; self.seek = seek
@@ -268,7 +268,7 @@ public final class RelaySetupRateLimiter {
     }
 
     /// The token of an admitted request that turned out well (READY and the chain guard satisfied) is given back:
-    /// only abusive traffic pays (owner rule 2026-10-27).
+    /// only abusive traffic pays (2026-10-27).
     public func refund(_ parent: String?, admittedAtMs: Int64) {
         if let i = all.lastIndex(of: admittedAtMs) { all.remove(at: i) }
         if let parent, var own = byParent[parent], let i = own.lastIndex(of: admittedAtMs) { own.remove(at: i); byParent[parent] = own }

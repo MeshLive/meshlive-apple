@@ -70,7 +70,7 @@ public final class StreamJoinRetry<T: Hashable> {
     }
 }
 
-/// Android review B9 (ReceiverJoinWait): a viewer's join keeps waiting after a connection that failed before its hop
+/// As Android (ReceiverJoinWait): a viewer's join keeps waiting after a connection that failed before its hop
 /// handshake (a stranger, a stale dial, noise), within the same deadline; an authenticated link that failed ends it.
 public enum StreamJoinWait {
     public static func keepWaiting(enabled: Bool, hopAuthenticated: Bool, joined: Bool, stoppedByUser: Bool, ended: Bool,

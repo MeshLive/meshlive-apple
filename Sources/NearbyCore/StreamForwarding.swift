@@ -293,7 +293,7 @@ public final class StreamForwarderEngine: MeshConnection {
         return .queued
     }
 
-    /// Exact mesh namespace predicate (PROTOCOL review 18).
+    /// Exact mesh namespace predicate.
     private static func isAudioRecord(_ envelope: MeshEnvelope) -> Bool {
         envelope.flags == 8 || envelope.flags == 72
     }

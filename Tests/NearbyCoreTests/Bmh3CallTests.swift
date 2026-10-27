@@ -95,8 +95,8 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertFalse(caller.peerIsStranger || callee.peerIsStranger)
     }
 
-    /// Review 2026-10-27 (Android CallerRevealGate): a callee that revealed itself requires the caller's reveal; the
-    /// caller's media before it ends the call, and without it the callee hangs up 10 s after Accept.
+    /// The callee requires the caller's reveal: the caller's media before it ends the call, and without it the callee
+    /// hangs up 10 s after Accept.
     func testAnAnsweredStrangerCallEndsWhenTheCallerNeverRevealsItself() throws {
         let callerId = SoftwareSigningIdentity(), calleeId = SoftwareSigningIdentity()
         let (caller, callee, box) = rotatingCall(callerId: callerId, calleeId: calleeId, callerPseudonyms: true, calleePseudonyms: true)
@@ -111,8 +111,8 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertEqual(authenticated(box.callee), [], "the callee never learned who called")
     }
 
-    /// Review 2026-10-27 (Android HOP_AUTH_MS): an authenticated link that never carries an Invite is closed after
-    /// 10 s, although heartbeats keep it alive.
+    /// An authenticated link must carry an Invite within 10 s: one that never does is closed, although heartbeats keep
+    /// it alive.
     func testACalleeClosesALinkThatNeverCarriesAnInvite() throws {
         let (caller, callee, _) = rotatingCall(callerPseudonyms: nil, calleePseudonyms: nil)
         caller.testingWithholdInvite = true
@@ -134,7 +134,7 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertEqual(callee.closeReason, CallEngine.inviteTimeoutReason)
     }
 
-    /// Review 2026-10-27: the user cancelled while the link was still connecting (the engine ended first); a link that
+    /// the user cancelled while the link was still connecting (the engine ended first); a link that
     /// still arrives later must not start a handshake (no BMH3 msg1 on a closed engine).
     func testAnEngineEndedBeforeItsLinkStartsSendsNothing() throws {
         let (caller, _, _) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true)
@@ -145,7 +145,7 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertEqual(caller.phase, .closed)
     }
 
-    /// Review 2026-10-27: media from the peer before the call was answered ends the call, for either role (the caller
+    /// media from the peer before the call was answered ends the call, for either role (the caller
     /// never decodes a callee's video while it rings, before any reveal).
     func testMediaBeforeTheAnswerEndsTheCallOnEitherSide() throws {
         let (caller, callee, box) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true)
@@ -162,7 +162,7 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertFalse(box2.callee.contains { if case .remoteHeader = $0 { return true }; return false })
     }
 
-    /// A relayed call is declined before it rings unless the target consented (Design C target rule, Amendment CP).
+    /// A relayed call is declined before it rings unless the target consented (the relayed-call target rule).
     func testARelayedCallIsDeclinedBeforeRingingWithoutConsent() throws {
         func call(consent: Bool) throws -> CallEngine {
             let callerId = SoftwareSigningIdentity(), calleeId = SoftwareSigningIdentity()
@@ -356,7 +356,7 @@ final class Bmh3CallTests: XCTestCase {
 }
 
 final class Bmh3BudgetTests: XCTestCase {
-    /// Review 2026-10-27: an unreadable pin store is not empty; nothing is saved over it until a real load succeeded.
+    /// an unreadable pin store is not empty; nothing is saved over it until a real load succeeded.
     func testAnUnreadablePinStoreIsNeverOverwritten() {
         final class Locked: Bmh3PinStorage {
             var readable = false, text: String? = "a1b2c3d4e5f6 \(Int64(Date().timeIntervalSince1970 * 1000))", writes = 0

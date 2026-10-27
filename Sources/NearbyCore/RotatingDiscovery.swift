@@ -1,10 +1,9 @@
 import Foundation
 import CryptoKit
 
-// EXPERIMENTAL rotating discovery IDs, phase 1 (off by default; Android "Experimental rotating discovery IDs",
-// reviewed design RV1-RV19). Call-ready presence advertises compact UUID v2 whose 6 ID bytes are a 15-minute
+// EXPERIMENTAL rotating discovery IDs, phase 1 (off by default; Android "Experimental rotating discovery IDs"). Call-ready presence advertises compact UUID v2 whose 6 ID bytes are a 15-minute
 // rotating ID (RDI) instead of the fixed node prefix. A caller that selected a v2 advert requires the link
-// opening BDO1 (hop type 13, link hello bit 3) and recomputes it from the authenticated node ID (RV15).
+// opening BDO1 (hop type 13, link hello bit 3) and recomputes it from the authenticated node ID.
 // Streams, viewer requests, forwarders and relay chains keep the fixed prefix in this phase.
 
 public enum RotatingDiscoveryIds {
@@ -16,7 +15,7 @@ public enum RotatingDiscoveryIds {
     public static let leaseDomain = Data("BluetoothVideoMesh/Discovery/Lease/1".utf8) + Data([0])
 
     public static func wallEpoch(unixSeconds: Int64) -> Int64 { Int64((Double(unixSeconds) / Double(epochSeconds)).rounded(.down)) }
-    /// This phone's wall-clock epoch now (the verifier's reference for RD4).
+    /// This phone's wall-clock epoch now (the verifier's reference for the opening window).
     public static func currentWallEpoch() -> Int64 { wallEpoch(unixSeconds: Int64(Date().timeIntervalSince1970)) }
     /// Lease week of an epoch (672 epochs = 7 days).
     public static func week(of epoch: Int64) -> Int64 { Int64((Double(epoch) / 672).rounded(.down)) }
@@ -24,7 +23,7 @@ public enum RotatingDiscoveryIds {
     static func u32(_ v: Int64) -> Data { var w = BinaryWriter(); w.u32(UInt32(truncatingIfNeeded: v)); return w.data }
     static func hmac(_ key: Data, _ message: Data) -> Data { Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: key))) }
 
-    /// L_w = HMAC-SHA256(P, lease domain || u32 w) (RV11: the owner's salts are keyed by the week's lease).
+    /// L_w = HMAC-SHA256(P, lease domain || u32 w) (the owner's salts are keyed by the week's lease).
     public static func leaseKey(presenceKey: Data, week: Int64) -> Data { hmac(presenceKey, leaseDomain + u32(week)) }
 
     public static func salt(key: Data, epoch: Int64, role: UInt8) -> Data { hmac(key, saltDomain + u32(epoch) + Data([role])) }
@@ -85,13 +84,13 @@ public enum DiscoveryOpeningCodec {
     }
 }
 
-/// RV15: the check follows the advert the caller selected, never the peer's hello.
+/// the check follows the advert the caller selected, never the peer's hello.
 public enum DiscoverySelectionCheck {
     public enum Result: Equatable { case pass, prefixMismatch, openingMissing, openingMismatch, openingStale }
-    /// RD4: an opening entry counts only within two epochs of the verifier's wall-clock epoch, so a forger cannot
+    /// an opening entry counts only within two epochs of the verifier's wall-clock epoch, so a forger cannot
     /// build one 2^48 table for a fixed epoch and invert any victim ID of any epoch.
     public static let epochTolerance: Int64 = 2
-    /// - Parameter verifierWallEpoch: this phone's wall epoch (nil skips the RD4 window; only tests of the ID itself do).
+    /// - Parameter verifierWallEpoch: this phone's wall epoch (nil skips the opening window; only tests of the ID itself do).
     public static func check(selected: DiscoveryAnnouncement, expectedRole: UInt8, peerNodeId: Data, openingEntries: [OpeningEntry]?,
                              verifierWallEpoch: Int64? = nil) -> Result {
         guard selected.rotating else { return peerNodeId.prefix(6) == selected.nodeIdPrefix ? .pass : .prefixMismatch }
@@ -104,7 +103,7 @@ public enum DiscoverySelectionCheck {
     }
 }
 
-/// RV4 monotonic epoch (Android DiscoveryEpochClock): a tick only when the wall epoch changes or 960 s of
+/// Monotonic epoch (Android DiscoveryEpochClock): a tick only when the wall epoch changes or 960 s of
 /// monotonic time passed; E = max(wall, last + 1) at a tick; reused otherwise; after a reboot reused only
 /// while the wall agrees; a forward offset above 96 epochs lasting 1 h of consistent wall time starts a new
 /// presence generation.
@@ -118,7 +117,7 @@ public struct EpochClockState: Equatable, Codable {
 
 public final class DiscoveryEpochClock {
     public static let elapsedTickMs: Int64 = (RotatingDiscoveryIds.epochSeconds + 60) * 1000
-    public static let maxAheadEpochs: Int64 = 2  // RH4 (Android 2026-10-14; was 96)
+    public static let maxAheadEpochs: Int64 = 2  // as Android (2026-10-14; was 96)
     public static let aheadRecoveryMs: Int64 = 3_600_000
     public static let consistentWallToleranceMs: Int64 = 120_000
     public struct Reading: Equatable { public let epoch: Int64; public let ticked: Bool; public let newGeneration: Bool }
@@ -203,7 +202,7 @@ public enum VisibleByHandleWindow {
     }
 }
 
-/// RV8 tarpit: the responder delays its hello by 2^(n-6) s (capped at 30 s) for the n-th stranger handshake
+/// Stranger tarpit: the responder delays its hello by 2^(n-6) s (capped at 30 s) for the n-th stranger handshake
 /// in the epoch that has not led to a user-visible action; verified contacts are never delayed.
 public final class StrangerTarpit {
     public static let capMs: Int64 = 30_000
@@ -224,7 +223,7 @@ public final class StrangerTarpit {
     public func forgive(epoch e: Int64) { if e == epoch && probes > 0 { probes -= 1 } }
 }
 
-/// Rotating discovery IDs phase 1b for streams (rotating viewer requests and forwarder offers, PROTOCOL Phase 1b items
+/// Rotating discovery IDs phase 1b for streams (rotating viewer requests and forwarder offers, Android protocol reference, phase 1b items
 /// 1-7) is not built on Apple platforms: this phone's viewer request and forwarder offer always carry its fixed prefix
 /// (compact v1). While this phone runs rotating IDs it therefore neither joins nor forwards a stream whose offer
 /// rotates (announcement version 5): Android mirrors such an offer with a rotating request, and a fixed-prefix one
@@ -243,7 +242,7 @@ public enum RotatingStreamPolicy {
 }
 
 /// A call listener's rotating presence (role 0) as the app runs it: one ID per epoch, break-before-make at each
-/// boundary (stop, a uniform 1-8 s silence, then the new ID, RV12), and the entries a connection accepted now may open
+/// boundary (stop, a uniform 1-8 s silence, then the new ID), and the entries a connection accepted now may open
 /// (on air, or off air for less than 60 s: `OpeningPins`, evaluated at accept). Used by the MeshPeer test tool.
 public final class RotatingCallPresence {
     public enum Step: Equatable { case none, stop, advertise(OpeningEntry) }

@@ -300,8 +300,8 @@ struct AppSettings {
         set { d.set(newValue, forKey: "experimentalDesktopCallDeliveryFeedback") }
     }
     #endif
-    /// Generated nearby names (Android names-v2), iPhone and Mac, on by default as on Android (user decision
-    /// 2026-10-27); the switch in Settings › Privacy turns it off (the key keeps its Mac name).
+    /// Generated nearby names (Android names-v2), iPhone and Mac, on by default as on Android
+    /// (2026-10-27); the switch in Settings › Privacy turns it off (the key keeps its Mac name).
     static var desktopGeneratedNames: Bool {
         get { flag("experimentalDesktopGeneratedNames", default: true) }
         set { d.set(newValue, forKey: "experimentalDesktopGeneratedNames") }
@@ -340,7 +340,7 @@ struct AppSettings {
         set { d.set(newValue, forKey: "experimentalBmh3Pseudonyms") }
     }
     /// Experimental "Relayed calls" (Android `test_relayed_calls`, off): a call that reaches this phone through another
-    /// phone rings only with this on; otherwise it is declined before it rings (Amendment CP target rule).
+    /// phone rings only with this on; otherwise it is declined before it rings (the relayed-call target rule).
     static var relayedCalls: Bool {
         get { d.bool(forKey: "experimentalRelayedCalls") }
         set { d.set(newValue, forKey: "experimentalRelayedCalls") }
@@ -363,13 +363,13 @@ struct AppSettings {
         get { flag("relayedCallsHelp", default: true) }
         set { d.set(newValue, forKey: "relayedCallsHelp") }
     }
-    /// EXPERIMENTAL Design OR (Android DEBUG `test_relayed_on_demand`, off): while helping, the call listener signs
+    /// EXPERIMENTAL route search (Android DEBUG `test_relayed_on_demand`, off): while helping, the call listener signs
     /// RELAY_SEEK and answers searches (SEEK) from what this device scans. Launch argument `-relayedOnDemand YES`.
     static var relayedOnDemand: Bool { labSwitch("relayedOnDemand", shipped: false) }
     /// DEBUG lab mask (Android `test_relayed_calls_no_direct`, off): the reach tables ignore every target's own offer,
     /// as if no target were in direct range (needed for a co-located chain test). Launch argument `-relayedNoDirect YES`.
     static var relayedNoDirect: Bool { labSwitch("relayedNoDirect", shipped: false) }
-    /// Amendment CP pseudonymous relay edges (Android `test_relayed_pseudonymous_edges`, on). Control arm for tests only:
+    /// Pseudonymous relay edges (Android `test_relayed_pseudonymous_edges`, on). Control arm for tests only:
     /// launch argument `-relayedPseudonymousEdges NO`; no Settings switch.
     static var relayedPseudonymousEdges: Bool { labSwitch("relayedPseudonymousEdges", shipped: true) }
     /// Stream link pacing (Android LinkPacer, on) and the on-time seed raise (on since 2026-10-16). Control arms for

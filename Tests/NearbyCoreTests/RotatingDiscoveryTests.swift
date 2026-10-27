@@ -1,7 +1,7 @@
 import XCTest
 @testable import NearbyCore
 
-/// Experimental rotating discovery IDs: the reviewed shared vectors (Android RotatingDiscoveryTest), the RV4
+/// Experimental rotating discovery IDs: the shared vectors (Android RotatingDiscoveryTest), the epoch
 /// clock, pins, tarpit, window, and BDO1 over real call engines (Android RotatingDiscoveryLinkTest).
 final class RotatingDiscoveryTests: XCTestCase {
     let presenceKey = Data(0..<32)
@@ -102,7 +102,7 @@ final class RotatingDiscoveryTests: XCTestCase {
         let previous = RotatingDiscoveryIds.entry(saltKey: presenceKey, nodeId: nodeId, epoch: epoch - 1, role: 0)
         XCTAssertEqual(DiscoverySelectionCheck.check(selected: selected, expectedRole: 0, peerNodeId: nodeId, openingEntries: [previous]), .openingMismatch)
         XCTAssertEqual(DiscoverySelectionCheck.check(selected: selected, expectedRole: 0, peerNodeId: nodeId, openingEntries: [previous, entry]), .pass)
-        // RV15: the check follows the selected advert, not the hello.
+        // the check follows the selected advert, not the hello.
         XCTAssertEqual(DiscoverySelectionCheck.check(selected: selected, expectedRole: 0, peerNodeId: nodeId, openingEntries: nil), .openingMissing)
         XCTAssertEqual(DiscoverySelectionCheck.check(selected: selectedCall(nodeId.prefix(6), rotating: false), expectedRole: 0, peerNodeId: nodeId, openingEntries: [entry]), .pass)
         XCTAssertEqual(DiscoverySelectionCheck.check(selected: selectedCall(entry.rdi, rotating: false), expectedRole: 0, peerNodeId: nodeId, openingEntries: [entry]), .prefixMismatch)
@@ -255,7 +255,7 @@ final class RotatingDiscoveryLinkTests: XCTestCase {
     }
 }
 
-/// RD4 (opening epoch window) and RH4 (2-epoch ahead bound), Android 2026-10-11 / 2026-10-14.
+/// The opening epoch window and the 2-epoch ahead bound, Android 2026-10-11 / 2026-10-14.
 final class OpeningEpochWindowTests: XCTestCase {
     func testAnOpeningMoreThanTwoEpochsFromTheVerifiersClockIsStale() {
         let id = SoftwareSigningIdentity()
@@ -299,7 +299,7 @@ final class RotatingStreamTests: XCTestCase {
     let epoch: Int64 = 1_990_656
 
     func testAndroidVersion5StreamOfferVector() throws {
-        // PROTOCOL vector: role-1 RDI bb2d061f6480, flags 0x0c, VP9, token for logical 0x12345678, 640x360 15 FPS 300 kbps.
+        // Protocol vector: role-1 RDI bb2d061f6480, flags 0x0c, VP9, token for logical 0x12345678, 640x360 15 FPS 300 kbps.
         let bytes = Data(hex: "05bb2d061f64800c0192529fc40001028001680f012c")!
         let a = try DiscoveryAnnouncement(decoding: bytes, acceptRotating: true)
         XCTAssertTrue(a.rotating && a.isStreamOffer); XCTAssertEqual(a.transport, .gatt)

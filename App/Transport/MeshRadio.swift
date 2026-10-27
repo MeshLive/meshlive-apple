@@ -54,7 +54,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     private var serverLinks: [UUID: GattServerLink] = [:]
     private var knownPeripherals: [UUID: CBPeripheral] = [:]
 
-    /// EXPERIMENTAL relayed calls (Design C): reach tables fed from this phone's own scans (call offers and reach
+    /// EXPERIMENTAL relayed calls : reach tables fed from this phone's own scans (call offers and reach
     /// pages), one per population (fixed prefixes; role-0 RDIs with rotating IDs). Nil while the switch is off, so
     /// nothing is read or kept. Peers are discovery row IDs.
     private(set) var reachFixed: ReachTable<UUID>?

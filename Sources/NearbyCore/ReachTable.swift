@@ -1,6 +1,6 @@
 import Foundation
 
-// The reach table of Design C (Android ReachTable.kt): targets this phone learned only from adverts it scanned
+// The relayed-call reach table (Android ReachTable.kt): targets this phone learned only from adverts it scanned
 // itself, a distance vector with an age and no sequence numbers. Never persisted; node prefixes only. All times are
 // monotonic milliseconds from `clock`; `P` is the dialable peer (the app's row ID, a plain value in tests).
 //
@@ -37,7 +37,7 @@ public struct OfferSighting<P> {
     public let seenMs: Int64
     public let address: String
     public let rssi: Int?
-    /// Sightings of this offer from this address (Design OR orders addresses heard twice first).
+    /// Sightings of this offer from this address (a route search orders addresses heard twice first).
     public var count: Int = 1
     public var firstSeenMs: Int64 = 0
 }
@@ -128,7 +128,7 @@ public final class ReachTable<P> {
         let now = clock()
         let key = announcement.nodeIdPrefix.hex
         guard !isOwn(announcement.nodeIdPrefix) else { return }
-        // Review 2026-10-27: a copied advert must not take over an ID, so each address keeps its own sighting (at most
+        // a copied advert must not take over an ID, so each address keeps its own sighting (at most
         // `addressesPerId` per ID, the oldest dropped) and the dial picks the best (`best(of:)`).
         let previous = offers.first { $0.key == key && $0.sighting.address == address }?.sighting
         offers.removeAll { $0.key == key && $0.sighting.address == address }
@@ -238,7 +238,7 @@ public final class ReachTable<P> {
 
     public func offer(_ prefix: Data) -> OfferSighting<P>? { Self.best(of: offers.filter { $0.key == prefix.hex }.map(\.sighting)) }
 
-    /// Every offer heard within `withinMs` (Design OR: a search first uses what scans heard anyway).
+    /// Every offer heard within `withinMs` (a route search first uses what scans heard anyway).
     public func recentOffers(withinMs: Int64) -> [OfferSighting<P>] {
         let now = clock()
         return offers.map(\.sighting).filter { now - $0.seenMs <= withinMs }
