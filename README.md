@@ -92,10 +92,10 @@ livestream or call hops from device to device, so the more people around you use
 
 | Platform | Status |
 | --- | --- |
-| iPhone (iOS 16+) | Build it yourself (no App Store or TestFlight build yet). The current code has not been tested on an iPhone yet. |
-| Mac (Apple Silicon, macOS 14+) | Build it yourself. Experimental native app: voice calls with Android work; video calls can still drop. |
+| iPhone (iOS 16+) | Build it yourself (no App Store or TestFlight build yet). Tested in the iPhone simulator; not yet on a real iPhone. |
+| Mac (Apple Silicon, macOS 14+) | Build it yourself. Experimental native app: voice and video calls with Android phones work in both directions. |
 | Android 10+ | Available: [meshlive-android](https://github.com/MeshLive/meshlive-android) |
-| Windows | Coming soon: [meshlive-windows](https://github.com/MeshLive/meshlive-windows) |
+| Windows | Beta: [meshlive-windows](https://github.com/MeshLive/meshlive-windows/releases/latest) |
 
 Android phones list iPhones and Macs when their Advanced setting "Experimental: find iPhones" is on; see
 [Talking to Android phones](docs/user-guide.md#talking-to-android-phones).
