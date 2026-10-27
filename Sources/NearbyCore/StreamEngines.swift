@@ -91,6 +91,7 @@ public final class StreamViewerEngine: MeshConnection {
         // Link hello bit 3 on an LE stream hop (never the end-to-end hello): BDO1 is the first hop record each way.
         if self.rotatingOffer != nil { caps.transportMask |= NodeCapabilities.transportDiscoveryOpening }
         super.init(role: .responder, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: endpointCaps)
+        arrivalMeter = ArrivalTrainMeter()
         if expectAudioOnly { link.maxIncomingCiphertextBytes = 4 * 1024 }
         expectedPeerPrefix = self.rotatingOffer == nil ? expectedAdjacentPrefix : nil
         if self.rotatingOffer != nil {
@@ -364,13 +365,34 @@ public final class StreamViewerEngine: MeshConnection {
 
     public var silentTimeout: TimeInterval { transport == .gatt ? 6 : 8 }
 
+    /// Measured link reports (Android viewers, workstream B, always on there): the parent link's arrival rate from
+    /// record trains (`ArrivalTrainMeter`) goes to the parent at most once a second when a new train was measured, so a
+    /// source or relay paces to what this link delivers. This viewer has no adaptive playout clock, so the report never
+    /// says late and adds no delay. Off (control arm), only the on-time reports remain.
+    public var measuredReports: Bool {
+        get { arrivalMeter != nil }
+        set { arrivalMeter = newValue ? (arrivalMeter ?? ArrivalTrainMeter()) : nil }
+    }
+    /// Android `CAPACITY_REPORT_INTERVAL_MS`.
+    public static let capacityReportInterval: TimeInterval = 1
+    private var reportedTrains = 0
+    public private(set) var measuredReportsSent = 0
+    public private(set) var lastMeasuredKbps = 0
+
     public override func tickOpen(now: TimeInterval) {
         if let held = endAckHeldSince, now - held > 2 { releaseEndAck(); return }
         if now - lastReceiveAt > silentTimeout, endAckHeldSince == nil { finish("The stream link went silent", error: true); return }
-        if Self.onTimeReportDue(enabled: onTimeReports, measured: linkMeasured, late: reportedLate,
-                                mediaArrived: receivedMediaBytes > onTimeReportedBytes, sinceLastReport: now - lastReportAt) {
-            lastReportAt = now; onTimeReportedBytes = receivedMediaBytes; onTimeReportsSent += 1
-            enqueue(.record(.linkHeartbeat, LinkHeartbeat.encode(LinkCapacityReport(arrivalKbps: 0, linkLate: false, addedDelayMs: 0))), .control)
+        // Android's viewer loop: a full report when a new train was measured or an on-time report is due, 1 s apart.
+        let trains = arrivalMeter?.trains ?? 0
+        let onTimeDue = Self.onTimeReportDue(enabled: onTimeReports, measured: linkMeasured || trains > 0, late: reportedLate,
+                                             mediaArrived: receivedMediaBytes > onTimeReportedBytes, sinceLastReport: now - lastReportAt)
+        if trains > reportedTrains || onTimeDue, now - lastReportAt >= Self.capacityReportInterval {
+            let kbps = arrivalMeter?.estimateKbps(now: now) ?? 0
+            if kbps > 0 || onTimeDue {
+                lastReportAt = now; onTimeReportedBytes = receivedMediaBytes; reportedTrains = trains
+                if kbps > 0 { linkMeasured = true; measuredReportsSent += 1; lastMeasuredKbps = kbps } else { onTimeReportsSent += 1 }
+                enqueue(.record(.linkHeartbeat, LinkHeartbeat.encode(LinkCapacityReport(arrivalKbps: kbps, linkLate: false, addedDelayMs: 0))), .control)
+            }
         }
         if now - lastHeartbeatAt >= StreamViewerEngine.heartbeatInterval {
             lastHeartbeatAt = now

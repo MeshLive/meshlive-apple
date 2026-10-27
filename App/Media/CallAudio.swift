@@ -56,6 +56,9 @@ final class CallAudio {
     /// Encoded 20 ms packet with its presentation time (microseconds since this audio started).
     var onPacket: ((Int64, Data) -> Void)?
     var onFailure: ((String) -> Void)?
+    /// Playback cannot run (`LocalMediaFailure.audioPlayback`): main thread, with the technical detail. A call ends on it;
+    /// `onFailure` still carries the notice.
+    var onPlaybackFailed: ((String) -> Void)?
     /// Another app or the system took the audio (a phone call, Siri, an alarm): true when it began, false when it ended.
     var onInterruption: ((Bool) -> Void)?
     private(set) var startedAtUptime: TimeInterval = 0
@@ -128,6 +131,14 @@ final class CallAudio {
         DispatchQueue.main.async { [weak self] in self?.onFailure?(message) }
     }
 
+    /// "Audio could not start": fatal for a call unless iOS refused the session because another app holds audio.
+    private func reportStartFailure(_ error: Error) {
+        let ns = error as NSError, detail = describe(error)
+        report("Audio could not start: \(detail)")
+        guard !LocalMediaFailure.isAudioSessionContention(domain: ns.domain, code: ns.code) else { return }
+        DispatchQueue.main.async { [weak self] in self?.onPlaybackFailed?(detail) }
+    }
+
     private func publish() {
         let state = (running: engine?.isRunning ?? false, capturing: capturing, voiceProcessing: voiceProcessing)
         stateLock.withLock { published = state }
@@ -153,7 +164,7 @@ final class CallAudio {
         tearDownEngine()
         do { try configureSession() } catch {
             AppLog.event("audio_error", ["stage": "session", "reason": reason, "error": describe(error)])
-            report("Audio could not start: \(describe(error))"); return
+            reportStartFailure(error); return
         }
         if wantCapture {
             let vp = attempt < 4
@@ -180,7 +191,7 @@ final class CallAudio {
             logSession(reason + (wantCapture ? " (playback only)" : ""))
         } catch {
             AppLog.event("audio_error", ["stage": "playback", "reason": reason, "error": describe(error)])
-            report("Audio could not start: \(describe(error))"); return
+            reportStartFailure(error); return
         }
         if wantCapture {
             report("Microphone could not start yet; retrying. You can still hear them.")

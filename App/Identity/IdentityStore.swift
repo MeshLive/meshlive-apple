@@ -378,6 +378,9 @@ struct AppSettings {
     static var onTimeSeedRaise: Bool { labSwitch("onTimeSeedRaise", shipped: true) }
     /// Viewer on-time reports (Android test_on_time_reports, on); control arm `-onTimeReports NO`.
     static var onTimeReports: Bool { labSwitch("onTimeReports", shipped: true) }
+    /// Viewer measured link reports (Android viewers' arrival-train reports, always on there); control arm
+    /// `-viewerLinkReports NO` keeps only the on-time reports.
+    static var viewerLinkReports: Bool { labSwitch("viewerLinkReports", shipped: true) }
     /// Call and stream audio: when the output starts, audio that arrived while it was still starting is dropped down
     /// to the playout target, instead of staying as latency for the whole call (on). Control arm `-audioStartTrim NO`.
     static var audioStartTrim: Bool { labSwitch("audioStartTrim", shipped: true) }

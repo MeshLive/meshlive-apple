@@ -21,6 +21,9 @@ final class RemoteVideo {
     private var lastDecodedSize = (0, 0)
     let sink = VideoSink()
     var onNeedKeyFrame: (() -> Void)?
+    /// Video arrived but no decoder could be created for its codec (`LocalMediaFailure.videoDecoderSetup`), once.
+    var onDecoderUnavailable: ((String) -> Void)?
+    private var decoderSetupError: String?
     private(set) var decoderName = ""
     var decodedFrames = 0
     /// The first decoded picture of this call (main thread), for call setup timing.
@@ -50,15 +53,19 @@ final class RemoteVideo {
                     self.sink.show(pixels)
                 }
             }
-            decoder = d; decoderName = d.name
-        } catch { decoder = nil; decoderName = "No decoder: \(error)" }
+            decoder = d; decoderName = d.name; decoderSetupError = nil
+        } catch { decoder = nil; decoderName = "No decoder: \(error)"; decoderSetupError = "\(error)" }
     }
 
     func decode(_ packet: MediaPacket) {
         #if os(macOS)
         payloadBytes += packet.payload.count
         #endif
-        guard let decoder else { return }
+        guard let decoder else {
+            // A decoder that could not be set up is needed only once video arrives (a voice call never ends over it).
+            if let failure = decoderSetupError { decoderSetupError = nil; onDecoderUnavailable?(failure) }
+            return
+        }
         if packet.isCodecConfig { queue.async { decoder.replaceCodecConfig(packet.payload) }; return }
         queue.async {
             do { try decoder.decode(packet.payload, presentationTimeUs: packet.presentationTimeUs, keyFrame: packet.isKeyFrame) }
@@ -288,7 +295,9 @@ final class CallController: ObservableObject, Identifiable {
         case .startLocalMedia(let header, let type):
             callType = type; cameraOn = type == .video
             startMedia(header: header, video: type == .video)
-        case .remoteHeader(let header): remote.configure(header: header)
+        case .remoteHeader(let header):
+            remote.onDecoderUnavailable = { [weak self] detail in self?.endForLocalMediaFailure(.videoDecoderSetup, detail: detail) }
+            remote.configure(header: header)
         case .remoteAudio(let packet):
             remoteAudioEvents += 1
             if remoteAudioEvents == 1 { markStage("first_audio_rx") }
@@ -448,11 +457,23 @@ final class CallController: ObservableObject, Identifiable {
             self.engine.sendAudio(presentationTimeUs: pts, opus: data); self.pump()
         }
         audio.onFailure = { [weak self] message in self?.stats = message; self?.mediaProblem = message; AppLog.event("call_error", ["stage": "audio", "message": message]) }
+        audio.onPlaybackFailed = { [weak self] detail in self?.endForLocalMediaFailure(.audioPlayback, detail: detail) }
         audio.onInterruption = { [weak self] began in self?.audioInterrupted(began) }
         audio.captureEnabled = !muted
         audio.start(capture: true)
         self.audio = audio
         if video { startCamera(header: header) }
+    }
+
+    /// Android `endForLocalMediaFailure`: this device's own decoder or playback failed while the link is fine. The call
+    /// hangs up with an error reason (the other phone sees that this phone had a problem) instead of going on silent or
+    /// being retried as link loss. Control arm `-callEndOnMediaFailure NO`: the call stays up with the notice, as before.
+    private func endForLocalMediaFailure(_ failure: LocalMediaFailure, detail: String) {
+        let ends = AppSettings.labSwitch("callEndOnMediaFailure", shipped: true)
+        AppLog.event("call_error", ["stage": failure.rawValue, "fatal": "\(ends)", "message": detail])
+        guard ends, ended == nil else { return }
+        engine.endForLocalMediaFailure(failure.message)
+        pump()
     }
 
     private func startCamera(header: StreamHeader) {
@@ -473,6 +494,53 @@ final class CallController: ObservableObject, Identifiable {
         camera.start()
         self.camera = camera
         startLadder(header: header)
+        observeOrientation()
+        sendRotation(rotation.pending(sending: true))
+    }
+
+    // MARK: Display rotation (iPhone)
+
+    /// The other phone turns this phone's picture upright while the iPhone is held sideways (`CallDisplayRotation`).
+    /// Control arm `-callSendRotation NO`: no rotation is sent, as before. A Mac camera does not turn with the Mac.
+    private var rotation = CallDisplayRotation()
+    private var orientationObserver: NSObjectProtocol?
+
+    private func observeOrientation() {
+        #if os(iOS)
+        guard orientationObserver == nil, AppSettings.labSwitch("callSendRotation", shipped: true) else { return }
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        orientationObserver = NotificationCenter.default.addObserver(forName: UIDevice.orientationDidChangeNotification, object: nil,
+                                                                     queue: .main) { [weak self] _ in self?.deviceTurned() }
+        deviceTurned()
+        #endif
+    }
+
+    private func deviceTurned() {
+        #if os(iOS)
+        let orientation: CallDisplayRotation.Orientation
+        switch UIDevice.current.orientation {
+        case .portrait: orientation = .portrait
+        case .portraitUpsideDown: orientation = .portraitUpsideDown
+        case .landscapeLeft: orientation = .landscapeLeft
+        case .landscapeRight: orientation = .landscapeRight
+        default: orientation = .faceUpOrDownOrUnknown
+        }
+        sendRotation(rotation.deviceTurned(orientation, sending: camera != nil))
+        #endif
+    }
+
+    private func sendRotation(_ degrees: Int?) {
+        guard let degrees, orientationObserver != nil else { return }
+        engine.sendRotation(degrees); pump()
+        AppLog.event("call_rotation", ["degrees": "\(degrees)"])
+    }
+
+    private func stopObservingOrientation() {
+        #if os(iOS)
+        guard let observer = orientationObserver else { return }
+        NotificationCenter.default.removeObserver(observer); orientationObserver = nil
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        #endif
     }
 
     // MARK: User actions
@@ -664,6 +732,7 @@ final class CallController: ObservableObject, Identifiable {
         audio?.stop(); audio = nil
         prewarmedAudio?.stop(); prewarmedAudio = nil
         camera?.stop(); camera = nil
+        stopObservingOrientation()
         remote.stop()
         statsTimer?.invalidate(); statsTimer = nil
     }
@@ -831,6 +900,7 @@ final class WatchController: ObservableObject {
                                         rotatingOffer: offer.rotating ? offer : nil, expectAudioOnly: isRadio,
                                         allowAudioOnly: AppSettings.audioLive)
         engine.onTimeReports = AppSettings.onTimeReports
+        engine.measuredReports = AppSettings.viewerLinkReports
         engine.onAudioLivePayload = { [weak self] bytes in
             self?.audioInboundGuard?.onBytes(bytes, now: ConnectionDriver.now)
         }
@@ -867,7 +937,9 @@ final class WatchController: ObservableObject {
         case .header(let h): AppLog.event("watch_header", ["codec": "\(h.codecId)", "size": "\(h.width)x\(h.height)", "fps": "\(h.fps)", "audio": "\(h.hasAudio)"])
         case .audioLiveHeader(let h): AppLog.event("watch_header", ["kind": "audio_only", "preset": "\(h.preset)"])
         case .state(let s): AppLog.event("watch_state", ["state": "\(s)"])
-        case .ended(let r, let e): AppLog.event("watch_end", ["reason": r, "error": "\(e)", "video": "\(engine?.videoPackets ?? 0)", "audio": "\(engine?.audioPackets ?? 0)", "decoded": "\(remote.decodedFrames)"])
+        case .ended(let r, let e): AppLog.event("watch_end", ["reason": r, "error": "\(e)", "video": "\(engine?.videoPackets ?? 0)", "audio": "\(engine?.audioPackets ?? 0)", "decoded": "\(remote.decodedFrames)",
+                                                       "measuredReports": "\(engine?.measuredReportsSent ?? 0)", "lastKbps": "\(engine?.lastMeasuredKbps ?? 0)",
+                                                       "onTimeReports": "\(engine?.onTimeReportsSent ?? 0)"])
         case .title: AppLog.event("watch_title", ["title": "set"])
         default: break
         }

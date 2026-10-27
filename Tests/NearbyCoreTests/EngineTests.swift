@@ -9,6 +9,8 @@ private final class Pipe {
     var aToB = GattChunkWriter(), bToA = GattChunkWriter()
     var bReader = GattChunkReader(), aReader = GattChunkReader()
     var chunkStep = 1
+    /// GATT only: each value arrives this long after the previous one (a link rate for arrival-train measurement).
+    var chunkSpacing: TimeInterval = 0
     init(_ a: MeshConnection, _ b: MeshConnection, gatt: Bool = false) { self.a = a; self.b = b; self.gatt = gatt }
 
     private func move(from: MeshConnection, to: MeshConnection, writer: inout GattChunkWriter, reader: inout GattChunkReader) throws -> Bool {
@@ -16,7 +18,7 @@ private final class Pipe {
         while let bytes = from.nextOutgoing(now: now) {
             moved = true
             if gatt {
-                for value in writer.chunks(bytes, valueLimit: 182) { to.receive(try reader.accept(value), now: now) }
+                for value in writer.chunks(bytes, valueLimit: 182) { now += chunkSpacing; to.receive(try reader.accept(value), now: now) }
             } else {
                 var i = bytes.startIndex
                 while i < bytes.endIndex { let end = min(bytes.endIndex, i + chunkStep); to.receive(bytes[i..<end].rebased, now: now); i = end; chunkStep = chunkStep % 300 + 7 }
@@ -202,6 +204,19 @@ final class EngineTests: XCTestCase {
         }
         XCTAssertEqual(callee.phase, .open, "the callee did not declare the caller silent")
         XCTAssertNotEqual(callee.state?.phase, .ended)
+    }
+
+    /// Android endForLocalMediaFailure: the phone whose own playback failed hangs up with an error reason; the other
+    /// phone learns its peer had a problem (not a lost link), and both calls end cleanly.
+    func testALocalMediaFailureHangsUpWithAnErrorReason() throws {
+        let (caller, callee, pipe, _, _) = try makeCall(type: .voice)
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        try callee.accept(as: .voice); try pipe.pump()
+        XCTAssertEqual(caller.state?.phase, .active)
+        callee.endForLocalMediaFailure(LocalMediaFailure.audioPlayback.message); try pipe.pump(); try pipe.advance(3)
+        XCTAssertEqual(callee.phase, .closed); XCTAssertEqual(callee.closeReason, LocalMediaFailure.audioPlayback.message)
+        XCTAssertEqual(caller.phase, .closed)
+        XCTAssertEqual(caller.closeReason, "Peer's phone ended the call after a local media failure")
     }
 
     func testVoiceCallSetupMediaAndHangUpBothTransports() throws {
@@ -414,6 +429,32 @@ final class OnTimeReportTests: XCTestCase {
     final class Box { var source: [StreamSourceEngine.Event] = []; var viewer: [StreamViewerEngine.Event] = [] }
     private func reports(_ events: [StreamSourceEngine.Event]) -> [LinkCapacityReport] {
         events.compactMap { if case .peerReport(let r) = $0 { return r }; return nil }
+    }
+
+    /// Android viewers report what their parent link delivered (arrival trains); the source paces to it. Control arm off:
+    /// only on-time reports (0 kbps).
+    func testAViewerReportsTheRateItsParentLinkDelivered() throws {
+        for measured in [true, false] {
+            let (source, viewer, pipe, box) = try stream()
+            viewer.measuredReports = measured
+            try pipe.advance(1)
+            pipe.chunkSpacing = 0.01  // one 182-byte GATT value every 10 ms
+            source.sendVideo(flags: StreamProtocol.flagKeyFrame, presentationTimeUs: 0, payload: Data(repeating: 1, count: 12_000))
+            try pipe.pump()
+            pipe.chunkSpacing = 0
+            try pipe.advance(1.5)
+            let sent = reports(box.source)
+            XCTAssertTrue(sent.allSatisfy { !$0.linkLate && $0.addedDelayMs == 0 })
+            if measured {
+                let kbps = sent.map(\.arrivalKbps).max() ?? 0
+                XCTAssertTrue((120...150).contains(kbps), "about 182 bytes per 10 ms less chunk headers: \(kbps)")
+                XCTAssertEqual(viewer.measuredReportsSent, 1)
+                XCTAssertEqual(viewer.lastMeasuredKbps, kbps)
+            } else {
+                XCTAssertTrue(sent.allSatisfy { $0.arrivalKbps == 0 })
+                XCTAssertEqual(viewer.measuredReportsSent, 0)
+            }
+        }
     }
 
     func testAnUnmeasuredViewerReportsOnTimeEveryTwoSecondsWhileMediaArrives() throws {

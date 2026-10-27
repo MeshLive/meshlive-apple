@@ -191,4 +191,6 @@ public final class SecureLink {
         return try sealer.seal(type, payload)
     }
     public var receivedRecords: UInt64 { opener?.nextSequence ?? 0 }
+    /// Bytes of an incomplete record waiting in the opener; nil before the handshake installed it.
+    public var bufferedRecordBytes: Int? { opener?.bufferedBytes }
 }

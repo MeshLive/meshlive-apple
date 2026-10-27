@@ -273,18 +273,27 @@ open class MeshConnection {
     /// True while received input waits for `resumeIngress` (the transport can stop reading).
     public var ingressHeld: Bool { ingressStalled || !heldIngress.isEmpty }
 
+    /// Measures the link's arrival rate from record trains (a stream viewer's parent link); nil measures nothing.
+    public var arrivalMeter: ArrivalTrainMeter?
+
     /// Bytes from the transport, in order. Errors are fatal for the connection.
     public func receive(_ data: Data, now: TimeInterval) {
         guard phase != .closed else { return }
         self.now = now
         receivedBytes += UInt64(data.count)
         lastReceiveAt = now
+        let pendingBefore = link.bufferedRecordBytes.map { $0 + heldIngress.count }
+        let recordsBefore = link.receivedRecords
         heldIngress.append(data)
         guard heldIngress.count <= maxHeldIngressBytes else {
             fail("The next hop fell too far behind (\(heldIngress.count) bytes waiting)")
             return
         }
         processIngress()
+        if let arrivalMeter, let pendingBefore, let buffered = link.bufferedRecordBytes {
+            arrivalMeter.noteChunk(bytes: data.count, at: now, pendingBefore: pendingBefore,
+                                   completedRecords: Int(link.receivedRecords - recordsBefore), pendingAfter: buffered + heldIngress.count)
+        }
     }
 
     /// Parses held input once `ingressPaused` is false again.
