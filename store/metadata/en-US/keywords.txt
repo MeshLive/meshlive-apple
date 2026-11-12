@@ -1,1 +1,1 @@
-bluetooth,offline,mesh,voice,call,stream,intercom,walkie,off-grid,no internet
+bluetooth,offline,mesh,voice,call,stream,intercom,walkie,off-grid,nearby
