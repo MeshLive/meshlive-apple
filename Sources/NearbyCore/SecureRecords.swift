@@ -13,6 +13,8 @@ public enum SecureRecordType: UInt8 {
     /// EXPERIMENTAL rotating discovery IDs: the BDO1 link opening, only as the first hop record each way when
     /// both link hellos carry bit 3; anywhere else it is rejected like an unknown type.
     case discoveryOpening = 13
+    /// AW1 (Experimental): `BWF1` Wi-Fi carrier records; rejected unless the reader opted in (Design WF).
+    case wifi = 16
 }
 
 public struct SecureRecord: Equatable {
@@ -58,6 +60,8 @@ public final class SecureRecordOpener {
     public var acceptDiscoveryOpening = false
     /// Hop type 12 parses only while the owner expects a relay setup message (a helper's first record, a caller's reply).
     public var acceptRelaySetup = false
+    /// Hop type 16 parses only for a reader that opted in (a call's Wi-Fi agent).
+    public var acceptWifi = false
     /// A role-specific ciphertext cap, checked from the header before waiting for or decrypting the body.
     public var maxCiphertextBytes = SecureRecordProtocol.maxPlaintextBytes + MeshAead.tagBytes
     public var bufferedBytes: Int { buffer.count }
@@ -72,7 +76,8 @@ public final class SecureRecordOpener {
             guard try r.bytes(4) == SecureRecordProtocol.magic else { throw ProtocolError.malformed("Invalid secure record magic") }
             let typeValue = try r.byte()
             guard let type = SecureRecordType(rawValue: typeValue), type != .storeForward || acceptStoreForward,
-                  type != .discoveryOpening || acceptDiscoveryOpening, type != .relaySetup || acceptRelaySetup else {
+                  type != .discoveryOpening || acceptDiscoveryOpening, type != .relaySetup || acceptRelaySetup,
+                  type != .wifi || acceptWifi else {
                 throw ProtocolError.malformed("Unknown secure record type \(typeValue)")
             }
             let sequence = try r.u64()
@@ -81,6 +86,10 @@ public final class SecureRecordOpener {
             let size = Int(try r.i32())
             guard size >= MeshAead.tagBytes, size <= min(maxCiphertextBytes, SecureRecordProtocol.maxPlaintextBytes + MeshAead.tagBytes) else {
                 throw ProtocolError.malformed("Invalid secure record size \(size)")
+            }
+            // BWF1 (hop type 16): 5 to 96 plaintext bytes, refused from the header before waiting for the body.
+            if type == .wifi, size < 5 + MeshAead.tagBytes || size > 96 + MeshAead.tagBytes {
+                throw ProtocolError.malformed("Invalid Wi-Fi record size \(size)")
             }
             guard buffer.count >= SecureRecordProtocol.headerBytes + size else { break }
             let ciphertext = buffer.subdata(in: buffer.startIndex + SecureRecordProtocol.headerBytes ..< buffer.startIndex + SecureRecordProtocol.headerBytes + size)

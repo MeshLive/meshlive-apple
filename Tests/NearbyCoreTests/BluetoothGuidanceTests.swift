@@ -20,3 +20,18 @@ final class BluetoothGuidanceTests: XCTestCase {
         }
     }
 }
+
+/// Android WifiAdvicePolicy: when the Mac asks before video.
+final class WifiAdviceTests: XCTestCase {
+    func testAsksOnlyOnTwoPointFourGigahertzOnceADayAndNeverBeforeVoice() {
+        let day = WifiAdvice.quietSeconds, now: TimeInterval = 1_800_000_000
+        XCTAssertTrue(WifiAdvice.shouldAsk(enabled: true, band: .ghz2_4, voice: false, now: now, answeredAt: 0), "never answered")
+        XCTAssertFalse(WifiAdvice.shouldAsk(enabled: true, band: .ghz5, voice: false, now: now, answeredAt: 0))
+        XCTAssertFalse(WifiAdvice.shouldAsk(enabled: true, band: .unknown, voice: false, now: now, answeredAt: 0), "macOS did not tell the band")
+        XCTAssertFalse(WifiAdvice.shouldAsk(enabled: true, band: .ghz2_4, voice: true, now: now, answeredAt: 0), "voice fits a shared radio")
+        XCTAssertFalse(WifiAdvice.shouldAsk(enabled: true, band: .ghz2_4, voice: false, now: now, answeredAt: now - day + 60), "answered today")
+        XCTAssertTrue(WifiAdvice.shouldAsk(enabled: true, band: .ghz2_4, voice: false, now: now, answeredAt: now - day), "a day later")
+        XCTAssertTrue(WifiAdvice.shouldAsk(enabled: true, band: .ghz2_4, voice: false, now: now, answeredAt: now + 60), "the clock moved back")
+        XCTAssertFalse(WifiAdvice.shouldAsk(enabled: false, band: .ghz2_4, voice: false, now: now, answeredAt: 0), "control arm")
+    }
+}

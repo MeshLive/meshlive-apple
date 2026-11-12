@@ -151,6 +151,21 @@ final class RelayedCallSetupTests: XCTestCase {
         XCTAssertNotEqual(caller.state?.phase, .active)
     }
 
+    /// Order (Android): relayed-call consent is checked before the block gate, so a relayed-off callee gives
+    /// `relayedDecline` even when its gate would have declined the caller silently.
+    func testARelayedCallRefusedByConsentNeverReachesTheCallGate() throws {
+        let net = Net()
+        let (callee, calleeId) = try callee(consent: false)
+        callee.callGate = { _ in .declineBlockedPerson }
+        let helper = ScriptedHelper(net: net, callee: callee)
+        let caller = caller(target: calleeId.nodeId.prefix, helperPrefix: helper.identity.nodeId.prefix)
+        try helper.parent.start(now: 0); try caller.start(now: 0)
+        net.pairs.append((caller, helper.parent)); net.pump()
+        XCTAssertEqual(callee.relayedDecline, .declineRelayingOff)
+        XCTAssertNil(callee.silentDecline, "consent is checked before the block gate")
+        XCTAssertNotEqual(caller.state?.phase, .active)
+    }
+
     /// Pseudonymous relay edges: in pseudonym mode the caller's link toward the helper is BMH3 with a declared throwaway (not its
     /// end-to-end attempt key); the helper answers with its real key, which must be the helper that was chosen.
     func testThePseudonymModeCallerDeclaresAThrowawayTowardTheHelper() throws {

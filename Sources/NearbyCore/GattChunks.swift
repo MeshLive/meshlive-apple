@@ -129,3 +129,41 @@ public struct GattChunkReader {
         recent.append(nextSequence); recentSet.insert(nextSequence); nextSequence &+= 1
     }
 }
+
+/// EXPERIMENTAL GATT client write pacing (`-gattWriteBurst N`, off = 0): at most `burst` data values per 10 ms window,
+/// however often the link pumps (a send, CoreBluetooth's ready callback, a GR1 tick). The window restarts only when 10 ms
+/// have passed since it started, so extra pump calls never reset the count, and one resume is scheduled at a time.
+/// GR1 control values and resends are written ahead of data and are not counted (unchanged).
+public struct GattWritePacer {
+    public static let window: TimeInterval = 0.01
+    public let burst: Int
+    private var windowStart: TimeInterval?
+    private var written = 0
+    /// A resume is scheduled and has not fired yet.
+    public private(set) var resumeScheduled = false
+
+    public init(burst: Int) { self.burst = max(0, burst) }
+
+    /// Whether one more data value may be written now; counts it when true. Off (burst 0) always allows.
+    public mutating func mayWrite(now: TimeInterval) -> Bool {
+        guard burst > 0 else { return true }
+        if let start = windowStart, now - start < Self.window {
+            guard written < burst else { return false }
+        } else {
+            windowStart = now; written = 0
+        }
+        written += 1
+        return true
+    }
+
+    /// After `mayWrite` refused: the delay of the one resume to schedule (just past the window's end), or nil when one is
+    /// already scheduled (or pacing is off).
+    public mutating func scheduleResume(now: TimeInterval) -> TimeInterval? {
+        guard burst > 0, !resumeScheduled else { return nil }
+        resumeScheduled = true
+        return max(0, (windowStart ?? now) + Self.window - now) + 0.001
+    }
+
+    /// The scheduled resume fired; call before pumping.
+    public mutating func resumeFired() { resumeScheduled = false }
+}

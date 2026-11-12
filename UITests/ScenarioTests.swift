@@ -11,7 +11,7 @@ final class ScenarioTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = true
         app = XCUIApplication()
-        app.launchArguments = ["-NearbyAvailable", "1"]
+        app.launchArguments = ["-NearbyAvailable", "1", "-appleSourceRoles", "YES"]
         // First-run permission prompts (microphone, camera, Bluetooth): allow.
         addUIInterruptionMonitor(withDescription: "Permissions") { alert in
             for title in ["Allow", "OK", "Allow While Using App"] where alert.buttons[title].exists { alert.buttons[title].tap(); return true }
@@ -43,6 +43,7 @@ final class ScenarioTests: XCTestCase {
 
     /// Call NEARBY_TARGET (voice or video), hold NEARBY_HOLD_SECONDS after it connects, hang up.
     func testCall() throws {
+        try XCTSkipUnless(env["NEARBY_TARGET"] != nil, "a scenario run: set NEARBY_TARGET to a phone that will answer")
         let target = env["NEARBY_TARGET"] ?? "first"
         let type = env["NEARBY_CALL_TYPE"] ?? "voice"
         let hold = Double(env["NEARBY_HOLD_SECONDS"] ?? "20") ?? 20

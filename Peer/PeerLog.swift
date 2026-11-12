@@ -14,3 +14,9 @@ enum AppLog {
         print(String(format: "%.3f ", ProcessInfo.processInfo.systemUptime) + line.replacingOccurrences(of: "\n", with: " ")); fflush(stdout)
     }
 }
+
+/// The app's main-stall markers (App/Diagnostics/MainStall.swift) are not part of the test peer: no-ops here.
+enum MainStall {
+    static func enter(_ name: StaticString) {}
+    static func exit() {}
+}

@@ -22,4 +22,29 @@ final class OwnNearbyNameTests: XCTestCase {
         XCTAssertNil(OwnNearbyName.shown(reachableForCalls: false, rotatingOn: true, generatedNamesOn: true, generatedName: "mild bream"))
         XCTAssertNil(OwnNearbyName.shown(reachableForCalls: true, rotatingOn: true, generatedNamesOn: true, generatedName: nil))
     }
+
+    // Settings › Your name (Android 2026-11-04): applying the field never erases or silently replaces the name.
+    func testAnEmptyFieldClearsTheName() {
+        XCTAssertEqual(OwnNameEdit.outcome(typed: ""), .clear)
+        XCTAssertEqual(OwnNameEdit.outcome(typed: "  \n "), .clear)
+        XCTAssertEqual(OwnNameEdit.outcome(typed: "").resolved(current: "Asha"), "")
+    }
+
+    func testAnAcceptedNameIsSavedInTheFormACallCarries() {
+        let edit = OwnNameEdit.outcome(typed: "  Asha   K ")
+        XCTAssertEqual(edit, .save("Asha K"))
+        XCTAssertNil(edit.rejection)
+        let stored = edit.resolved(current: "Old")
+        XCTAssertEqual(stored, "Asha K")
+        XCTAssertTrue(LabelText.isCanonical(.personName, stored), "the stored name is sent unchanged in a call")
+    }
+
+    func testARejectedNameKeepsTheCurrentName() {
+        for typed in [String(repeating: "x", count: 40), "Asha \u{2713}"] {
+            let edit = OwnNameEdit.outcome(typed: typed)
+            XCTAssertNotNil(edit.rejection, "rejected: \(typed)")
+            XCTAssertEqual(edit.resolved(current: "Asha"), "Asha", "the current name stays")
+            XCTAssertEqual(edit.resolved(current: ""), "", "no name stays no name")
+        }
+    }
 }

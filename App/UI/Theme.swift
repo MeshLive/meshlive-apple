@@ -92,10 +92,10 @@ enum Typo {
 /// review; every screen reads names through this type so the reviewed format drops in at one place.
 /// Never shows raw hex: the handle is Crockford Base32 of the 48-bit prefix (display only).
 struct PeerLabel: Equatable {
-    /// Main line (R5): your verified contact's own label, else a verified self-chosen name in quotes, else
-    /// the full handle. Advertised device names are never used.
+    /// Main line (R5, Design G3): your verified contact's own label (it always wins), else a verified self-chosen name
+    /// with the claim mark ("~Name"), else the full handle. Advertised device names are never used.
     let title: String
-    /// The peer's signed self-chosen name (experimental labels), shown quoted and marked self-named.
+    /// The peer's signed self-chosen name (this call only), shown "~Name" unless your contact label wins.
     let selfName: String?
     let contactName: String?
     /// Full handle `XXXXX-XXXXX` (authenticated to 48 bits only after connecting).
@@ -105,18 +105,24 @@ struct PeerLabel: Equatable {
     let verified: Bool
     /// Colour chip derived from the prefix (a visual aid, never a security cue).
     let color: Color
+    /// True for a generated nearby name (never a handle, a contact, a claimed name or "Someone nearby").
+    private(set) var isGenerated = false
     var monogram: String { ((contactName ?? selfName)?.first.map { String($0) } ?? (shortHandle.isEmpty ? "?" : String(shortHandle.prefix(1)))).uppercased() }
 
-    /// A rotating-ID advert (experimental): no handle and no contact match before the handshake.
+    /// A rotating-ID advert with no generated name (the word lists are missing): "Someone nearby", as Android rows.
     static func nearbyPhone(seed: Data) -> PeerLabel {
-        PeerLabel(title: "Nearby phone", handle: "", hue: Double(seed.last ?? 0) / 255)
+        PeerLabel(title: OwnNearbyName.someoneNearby, handle: "", hue: Double(seed.last ?? 0) / 255)
     }
+    /// A generated name (names-v2), shown title-cased ("Mild Bream"); `isGenerated` marks it for Recent and alerts.
     static func generated(_ name: String, seed: Data) -> PeerLabel {
-        PeerLabel(title: name, handle: "", hue: Double(seed.last ?? 0) / 255)
+        var label = PeerLabel(title: GeneratedNameText.display(name), handle: "", hue: Double(seed.last ?? 0) / 255)
+        label.isGenerated = true
+        return label
     }
-    /// A rotating advert recognised through a contact's presence lease: their own label, "seen nearby, unconfirmed".
+    /// A rotating advert recognised through a contact's presence lease: their own label, Android `people_seen_nearby`
+    /// ("<name> · seen nearby · unconfirmed"; decision 2026-11-06, P12F/P14-P16 (a)).
     static func recognized(contactName: String, seed: Data) -> PeerLabel {
-        PeerLabel(title: "\(contactName), seen nearby, unconfirmed", handle: "", hue: Double(seed.last ?? 0) / 255)
+        PeerLabel(title: "\(contactName) \u{00B7} seen nearby \u{00B7} unconfirmed", handle: "", hue: Double(seed.last ?? 0) / 255)
     }
     private init(title: String, handle: String, hue: Double) {
         self.title = title; self.handle = handle; shortHandle = ""; selfName = nil; contactName = nil; verified = false
@@ -128,7 +134,7 @@ struct PeerLabel: Equatable {
         let short = String(handle.prefix(5))
         self.handle = handle; shortHandle = short; self.verified = verified
         self.contactName = contactName; self.selfName = selfName
-        title = contactName ?? selfName.map { "\u{201C}\($0)\u{201D}" } ?? handle
+        title = contactName ?? selfName.map { "~" + $0 } ?? handle
         let hue = Double(prefix.last ?? 0) / 255
         color = Color(hue: hue, saturation: 0.45, brightness: 0.75)
     }

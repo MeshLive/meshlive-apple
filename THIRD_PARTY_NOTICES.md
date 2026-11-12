@@ -1,10 +1,13 @@
 # Third-party notices
 
 MeshLive for iPhone and Mac is Copyright (C) 2026 The MeshLive Authors and is licensed under the GNU General Public
-License, version 3 or (at your option) any later version (see [LICENSE](LICENSE)). This file lists the third-party
-code and data that the apps include, port or use, and where the full licence texts are. No third-party binaries are
-committed: the scripts download the pinned sources, verify their SHA-256 and build them locally
-([Vendor/README.md](Vendor/README.md)).
+License, version 3 or (at your option) any later version (see [LICENSE](LICENSE) and the
+[additional permission](LICENSE-EXCEPTION.md)). This file lists the third-party code and data that the apps include,
+port or use, and where the full licence texts are. No third-party binaries are committed: the scripts download the
+pinned sources, verify their SHA-256 and build them locally ([Vendor/README.md](Vendor/README.md)).
+
+The licence texts of the linked components are shown in the app under Settings > About this app > Open-source
+licences and are bundled from the same files.
 
 ## Linked into the apps
 
@@ -18,7 +21,7 @@ committed: the scripts download the pinned sources, verify their SHA-256 and bui
 | Component | Licence | Full text | How it is used |
 | --- | --- | --- | --- |
 | Unicode Character Database, `Scripts.txt` (Unicode 15.0.0) | Unicode License v3 | [Vendor/UNICODE-LICENSE.txt](Vendor/UNICODE-LICENSE.txt) | Compressed script table in `Sources/NearbyCore/UnicodeScripts.swift`, used to check display names |
-| WebRTC default single-cast bitrate limits | BSD-3-Clause | [WebRTC LICENSE](https://webrtc.googlesource.com/src/+/refs/heads/main/LICENSE) | Constants in the call resolution ladder (`Sources/NearbyCore/CallResolutionLadder.swift`), ported via MeshLive for Android, which reproduces the licence in its [notices](https://github.com/MeshLive/meshlive-android/blob/main/THIRD_PARTY_NOTICES.md) |
+| WebRTC default single-cast bitrate limits | BSD-3-Clause | [Vendor/WEBRTC-LICENSE](Vendor/WEBRTC-LICENSE) | Constants in the call resolution ladder (`Sources/NearbyCore/CallResolutionLadder.swift`), ported via MeshLive for Android, which reproduces the licence in its [notices](https://github.com/MeshLive/meshlive-android/blob/main/THIRD_PARTY_NOTICES.md) |
 | MeshLive for Android names-v2 word lists and pair blocklist | GPL-3.0-or-later (same project) | [LICENSE](LICENSE) | `Desktop/Support/Names/`, generated nearby names on the Mac ([README](Desktop/Support/Names/README.md)) |
 
 ## Test-only and the default-off v1 experiment

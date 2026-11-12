@@ -13,12 +13,17 @@ import NearbyCore
 import NearbyMedia
 #endif
 
-/// Camera -> portrait NV12 -> I420 at the negotiated size -> libvpx VP9 (software; Android accepts only VP9/AV1).
+/// Camera -> portrait NV12 -> I420 at the negotiated size -> the header's encoder: libvpx VP9 (software), or with an AB5
+/// master on a VideoToolbox HEVC or H.264 hardware encoder (Design HC, Experimental).
 /// Frames are rotated by the capture connection, so the BTV3 header rotation is 0 and the size is portrait.
 final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "io.github.meshlive.app.camera", qos: .userInitiated)
-    private var encoder: VP9Encoder?
+    private var encoder: VideoFrameEncoder?
+    /// The `BTV3` codec of this camera's header (VP9, or 4/5 with their master on).
+    let codecId: UInt8
+    /// Codecs 4 and 5: a keyframe request must be answered by an IDR (PROTOCOL "Sender rules").
+    private var idrRequests = IdrRequestTracker()
     private var forceKeyFrame = true
     /// First-frame check (LeadingBlankFrames); dropping is Experimental, `-dropLeadingBlankFrames YES`.
     private var blankCheck = LeadingBlankFrames(dropBlank: AppSettings.labSwitch("dropLeadingBlankFrames", shipped: false))
@@ -47,8 +52,22 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
     }
 
     /// - Parameter clockStart: uptime shared with the audio clock so BTV3 timestamps align.
-    init(width: Int, height: Int, fps: Int, bitrateKbps: Int, front: Bool, clockStart: TimeInterval) {
+    init(width: Int, height: Int, fps: Int, bitrateKbps: Int, front: Bool, clockStart: TimeInterval, codecId: UInt8 = StreamProtocol.codecVP9) {
         self.width = width; self.height = height; self.fps = fps; self.bitrateKbps = bitrateKbps; self.front = front; startUptime = clockStart
+        self.codecId = codecId
+    }
+
+    /// The encoder of this camera's codec at `width` x `height` (libvpx with the settings it had before AB5).
+    private func makeEncoder(width: Int, height: Int) throws -> VideoFrameEncoder {
+        guard let codec = AnnexBCodec(codecId: codecId) else {
+            return try VP9Encoder(width: width, height: height, fps: fps, bitrateKbps: bitrateKbps, threads: 2, speed: 8)
+        }
+        guard let configuration = HardwareEncoderSupport.eligible(codec) else { throw VideoCodecError.unavailable("No eligible \(codec.label) encoder") }
+        let encoder = try VideoToolboxEncoder(configuration: configuration, width: width, height: height, fps: fps, bitrateKbps: bitrateKbps)
+        AppLog.event("hc_encoder", ["codec": codec.label, "profile": configuration.profile.rawValue, "setup": configuration.setup.rawValue,
+                                    "rate": encoder.rateMode, "lowLatency": "\(encoder.lowLatency)",
+                                    "size": "\(width)x\(height)", "fps": "\(fps)", "kbps": "\(bitrateKbps)"])
+        return encoder
     }
 
     func start() {
@@ -68,26 +87,34 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         guard observers.isEmpty else { return }
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: .main) { [weak self] note in
-            let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
-            AppLog.event("camera_error", ["stage": "runtime", "error": "\(error?.domain ?? "?") \(error?.code ?? 0)"])
-            self?.queue.async { self?.session.startRunning() }
+            MainStall.run("CameraVideo.runtimeError") {
+                let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+                AppLog.event("camera_error", ["stage": "runtime", "error": "\(error?.domain ?? "?") \(error?.code ?? 0)"])
+                self?.queue.async { self?.session.startRunning() }
+            }
         })
         #if os(macOS)
         observers.append(center.addObserver(forName: DesktopCameraDevices.selectionChanged, object: nil, queue: .main) { [weak self] _ in
-            self?.queue.async {
-                guard let self else { return }
-                self.session.stopRunning()
-                self.forceKeyFrame = true
-                self.configure()
+            MainStall.run("CameraVideo.selectionChanged") {
+                self?.queue.async {
+                    guard let self else { return }
+                    self.session.stopRunning()
+                    self.forceKeyFrame = true
+                    self.configure()
+                }
             }
         })
         #endif
         #if os(iOS)
         observers.append(center.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: .main) { note in
-            AppLog.event("camera_interrupted", ["reason": "\(note.userInfo?[AVCaptureSessionInterruptionReasonKey] ?? "?")"])
+            MainStall.run("CameraVideo.interrupted") {
+                AppLog.event("camera_interrupted", ["reason": "\(note.userInfo?[AVCaptureSessionInterruptionReasonKey] ?? "?")"])
+            }
         })
         observers.append(center.addObserver(forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: .main) { _ in
-            AppLog.event("camera_interruption_ended")
+            MainStall.run("CameraVideo.interruptionEnded") {
+                AppLog.event("camera_interruption_ended")
+            }
         })
         #endif
     }
@@ -100,7 +127,7 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         session.automaticallyConfiguresApplicationAudioSession = false
         #endif
         do {
-            encoder = try VP9Encoder(width: width, height: height, fps: fps, bitrateKbps: bitrateKbps, threads: 2, speed: 8)
+            encoder = try makeEncoder(width: width, height: height)
         } catch {
             AppLog.event("camera_error", ["stage": "encoder", "error": "\(error)"])
             DispatchQueue.main.async { self.onFailure?("Video encoder unavailable: \(error)") }; return
@@ -120,6 +147,8 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
             DispatchQueue.main.async { self.onFailure?("No camera available") }; return
         }
         session.addInput(input)
+        // 480p (854 lines portrait) needs a 16:9 capture; the smaller sizes keep the VGA capture they always used.
+        if max(width, height) > 640, session.canSetSessionPreset(.hd1280x720) { session.sessionPreset = .hd1280x720 }
         let output = AVCaptureVideoDataOutput()
         output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
         output.alwaysDiscardsLateVideoFrames = true
@@ -137,7 +166,12 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
                 if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
             } else if connection.isVideoOrientationSupported { connection.videoOrientation = .portrait }
             #endif
-            if connection.isVideoMirroringSupported { connection.isVideoMirrored = front }
+            // The picture sent is the scene as the other side would see it through the lens (text reads correctly); only the
+            // local self-view (AVCaptureVideoPreviewLayer) is mirrored. Control arm: `-sentFrontMirrored YES` (DEBUG).
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = front && LabSwitch.promoted("sentFrontMirrored", shipped: false)
+            }
         }
         session.commitConfiguration()
         let configured = ProcessInfo.processInfo.systemUptime
@@ -148,8 +182,28 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
                                         "configureMs": "\(Int((configured - started) * 1000))", "startRunningMs": "\(Int((now - configured) * 1000))"])
     }
 
-    func requestKeyFrame() { queue.async { self.forceKeyFrame = true } }
-    func setBitrate(kbps: Int) { queue.async { self.encoder?.setBitrate(kbps: kbps); self.bitrateKbps = kbps } }
+    func requestKeyFrame() {
+        queue.async {
+            self.forceKeyFrame = true
+            if AnnexBCodec(codecId: self.codecId) != nil { self.idrRequests.requested(now: ProcessInfo.processInfo.systemUptime) }
+        }
+    }
+    func setBitrate(kbps: Int) {
+        queue.async {
+            if let hardware = self.encoder as? VideoToolboxEncoder {
+                // Never silently: a rate the encoder refuses keeps the old one, and the log says so.
+                guard hardware.trySetBitrate(kbps: kbps) else {
+                    AppLog.event("hc_encoder", ["event": "rate_refused", "requestedKbps": "\(kbps)", "effectiveKbps": "\(hardware.bitrateKbps)"])
+                    return
+                }
+            } else {
+                self.encoder?.setBitrate(kbps: kbps)
+            }
+            self.bitrateKbps = kbps
+        }
+    }
+    /// Heat limit (Lower quality when hot): frames are taken at most `fps` times a second; the encoder keeps its size.
+    func setFrameRate(_ fps: Int) { queue.async { self.fps = max(1, fps) } }
 
     /// Resolution ladder: a new frame size (no larger than the call header). The encoder restarts, so the first
     /// frame at the new size is a keyframe; receivers follow it in-band.
@@ -157,7 +211,7 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         queue.async {
             guard width != self.width || height != self.height else { return }
             do {
-                self.encoder = try VP9Encoder(width: width, height: height, fps: self.fps, bitrateKbps: self.bitrateKbps, threads: 2, speed: 8)
+                self.encoder = try self.makeEncoder(width: width, height: height)
                 self.width = width; self.height = height; self.forceKeyFrame = true
             } catch {
                 AppLog.event("camera_error", ["stage": "resize", "error": "\(error)"])
@@ -194,9 +248,23 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         }
         lastFrameUptime = now
         let pts = Int64((now - startUptime) * 1_000_000)
+        if let codec = AnnexBCodec(codecId: codecId) {
+            switch idrRequests.tick(now: now) {
+            case .none: break
+            case .repeatRequest: forceKeyFrame = true
+            case .giveUp:
+                // PROTOCOL "Sender rules": three missed keyframe requests end video; this encoder is not used again.
+                HardwareEncoderSupport.markIneligible(codec, reason: "no_idr")
+                self.encoder = nil
+                AppLog.event("hc_encoder", ["event": "no_idr", "codec": codec.label])
+                DispatchQueue.main.async { self.onFailure?("Video stopped: the \(codec.label) encoder did not answer keyframe requests.") }
+                return
+            }
+        }
         do {
             guard let frame = try encoder.encode(picture, presentationTimeUs: pts, forceKeyFrame: forceKeyFrame) else { return }
             forceKeyFrame = false
+            idrRequests.emitted(idr: frame.keyFrame)
             encodedFrames += 1; encodedBytes += frame.data.count
             let flags: UInt8 = frame.keyFrame ? StreamProtocol.flagKeyFrame : 0
             DispatchQueue.main.async { self.onFrame?(flags, pts, frame.data) }
@@ -205,6 +273,106 @@ final class CameraVideo: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
             if encodeErrors <= 3 { AppLog.event("camera_error", ["stage": "encode", "error": "\(error)"]) }
             DispatchQueue.main.async { self.onFailure?("\(error)") }
         }
+    }
+}
+
+/// AB5, Design HC (Experimental, off): the masters and control arms. DEBUG builds read the launch arguments; a release
+/// build keeps every one at its shipped value (Android honours its `test_*` extras only in debug builds).
+enum HardwareCodecSwitches {
+    /// Both masters follow the S0 gate; `-NearbyHEVC`/`-NearbyH264` still override in DEBUG, `-appleHardwareCodecs YES`
+    /// turns both on there.
+    private static var masters: (hevc: Bool, h264: Bool) {
+        HardwareCodecMasters.resolve(gate: ReleaseGates.hardwareCodecs,
+                                     hevcOverride: debugOverride("NearbyHEVC"),
+                                     h264Override: debugOverride("NearbyH264"))
+    }
+    /// Master `-NearbyHEVC YES` (Android `hevc_codec`, on there since 0.4.2).
+    static var hevc: Bool { masters.hevc }
+    /// Master `-NearbyH264 YES` (Android `h264_codec`).
+    static var h264: Bool { masters.h264 }
+
+    /// A stored switch or a DEBUG launch argument, read only when both defaults agree (the key is set); nil in release.
+    private static func debugOverride(_ key: String) -> Bool? {
+        #if DEBUG
+        let on = AppSettings.flag(key, default: true)
+        let off = AppSettings.flag(key, default: false)
+        return on == off ? on : nil
+        #else
+        return nil
+        #endif
+    }
+    /// Control arm `-NearbyPreferHEVC NO` (Android `test_prefer_hevc=false`): advertised, never chosen.
+    static var preferHevc: Bool { AppSettings.labSwitch("NearbyPreferHEVC", shipped: true) }
+    /// Control arm `-NearbyPreferAVC NO` (Android `test_prefer_hw_avc=false`).
+    static var preferAvc: Bool { AppSettings.labSwitch("NearbyPreferAVC", shipped: true) }
+    /// Control arm `-NearbyBit7HwHevc NO` (Android `test_bit7_hw_hevc=false`): peer bit 7 puts VP9 above hardware HEVC.
+    static var bit7HwHevc: Bool { AppSettings.labSwitch("NearbyBit7HwHevc", shipped: true) }
+    /// Control arm `-NearbyCodecPowerAware NO` (Android `test_codec_power_aware=false`).
+    static var powerAware: Bool { AppSettings.labSwitch("NearbyCodecPowerAware", shipped: true) }
+
+    /// Sets the `BTV3` masters once at launch, before any hello, header or decoder mask, and probes the hardware encoders
+    /// off the main queue when a master is on.
+    static func apply() {
+        StreamProtocol.hevcEnabled = hevc
+        StreamProtocol.h264Enabled = h264
+        AppLog.event("hc_switches", ["gate": "\(ReleaseGates.hardwareCodecs)", "hevc": "\(hevc)", "h264": "\(h264)",
+                                     "preferHevc": "\(preferHevc)", "preferAvc": "\(preferAvc)",
+                                     "bit7HwHevc": "\(bit7HwHevc)", "powerAware": "\(powerAware)"])
+        guard hevc || h264 else { return }
+        DispatchQueue.global(qos: .utility).async {
+            for codec in AnnexBCodec.allCases {
+                let configuration = HardwareEncoderSupport.eligible(codec)
+                for attempt in HardwareEncoderSupport.probeAttempts(codec) {
+                    AppLog.event("hc_probe_attempt", ["codec": codec.label, "attempt": attempt])
+                }
+                AppLog.event("hc_probe", ["codec": codec.label, "configuration": configuration?.label ?? "none"])
+            }
+        }
+    }
+
+    /// Low Power Mode first (the user's own choice), then a thermal state of fair or worse (Android: battery saver, then
+    /// `THERMAL_STATUS_LIGHT` or above). Read once when a call is set up.
+    static func powerState() -> CodecPowerState {
+        let info = ProcessInfo.processInfo
+        if info.isLowPowerModeEnabled { return .saver }
+        return info.thermalState.rawValue >= ProcessInfo.ThermalState.fair.rawValue ? .warm : .normal
+    }
+
+    /// DEBUG `-NearbyForceCodec h264|hevc|vp9`: the one codec the call choice may send, or nil.
+    static var forcedCodec: UInt8? {
+        #if DEBUG
+        switch UserDefaults.standard.string(forKey: "NearbyForceCodec")?.lowercased() {
+        case "h264"?, "avc"?: return StreamProtocol.codecH264
+        case "hevc"?, "h265"?: return StreamProtocol.codecHEVC
+        case "vp9"?: return StreamProtocol.codecVP9
+        default: return nil
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    /// The inputs of one call's codec choice; nil while both masters are off (the two-codec rule, exactly as before).
+    static func callInputs() -> CallCodecInputs? {
+        guard StreamProtocol.hevcEnabled || StreamProtocol.h264Enabled else { return nil }
+        var encoders: [VideoEncoderCandidate] = []
+        if StreamProtocol.hevcEnabled, HardwareEncoderSupport.isEligible(.hevc) {
+            encoders.append(VideoEncoderCandidate(name: "VideoToolbox HEVC", codecId: StreamProtocol.codecHEVC, backend: .hardware))
+        }
+        if StreamProtocol.h264Enabled, HardwareEncoderSupport.isEligible(.h264) {
+            encoders.append(VideoEncoderCandidate(name: "VideoToolbox H264", codecId: StreamProtocol.codecH264, backend: .hardware))
+        }
+        if VP9Encoder.isAvailable { encoders.append(VideoEncoderCandidate(name: "libvpx VP9", codecId: StreamProtocol.codecVP9, backend: .libvpx)) }
+        // DEBUG `-NearbyForceCodec h264|hevc|vp9` (device codec cases): only that encoder is offered to the choice, its
+        // prefer arm on; a peer that cannot decode it gets no common codec (the call fails, logged). Release ignores it.
+        let forced = forcedCodec
+        if let forced { encoders = encoders.filter { $0.codecId == forced } }
+        let switches = CodecChoiceSwitches(hevc: StreamProtocol.hevcEnabled, h264: StreamProtocol.h264Enabled,
+                                           preferHevc: preferHevc || forced == StreamProtocol.codecHEVC,
+                                           preferAvc: preferAvc || forced == StreamProtocol.codecH264, bit7AllowsHwHevc: bit7HwHevc,
+                                           powerAware: powerAware, power: powerState())
+        if let forced { AppLog.event("hc_force", ["codec": "\(forced)", "offered": "\(!encoders.isEmpty)"]) }
+        return CallCodecInputs(encoders: encoders, switches: switches)
     }
 }
 
@@ -220,6 +388,8 @@ final class VideoSurface: PlatformVideoView {
             #endif
         }
     }
+    /// Android "Fill screen with video": fill crops the edges, off shows the whole frame with bars.
+    var fill = false { didSet { if fill != oldValue { displayLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect } } }
     override init(frame: CGRect) {
         super.init(frame: frame)
         displayLayer.videoGravity = .resizeAspect
@@ -279,28 +449,43 @@ final class VideoSink: ObservableObject {
     @Published var hasVideo = false
     @Published var rotation = 0
     @Published var aspect: CGFloat = 9.0 / 16.0
+    /// When the last picture was shown (uptime), for "Warn when video freezes".
+    private(set) var lastPictureAt: TimeInterval?
     func show(_ pixels: CVPixelBuffer) {
-        surface.show(pixels)
+        MainStall.run("VideoSink.show") { surface.show(pixels) }
+        lastPictureAt = ProcessInfo.processInfo.systemUptime
         let w = CGFloat(CVPixelBufferGetWidth(pixels)), h = CGFloat(CVPixelBufferGetHeight(pixels))
         let a = rotation % 180 == 0 ? w / h : h / w
         if !hasVideo { hasVideo = true }
         if abs(a - aspect) > 0.01 { aspect = a }
     }
-    func clear() { surface.displayLayer.flushAndRemoveImage(); hasVideo = false }
+    func clear() {
+        MainStall.run("VideoSink.clear") { surface.displayLayer.flushAndRemoveImage() }
+        hasVideo = false; lastPictureAt = nil
+    }
 }
 
 #if os(iOS)
 struct VideoSurfaceView: UIViewRepresentable {
     @ObservedObject var sink: VideoSink
+    var fill = false
     func makeUIView(context: Context) -> VideoSurface { sink.surface }
-    func updateUIView(_ view: VideoSurface, context: Context) { view.rotation = sink.rotation }
+    func updateUIView(_ view: VideoSurface, context: Context) { view.rotation = sink.rotation; view.fill = fill }
 }
 
 /// Live camera preview for the sender.
 struct CameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
-    func makeUIView(context: Context) -> PreviewView { let v = PreviewView(); v.previewLayer.session = session; v.previewLayer.videoGravity = .resizeAspectFill; return v }
+    // Marked for the main-stall watchdog: attaching or detaching a preview layer waits for the capture session.
+    func makeUIView(context: Context) -> PreviewView {
+        MainStall.run("CameraPreviewView.make") {
+            let v = PreviewView(); v.previewLayer.session = session; v.previewLayer.videoGravity = .resizeAspectFill; return v
+        }
+    }
     func updateUIView(_ uiView: PreviewView, context: Context) {}
+    static func dismantleUIView(_ uiView: PreviewView, coordinator: ()) {
+        MainStall.run("CameraPreviewView.dismantle") { uiView.previewLayer.session = nil }
+    }
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
@@ -310,18 +495,20 @@ struct CameraPreviewView: UIViewRepresentable {
 #else
 struct VideoSurfaceView: NSViewRepresentable {
     @ObservedObject var sink: VideoSink
+    var fill = false
     func makeNSView(context: Context) -> VideoSurface { sink.surface }
-    func updateNSView(_ view: VideoSurface, context: Context) { view.rotation = sink.rotation }
+    func updateNSView(_ view: VideoSurface, context: Context) { view.rotation = sink.rotation; view.fill = fill }
 }
 
 struct CameraPreviewView: NSViewRepresentable {
     let session: AVCaptureSession
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        view.wantsLayer = true
         let preview = AVCaptureVideoPreviewLayer(session: session)
         preview.videoGravity = .resizeAspectFill
+        // Layer-hosting: the layer first, then wantsLayer, so AppKit sizes the preview with the view.
         view.layer = preview
+        view.wantsLayer = true
         return view
     }
     func updateNSView(_ view: NSView, context: Context) {

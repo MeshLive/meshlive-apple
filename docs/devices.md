@@ -1,12 +1,13 @@
 # Device compatibility
 
-Which iPhones and Macs MeshLive has been tried on, and how it went. The iPhone app needs iOS 16 or newer; the native
+Which iPhones and Macs MeshLive has been tried on, and how it went. The iPhone app needs iOS 17 or newer; the native
 Mac app needs an Apple Silicon Mac with macOS 14 or newer.
 
-**There is no pass yet.** Apple-device testing so far is a few manual and scripted runs by the maintainers, always
-paired with Android phones running MeshLive. Interoperability is mainly checked offline, with byte-level test vectors
-produced by the Android app's own classes ([testing](dev/testing.md)). The current code (Android-style screens,
-relaying, audio-only live and the Mac app) has **not** been installed on an iPhone yet.
+**There is no pass yet.** Apple-device testing so far is a few manual and scripted runs by the maintainers: short
+calls of 20 to 45 seconds over Bluetooth LE GATT, without quality gates. Interoperability is mainly checked offline,
+with byte-level test vectors produced by the Android app's own classes ([testing](dev/testing.md)). The screens added
+in November 2026 after the verification codes (contacts, video settings, and the Calls and Live changes) have not been
+installed on an iPhone yet.
 
 ## Results so far
 
@@ -15,9 +16,13 @@ relaying, audio-only live and the Mac app) has **not** been installed on an iPho
 | iPhone 14 Plus | early build, 2026-10-10 | Samsung Galaxy M31 (Android 12) | scripted voice and video calls over LE GATT, iPhone calling | partial: voice carried packets both ways; video decoded both ways but the iPhone's video was limited to about 125-135 kbps before rate control was added |
 | iPhone 16 Plus, iOS 26.6 | 0.3.0, 2026-10-17 | Samsung Galaxy M31 (Android 12, "find iPhones" on) | voice and video calls both ways, watching a live stream both ways, over LE GATT | partial: every direction connected and carried audio and video for 20-40 s; short runs only, no quality gates |
 | Apple Silicon Mac, macOS 26 (native app) | current, 2026-10-24 to 10-26 | several Android phones, mostly a Samsung Galaxy S24 (MeshLive 0.3.1-beta, Android 16) | discovery, voice and video calls over LE GATT | partial: voice calls worked both ways; video calls decode both ways but always dropped after 17 s to about 5.5 min ([details](dev/testing.md#hardware-results-release-app-mac-with-android-phones-over-gatt)). Advertises with the Mac's fixed Bluetooth address (macOS limitation); see [privacy](privacy.md#on-a-mac) |
+| iPhone 12, iOS 26.5 | build of 2026-11-05 (verification codes) | Apple Silicon Mac, macOS 27 (native app, same build) | discovery, voice and video calls both ways over LE GATT, adding each other by code (a test helper read the code instead of the camera), the iPhone app in the background and closed mid-call | partial: every test passed in 20-45 s calls; turning Bluetooth off and locking the iPhone mid-call were not tried |
+| iPhone 12 and the Mac (native app) | build of 2026-11-05 (verification codes) | Samsung Galaxy M31 (Android 12, MeshLive for Android with default settings) | voice and video calls both ways between each Apple device and the phone, over LE GATT | partial: every direction connected and carried audio and video for 20-26 s; the iPhone and the Mac listed the Android phone only while it showed its code or once it was a contact |
 
-**Not tested yet:** LE L2CAP CoC, relaying, audio-only live, the QR scanner, the emergency wipe on a device, other
-iPhone and Mac models, and iPhone-to-Mac calls.
+**Not tested yet:** the Experimental in-call link renewal (off by default; on an armed iPhone it needs the app in the
+foreground), LE L2CAP CoC, relaying, audio-only live, live streams on the current build, scanning a code with
+the camera, the emergency wipe on a device, other iPhone and Mac models, and the screens added after the
+verification codes.
 
 ## Add your device
 

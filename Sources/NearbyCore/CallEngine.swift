@@ -11,14 +11,34 @@ public struct CallMediaSettings: Equatable {
     }
 }
 
-/// Experimental peer labels for one call (naming phase 1). Nil = feature off: no hello bit, no type 10.
+/// Peer labels for one call (Android PeerLabelFeature). On by default since P5; nil only in a DEBUG control run that
+/// turned names and titles off (then no hello bit, no type 10). `audience` and `nameBeforeAnswer` decide when the name
+/// goes (Naming v2, `CallLabelPolicy`). A call subject is never sent.
 public struct CallLabelOptions {
     public var localName: String?
-    public var subject: String?
-    /// True when the peer's full fingerprint is a verified contact (R1: name at Ringing only then).
+    /// "Who sees my name" (Android NamesAudience).
+    public var audience: NamesAudience
+    /// Experimental "Show my name before they answer" (Android NAMES_BEFORE_ANSWER, off since the product decision of
+    /// 2026-11-06). False, the default: a stranger gets the name only after its verified REVEAL passed the block check.
+    public var nameBeforeAnswer: Bool
+    /// B1.4 (Android `test_callee_name_after_reveal`, promoted): a callee answered as a pseudonym to a pseudonymous
+    /// stranger holds its name until the caller's reveal passed the block check. False is BASE's every moment.
+    public var calleeNameAfterReveal: Bool
+    /// True when the peer's full fingerprint is a verified contact.
     public var isVerifiedPeer: (IdentityFingerprint) -> Bool
-    public init(localName: String?, subject: String?, isVerifiedPeer: @escaping (IdentityFingerprint) -> Bool = { _ in false }) {
-        self.localName = localName; self.subject = subject; self.isVerifiedPeer = isVerifiedPeer
+    /// Re-read when a held label is released (Android reads the pref then); defaults to the audience at call start.
+    public var currentAudience: () -> NamesAudience
+    /// Re-read when a label is queued (Android reads the pref then); defaults to the name at call start.
+    public var currentName: () -> String?
+    public init(localName: String?, audience: NamesAudience = .everyone, nameBeforeAnswer: Bool = false,
+                calleeNameAfterReveal: Bool = false,
+                isVerifiedPeer: @escaping (IdentityFingerprint) -> Bool = { _ in false },
+                currentAudience: (() -> NamesAudience)? = nil, currentName: (() -> String?)? = nil) {
+        self.localName = localName; self.audience = audience; self.nameBeforeAnswer = nameBeforeAnswer
+        self.calleeNameAfterReveal = calleeNameAfterReveal
+        self.isVerifiedPeer = isVerifiedPeer
+        self.currentAudience = currentAudience ?? { audience }
+        self.currentName = currentName ?? { localName }
     }
 }
 
@@ -108,6 +128,13 @@ public struct Bmh3CallOptions {
     public var relayHop: DiscoveryAnnouncement?
     /// route search (listener): the `RELAY_SEEK` bits signed while this device would admit a search; nil none.
     public var relaySeek: UInt8?
+    /// BVMID2 scanner (caller): this connection scans this verification code. The tag is the code's `K_tag` at both layers,
+    /// this device presents its real key, a pseudonym answer is refused and the answerer's fingerprint must equal the code's.
+    /// No Invite follows: the session only verifies.
+    public var qrScan: Bvmid2Payload?
+    /// BVMID2 displayer (callee): the code the Add contact screen shows. While a code is live its `K_tag` is one more tag
+    /// check, with one gate per connection.
+    public var qrDisplay: QrCodeDisplay?
     public init(pseudonyms: Bool, selected: DiscoveryAnnouncement? = nil, pins: Bmh3Pins? = nil,
                 budget: Bmh3SigningBudget = Bmh3CallSettings.sharedBudget, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
         self.pseudonyms = pseudonyms; self.selected = selected; self.pins = pins; self.budget = budget; self.wallEpoch = wallEpoch
@@ -117,6 +144,17 @@ public struct Bmh3CallOptions {
     func settings(role: PrivateCallRole, openingEntries: (() -> [OpeningEntry])?) -> Bmh3CallSettings? {
         switch role {
         case .caller:
+            if let scan = qrScan {
+                // BVMID2: always BMH3 with the code's tag, the real key, no pin and no relay.
+                let check = selected.map { Bmh3CallSettings.selectionCheck($0, wallEpoch: wallEpoch) }
+                let settings = Bmh3CallSettings(speak: true, checkResponder: { peer, purpose in
+                    try QrScanPolicy.checkResponder(scan, peer)
+                    try check?(peer, purpose)
+                })
+                settings.contactTag = try? QrScanPolicy.tag(scan)
+                settings.linkTag = true
+                return settings
+            }
             // A relayed route decides BMH3 on its first helper's own offer (Android relayHopUsesBmh3).
             let choiceOffer = relayHop ?? selected
             let pinned = choiceOffer.map { pins?.isPinned($0.nodeIdPrefix) ?? false } ?? false
@@ -142,6 +180,15 @@ public struct Bmh3CallOptions {
             settings.relaySeek = relaySeek
             if let tagChecks { settings.tagChecks = tagChecks }
             if let admitTagged { settings.admitTagged = admitTagged }
+            if let qrDisplay {
+                // One gate per incoming connection, shared by its link and end-to-end handshakes (single reservation).
+                settings.qrDisplay = qrDisplay
+                settings.qrGate = qrDisplay.hasCode() ? qrDisplay.newGate() : nil
+                // Captured when the connection arrived: a link accepted only because the screen showed a code stays
+                // screen-only even if the screen is left while its handshake runs.
+                let screenOnlyAtAccept = qrDisplay.screenOnlyReachable
+                settings.screenOnlyReachable = { screenOnlyAtAccept || qrDisplay.screenOnlyReachable }
+            }
             return settings
         }
     }
@@ -167,12 +214,26 @@ public final class CallEngine: MeshConnection {
         case remoteMuted(Bool)
         case keyFrameRequested
         case peerReport(LinkCapacityReport)
-        /// Verified self-chosen name and/or call subject of the peer (experimental labels).
-        case peerLabels(name: String?, subject: String?)
+        /// Verified self-chosen name of the peer (experimental labels). A call subject is never shown.
+        case peerLabels(name: String?)
         /// Experimental relayed calls: the first hop answered READY with this many relays to the callee.
         case relayReady(Int)
         /// Experimental relayed calls: this helper listener's first record was SETUP (adopt the link for a duty).
         case relaySetupRequested(RelaySetupMessage)
+        /// Call blocking: the gate refused this incoming call at its Invite. It never rings here; the engine declines it
+        /// after the human-like delay.
+        case declinedSilently(CallGateDecision)
+        /// Call blocking: the real identity a stranger's reveal showed is blocked. Nothing more goes to them; the call
+        /// ends after the delay.
+        case blockedAfterReveal
+        /// BVMID2 scanner: the answerer proved at both layers that it holds the scanned code's key. Nothing is marked yet:
+        /// the app asks "Is this <name>'s screen?" and answers with `confirmVerification`.
+        case verificationReached(NodeId, IdentityFingerprint)
+        /// BVMID2 displayer: a connection matched the code on screen and completed its end-to-end handshake with this real
+        /// key. `committed` is true when this connection consumed the code ("<name> scanned your code").
+        case verificationCommitted(IdentityFingerprint, committed: Bool)
+        /// Design QL: this verification session stored the peer's presence lease (the phones now recognise each other).
+        case verificationLeaseStored(IdentityFingerprint)
         case ended(String, error: Bool)
     }
 
@@ -192,6 +253,16 @@ public final class CallEngine: MeshConnection {
     /// Relayed calls cap video at 110 kbps (Android PrivateCallMedia: 15 fps / 110 kbps when hops > 0).
     public var effectiveVideoBitrate: Int { relayHops > 0 ? min(settings.videoBitrate, 110_000) : settings.videoBitrate }
     public private(set) var selectedCodec: UInt8?
+    /// AB5 (Design HC, Experimental): this device's encoders and switches for the one codec choice per direction. Nil, or
+    /// both masters off, keeps the two-codec rule (`codecForPeer`). Set before the endpoint handshake.
+    public var codecChoiceInputs: CallCodecInputs?
+    /// The Design HC choice that picked `selectedCodec` (for `encoder_choice`); nil with the two-codec rule.
+    public private(set) var codecChoice: CallCodecChoice?
+    /// Codecs 4 and 5: the receiver's access-unit gate, made from the peer's header.
+    private var remoteVideoGate: AccessUnitGate?
+    private var lastGateKeyFrameRequest: TimeInterval = -1_000
+    /// A dropped access unit (`au_reject`): codec, rule, NAL type, payload bytes.
+    public var onAccessUnitRejected: ((AnnexBCodec, Int, Int, Int) -> Void)?
     public private(set) var remoteHeader: StreamHeader?
     public private(set) var localHeader: StreamHeader?
     public private(set) var muted = false
@@ -199,7 +270,14 @@ public final class CallEngine: MeshConnection {
     public var settings: CallMediaSettings
     /// Android's experimental call video fragments (BME1 type 9); off by default, as on Android.
     public let fragmentsEnabled: Bool
-    private(set) var peerAcceptsFragments = false
+    public private(set) var peerAcceptsFragments = false
+    /// AW1 (Experimental): the Wi-Fi Direct guest of a direct call; nil while the gate is off or the call is relayed.
+    public private(set) var wifi: WifiCallAgent?
+    private let wifiConfig: WifiCallAgent.Config?
+    public var onWifiRequest: ((WifiCallAgent.Request) -> Void)?
+    public var onWifiLog: ((String, [String: String]) -> Void)?
+    public var wifiForeground: () -> Bool = { true }
+    private var activeSince: TimeInterval?
     private var reassembler = CallVideoReassembler()
     private var lastHeartbeatAt: TimeInterval = 0
     private var ringingSince: TimeInterval = 0
@@ -223,8 +301,14 @@ public final class CallEngine: MeshConnection {
     ///   - decodeMask: codecs this phone can actually decode.
     public init(role: PrivateCallRole, transport: MeshTransport, identity: SigningIdentity, requestedType: CallType,
                 encodeMask: UInt8, decodeMask: UInt8, settings: CallMediaSettings = CallMediaSettings(),
-                expectedPeerPrefix: Data? = nil, relayHops: UInt8 = 0, videoFragments: Bool = false, labels: CallLabelOptions? = nil,
-                rotating: RotatingCallOptions? = nil, bmh3: Bmh3CallOptions? = nil, relayed: RelayedCallOptions? = nil) {
+                expectedPeerPrefix: Data? = nil, relayHops: UInt8 = 0, videoFragments: Bool = false, wifi: WifiCallAgent.Config? = nil,
+                labels: CallLabelOptions? = nil, rotating: RotatingCallOptions? = nil, bmh3: Bmh3CallOptions? = nil,
+                relayed: RelayedCallOptions? = nil, linkRenewal: Bool = false) {
+        // EXPERIMENTAL in-call link renewal (Design SR): end-to-end hello bit 4, never in a BVMID2 scan, and not together
+        // with the AW1 Wi-Fi carrier on Apple (its cutover events for a renewal are not wired).
+        let renewalOffered = linkRenewal && wifi == nil && bmh3?.qrScan == nil
+        renewal = renewalOffered ? CallRenewalAgent(enabled: true, role: role == .caller ? 0 : 1) : nil
+        renewalExclusion = !linkRenewal || renewalOffered ? nil : (wifi != nil ? "wifi_guest" : "verification")
         labelOptions = labels
         relayedOptions = relayed
         rotatingOptions = rotating
@@ -235,8 +319,9 @@ public final class CallEngine: MeshConnection {
         self.settings = settings
         cameraEnabled = requestedType == .video
         fragmentsEnabled = videoFragments
-        var link = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: encodeMask & NodeCapabilities.codecMask,
-                                    decodeCodecMask: decodeMask & NodeCapabilities.codecMask, maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 0)
+        wifiConfig = wifi
+        var link = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: encodeMask & NodeCapabilities.helloCodecMask,
+                                    decodeCodecMask: decodeMask & NodeCapabilities.helloCodecMask, maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: 0)
         var endpointCaps = link
         // Relayed calls: every endpoint with the experiment on signs link bit 4 (the end-to-end hello is unchanged).
         link = RelayedCalls.linkCapabilities(link, featureOn: relayed?.featureOn == true,
@@ -247,7 +332,9 @@ public final class CallEngine: MeshConnection {
         endpointCaps = PeerLabelFeature.advertise(endpointCaps, enabled: labels != nil)
         // Rotating IDs phase 1b: call endpoints also sign end-to-end bit 3 (BDX1 OPENING / reveal exchange).
         if rotating != nil { endpointCaps.transportMask |= NodeCapabilities.endpointDiscoveryExchange }
+        endpointCaps = CallRenewalWire.advertise(endpointCaps, enabled: renewalOffered)
         let bmh3Settings = bmh3?.settings(role: role, openingEntries: rotating?.entries)
+        bmh3Settings?.wifiMarker = wifi != nil && relayHops == 0 && role == .caller
         super.init(role: role == .caller ? .initiator : .responder, transport: transport, identity: identity,
                    linkCapabilities: link, endpointCapabilities: endpointCaps, bmh3: bmh3Settings)
         self.expectedPeerPrefix = rotating?.selected?.rotating == true ? nil : expectedPeerPrefix
@@ -256,6 +343,9 @@ public final class CallEngine: MeshConnection {
             onDiscoveryOpening = { [weak self] entries in try self?.checkOpening(entries) }
         }
         if role == .callee, relayed?.featureOn == true, relayed?.helperActive == true { acceptRelaySetup = true }
+        renewal?.host = self
+        renewal?.onRequest = { [weak self] in self?.onRenewalRequest?($0) }
+        renewal?.log = { [weak self] event, fields in self?.onRenewalLog?(event, fields) }
         if role == .caller, relayed?.route != nil {
             // The SETUP wait (up to 20 s plus 2 s grace) runs before the endpoint handshake.
             setupTimeout += TimeInterval(RelayedCalls.setupDeadlineMs + RelayedCalls.setupReplyGraceMs) / 1000
@@ -391,6 +481,14 @@ public final class CallEngine: MeshConnection {
     private var selectedRotating: DiscoveryAnnouncement? { rotatingOptions?.selected.flatMap { $0.rotating ? $0 : nil } }
 
     public override func validateLinkPeer() throws {
+        // BVMID2: while only the Add contact screen made this device reachable it accepts nothing but the code, whatever
+        // handshake the peer spoke (the BMH3 responder already refused other msg1s; a BMH2 hello is refused too).
+        if callRole == .callee, let bmh3,
+           MeetScreenGate.refuses(screenOnlyReachable: bmh3.screenOnlyReachable(), linkMatchedCode: link.qrTagMatched) {
+            throw ProtocolError.state("Only the verification code is accepted while the Add contact screen is open")
+        }
+        // A link that matched the code is a verification session only: no relay SETUP or SEEK is read on it.
+        if callRole == .callee, link.qrTagMatched { acceptRelaySetup = false }
         if let route = relayRoute {
             if route.rotating, !link.peerPseudonymous,
                (link.peerCapabilities?.transportMask ?? 0) & NodeCapabilities.transportDiscoveryOpening == 0 {
@@ -414,8 +512,17 @@ public final class CallEngine: MeshConnection {
     private var awaitingOpening = false
     /// Caller: the callee answered with a throwaway; its reveal must arrive (before Accept) and open the selection.
     private var awaitingReveal = false
-    /// Caller labels held until the callee proved itself (reveal or relayed OPENING).
-    private var heldCallerLabels: Data?
+    /// Naming v2: the caller's name in this call (`CallerNameRelease`, decision 2026-11-06): planned before the
+    /// Invite, released only by the OPENING handler or the verified, unblocked REVEAL handler, or at once to an unblocked
+    /// real key. Its `send` is `queueCallerLabels` below; `isBlocked` asks `personBlocked` at that moment (fails open).
+    private lazy var callerNames = CallerNameRelease(
+        send: { [weak self] in self?.queueCallerLabels(name: true) },
+        isBlocked: { [weak self] fingerprint in self?.personBlocked?(fingerprint) == true })
+    /// Why the caller's held name was dropped in this call (a log word), or nil.
+    public var callerNameWithheld: CallerNameRelease.Withheld? { callerNames.withheld }
+    /// Callee, "Only my contacts", answered as a pseudonym: its name waits for the caller's verified reveal and goes only
+    /// to a verified contact.
+    private var pendingRevealLabels: Data?
     /// Callee: the role-0 entries pinned when the connection was set up (sent in the OPENING or the reveal).
     private var calleeEntries: [OpeningEntry] = []
     /// The peer's real identity after a verified reveal.
@@ -441,6 +548,21 @@ public final class CallEngine: MeshConnection {
     /// Glare (DialCollision): asked at the Invite with the caller's authenticated real node ID (nil for a throwaway);
     /// true lets the call ring although `declineAsBusy` is set (the caller is the person this device is dialling).
     public var ringInsteadOfBusy: ((NodeId?) -> Bool)?
+    /// Call blocking (Android CallGate), asked at the Invite before anything rings; nil = no gate (engine tests, the
+    /// MeshPeer tool).
+    public var callGate: ((CallGateCaller) -> CallGateDecision)?
+    /// Call blocking: is this full fingerprint blocked? Asked when a stranger's reveal shows its real identity (both roles).
+    public var personBlocked: ((IdentityFingerprint) -> Bool)?
+    /// The human-like delay before a refused call's decline or a revealed blocked person's end (Android 3 to 7 s).
+    public var blockedEndDelay: () -> TimeInterval = { CallBlockingPolicy.declineDelay() }
+    /// Why the gate refused this incoming call, or nil.
+    public private(set) var silentDecline: CallGateDecision?
+    /// The revealed peer is blocked: nothing more goes to them and the call ends at `blockedEndAt`.
+    public private(set) var blockedAfterReveal = false
+    /// AB3: the blocked person was found at the endpoint handshake (a callee that showed its real key), not at a reveal.
+    public private(set) var blockedRealKey = false
+    private var silentDeclineAt: TimeInterval?
+    private var blockedEndAt: TimeInterval?
     /// True when this call passes through at least one relay: the Invite says so (the caller's claim, which can only
     /// make a call count as relayed), or the authenticated link peer is not the authenticated call peer (a direct call
     /// uses the same key at both layers).
@@ -486,6 +608,8 @@ public final class CallEngine: MeshConnection {
     /// call. The caller thus never decodes or shows a pseudonymous callee's video before its reveal, and nobody's
     /// media plays before the answer.
     private func admitMedia() throws -> Bool {
+        // A revealed blocked person's media never plays while the ordinary end goes out (Android finding 2).
+        if blockedAfterReveal { return false }
         switch state?.phase {
         case .negotiatingMedia?, .active?: break
         case .ended?: return false
@@ -516,12 +640,18 @@ public final class CallEngine: MeshConnection {
                                                 peerNodeId: endpoint.peerNodeId.bytes, openingEntries: entries, verifierWallEpoch: rotatingOptions?.wallEpoch()) == .pass else {
                 throw ProtocolError.authentication
             }
-            releaseHeldCallerLabels()
+            callerNames.onOpeningVerified(audienceNow: labelOptions?.currentAudience() ?? .nobody,
+                                          verifiedContactNow: labelOptions.map { peerIsVerifiedContact($0) } ?? false)
         case .identityReveal(let reveal):
             guard let session = endpoint?.reveal else { throw ProtocolError.state("Unexpected identity reveal") }
-            let verified = try session.onPeerReveal(reveal)
+            // A byte-identical repeat of the verified reveal (re-sent after a link renewal) is ignored.
+            guard let verified = try session.onPeerReveal(reveal) else { return }
             // A verified contact's prefix with another key ends the call before this phone reveals anything.
             try identityGate?.admit(peer: verified.nodeId, fingerprint: verified.fingerprint)
+            // Call blocking (Android `handleReveal`, review 2026-10-27 finding 2): a block follows the real identity,
+            // which a stranger's call shows only now. Checked before anything else goes to the person: no label, no
+            // presence session, no media and, for a caller, no reveal of its own.
+            if personBlocked?(verified.fingerprint) == true { endBlockedAfterReveal(); return }
             if callRole == .caller {
                 guard awaitingReveal, let selected = selectedOffer else { throw ProtocolError.state("Unexpected callee reveal") }
                 guard DiscoverySelectionCheck.check(selected: selected, expectedRole: RotatingDiscoveryIds.roleCallOffer,
@@ -534,10 +664,21 @@ public final class CallEngine: MeshConnection {
                 if session.callerMayReveal && !testingWithholdOwnReveal {
                     enqueue(.content(.discoveryExchange, 0, try session.sendOwn(real: identity, entries: [])), .control)
                 }
-                releaseHeldCallerLabels()
+                // Decision 2026-11-06: the held name goes only now, after the selection check above, only if the
+                // revealed person is not blocked (checked again inside, against the newest list) and only as the newest
+                // "Who sees my name" allows.
+                callerNames.onRevealVerified(verified.fingerprint,
+                                             revealedVerifiedContact: labelOptions?.isVerifiedPeer(verified.fingerprint) == true,
+                                             audienceNow: labelOptions?.currentAudience() ?? .nobody)
             } else {
                 revealedPeer = verified
                 onEvent?(.peerAuthenticated(verified.nodeId, verified.fingerprint))
+                // Callee, "Only my contacts": the name goes only now, and only to a verified contact (Android
+                // pendingRevealLabels).
+                if let held = pendingRevealLabels {
+                    pendingRevealLabels = nil
+                    if pendingCalleeLabelsMayGo() { enqueue(.content(.labels, 0, held), .control) }
+                }
                 // The caller proved itself: the callee's own media may start now.
                 callerRevealDeadlineArmed = false
                 if localMediaHeldForReveal { localMediaHeldForReveal = false; startLocalMedia() }
@@ -546,15 +687,22 @@ public final class CallEngine: MeshConnection {
             }
         case .recognitionOffer, .presenceLease:
             // Phase 2: never fails a call; anything the session rules refuse is dropped and logged by the app.
+            // AB3: nothing from a person this phone blocked or silently declined is examined (no session, no answer).
+            if blockedAfterReveal || silentDecline != nil { return }
             guard let session = presenceSessionIfReady(), let peer = realPeer, let hooks = rotatingOptions?.presence else { return }
             perform(session.onRecord(record, peerVerifiedNow: hooks.verified(peer.fingerprint)))
+            if verificationScope != nil {
+                // Design QL: the displayer answers the scanner's OFFER (it never offers first).
+                if record == .recognitionOffer { verificationDisplayerAnswer() }
+                checkVerificationSettled()
+            }
         }
     }
 
     // MARK: Phase 2 presence leases (answered calls between mutual verified contacts)
     private var presenceSession: PresenceSession?
     public private(set) var presenceRejections: [String] = []
-    public private(set) var presenceLeasesSent = 0, presenceLeasesStored = 0
+    public private(set) var presenceLeasesSent = 0, presenceLeasesStored = 0, presenceOffersSent = 0
 
     /// The peer's real identity: the endpoint, or after a pseudonym session its verified reveal; nil while a stranger.
     private var realPeer: (nodeId: NodeId, fingerprint: IdentityFingerprint)? {
@@ -576,24 +724,60 @@ public final class CallEngine: MeshConnection {
 
     private func perform(_ actions: [PresenceSession.Action]) {
         guard let hooks = rotatingOptions?.presence, let peer = realPeer else { return }
+        var offerWithheld = false
         for action in actions {
             switch action {
             case .sendOffer:
-                if hooks.eligible(peer.nodeId, peer.fingerprint), let bytes = try? DiscoveryExchange.encode(.recognitionOffer) {
-                    enqueue(.content(.discoveryExchange, 0, bytes), .control)
-                } else { presenceSession?.offerWithheld() }
+                if hooks.eligible(peer.nodeId, peer.fingerprint), verificationLeaseAllowed(peer.fingerprint),
+                   let bytes = try? DiscoveryExchange.encode(.recognitionOffer) {
+                    enqueue(.content(.discoveryExchange, 0, bytes), .control); presenceOffersSent += 1
+                } else { presenceSession?.offerWithheld(); offerWithheld = true }
             case .sendLease:
-                if let lease = hooks.lease(peer.nodeId, peer.fingerprint), let bytes = try? DiscoveryExchange.encode(.presenceLease(lease)) {
+                // A side that withheld its OFFER sends no lease either (a peer that offered first must not get one from a
+                // side that is not eligible, such as a contact only checked by code). The visit rule is checked before the
+                // vault records a delivery (nothing is recorded for a withheld lease).
+                if !offerWithheld, verificationLeaseAllowed(peer.fingerprint), let lease = hooks.lease(peer.nodeId, peer.fingerprint),
+                   let bytes = try? DiscoveryExchange.encode(.presenceLease(lease)) {
                     enqueue(.content(.discoveryExchange, 0, bytes), .control); presenceLeasesSent += 1
                 }
-            case .storeLease(let lease): hooks.store(peer.nodeId, lease); presenceLeasesStored += 1
+            case .storeLease(let lease):
+                hooks.store(peer.nodeId, lease); presenceLeasesStored += 1
+                if verificationScope != nil { onEvent?(.verificationLeaseStored(peer.fingerprint)) }
             case .reject(let reason): presenceRejections.append(reason)
             }
         }
     }
 
-    private func releaseHeldCallerLabels() {
-        if let held = heldCallerLabels { heldCallerLabels = nil; enqueue(.content(.labels, 0, held), .control) }
+    /// One container, bound to this call ID and signed by the key this phone presented (a pseudonym toward a stranger).
+    /// Asked only by `callerNames` (`CallerNameRelease`); the audience is re-read here too (P5-A4).
+    private func queueCallerLabels(name: Bool) {
+        guard let options = labelOptions, let callId = state?.callId else { return }
+        let binding = LabelBinding.call(callId)
+        let audience = options.currentAudience()
+        let nameAllowed = name && audience != .nobody && (audience != .verified || peerIsVerifiedContact(options))
+        let labels = [nameAllowed ? signLabel(.personName, options.currentName(), binding) : nil].compactMap { $0 }
+        guard !labels.isEmpty, let container = try? SignedLabelCodec.encodeContainer(labels) else { return }
+        enqueue(.content(.labels, 0, container), .control)
+    }
+
+    /// The peer's current real identity is a verified contact (a verified reveal replaced a throwaway, or a real key).
+    private func peerIsVerifiedContact(_ options: CallLabelOptions) -> Bool {
+        if let revealed = revealedPeer { return options.isVerifiedPeer(revealed.fingerprint) }
+        guard let endpoint, !endpoint.peerPseudonymous else { return false }
+        return options.isVerifiedPeer(endpoint.peerFingerprint)
+    }
+
+    private static func hasText(_ text: String?) -> Bool {
+        !(text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+
+    /// P2-2: a callee's pending label was signed at the Invite. It goes only while the audience and name still allow it;
+    /// a name cleared or changed since then is dropped rather than re-signed.
+    private func pendingCalleeLabelsMayGo() -> Bool {
+        guard let options = labelOptions else { return false }
+        let audience = options.currentAudience(), name = options.currentName()
+        guard audience != .nobody, Self.hasText(name), name == options.localName else { return false }
+        return audience != .verified || peerIsVerifiedContact(options)
     }
 
     private func checkOpening(_ entries: [OpeningEntry]) throws {
@@ -625,9 +809,24 @@ public final class CallEngine: MeshConnection {
     }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
+        // Design SR: type 12 parses only when both hellos signed bit 4; a verification session never holds `K_renew`.
+        if let renewal, bmh3Options?.qrScan == nil, !(callRole == .callee && session.qrTagMatched) {
+            renewal.sessionReady(key: session.renewalKey, peerSigned: session.peerCapabilities.transportMask & CallRenewalWire.capabilityBit != 0)
+            session.opener.acceptRenewal = renewal.negotiated
+        } else {
+            session.renewalKey?.zero()
+            if let reason = renewalExclusion { onRenewalLog?("call_renewal", ["role": callRole == .caller ? "caller" : "callee", "phase": "not_offered", "reason": reason]) }
+        }
         discoveryNegotiated = rotatingOptions != nil &&
             session.peerCapabilities.transportMask & NodeCapabilities.endpointDiscoveryExchange != 0
         session.opener.acceptDiscoveryExchange = discoveryNegotiated
+        // BVMID2: a code matched at one layer only is neither a verification session nor a call.
+        if callRole == .callee, bmh3 != nil {
+            guard QrLayerBinding.consistent(linkMatched: link.qrTagMatched, endpointMatched: session.qrTagMatched) else {
+                throw ProtocolError.state("Verification session scope")
+            }
+            if session.qrTagMatched { beginDisplayerVerification(session); return }
+        }
         if callRole == .callee { calleeEntries = rotatingOptions?.entries?() ?? [] }
         if callRole == .caller, let selected = selectedOffer {
             if session.peerPseudonymous {
@@ -646,13 +845,41 @@ public final class CallEngine: MeshConnection {
                 else if selected.routeCost > 0 { throw ProtocolError.authentication }
             }
         }
+        if callRole == .caller, let scan = bmh3Options?.qrScan {
+            // BVMID2 scanner: the answerer proved it holds the code's key at both layers (and opened the code's advert).
+            // No Invite, no labels, no call: the screen asks the user whose screen it was. The displayer sends no OPENING in
+            // a verification session, so the opening wait does not apply: the fingerprint check, the tag bound to the
+            // code's RDI and the direct route already bind the answer to the scanned screen.
+            guard !session.peerPseudonymous, session.peerFingerprint == scan.fingerprint, session.peerNodeId == link.peerNodeId else {
+                throw ProtocolError.authentication
+            }
+            awaitingOpening = false
+            awaitingReveal = false
+            beginVerification(.scanner, session)
+            verificationConfirmDeadline = now + QrSessionScope.confirmWait
+            onEvent?(.verificationReached(session.peerNodeId, session.peerFingerprint))
+            return
+        }
+        // AB3 (Windows WP6N real-key screen; stricter than Android, which only withholds the name): a callee whose
+        // handshake showed the real key of a person this phone blocked is never shown by that identity, and the call
+        // ends below like any other. Fails open: an unreadable block list blocks nobody (`personBlocked`).
+        let realKeyBlocked = callRole == .caller && !session.peerPseudonymous && personBlocked?(session.peerFingerprint) == true
         if session.peerPseudonymous { onEvent?(.peerStranger) }
-        else { onEvent?(.peerAuthenticated(session.peerNodeId, session.peerFingerprint)) }
+        else if !realKeyBlocked { onEvent?(.peerAuthenticated(session.peerNodeId, session.peerFingerprint)) }
         peerAcceptsFragments = fragmentsEnabled && relayHops == 0 && session.peerCapabilities.transportMask & NodeCapabilities.transportVideoFragments != 0
         session.opener.acceptVideoFragments = fragmentsEnabled
         session.opener.acceptLabels = labelOptions != nil
         peerAcceptsLabels = PeerLabelFeature.negotiated(localEnabled: labelOptions != nil, peer: session.peerCapabilities)
-        selectedCodec = CallEngine.codecForPeer(local: endpointCapabilities.encodeCodecMask, peerDecode: session.peerCapabilities.decodeCodecMask)
+        if let inputs = codecChoiceInputs, inputs.switches.anyNew {
+            // Design HC (AB5): one ordered choice per direction; only encoders this endpoint signed in its hello count.
+            let signed = inputs.encoders.filter { endpointCapabilities.encodeCodecMask & VideoCodecMap.helloBit(codecId: $0.codecId) != 0 }
+            let choice = CallCodecChoice.forCall(available: signed, peerDecodeMask: session.peerCapabilities.decodeCodecMask,
+                                                 switches: inputs.switches, ineligible: inputs.ineligible)
+            codecChoice = choice
+            selectedCodec = choice.sent?.codecId
+        } else {
+            selectedCodec = CallEngine.codecForPeer(local: endpointCapabilities.encodeCodecMask, peerDecode: session.peerCapabilities.decodeCodecMask)
+        }
         guard selectedCodec != nil else { throw ProtocolError.incompatible("Peer cannot decode any locally available call codec") }
         let peerMax = Int(session.peerCapabilities.maxBitrateKbps)
         if peerMax > 0 { settings.videoBitrate = min(settings.videoBitrate, peerMax * 1000) }
@@ -664,25 +891,43 @@ public final class CallEngine: MeshConnection {
             state = initial
             ringingSince = now
             onEvent?(.phase(initial.phase))
-            // Labels: one container (own name if set, and the subject) immediately before Invite.
-            if peerAcceptsLabels, let options = labelOptions {
-                let binding = LabelBinding.call(initial.callId)
-                let labels = [signLabel(.personName, options.localName, binding), signLabel(.callSubject, options.subject, binding)].compactMap { $0 }
-                if !labels.isEmpty, let container = try? SignedLabelCodec.encodeContainer(labels) {
-                    // A stranger session holds the caller's name and subject until the callee proved itself (PR6), as does
-                    // a relayed rotating offer until its OPENING passed.
-                    if awaitingReveal || (awaitingOpening && (selectedOffer?.routeCost ?? 0) > 0) { heldCallerLabels = container }
-                    else { enqueue(.content(.labels, 0, container), .control) }
-                }
+            // Naming v2 (Android CallerNameRelease, decision 2026-11-06): one decision. The subject is never sent
+            // (owner, 2026-11-05). A callee behind a throwaway key (with or without a selected offer) gets the name only
+            // after its verified, unblocked REVEAL; a real-key callee gets it now (or after a relayed OPENING) unless it
+            // is blocked; "Who sees my name" decides who gets it at all. Only the Experimental arm `namesBeforeAnswer`
+            // sends a stranger's name now. What goes now is one container before Invite.
+            if let options = labelOptions {
+                let plan = CallerNameRelease.plan(
+                    labelsNegotiated: peerAcceptsLabels,
+                    hasName: Self.hasText(options.localName),
+                    audience: options.audience,
+                    nameBeforeAnswer: options.nameBeforeAnswer,
+                    awaitedReveal: awaitingReveal,
+                    peerIsPseudonym: session.peerPseudonymous,
+                    relayedAwaitsOpening: awaitingOpening && (selectedOffer?.routeCost ?? 0) > 0,
+                    calleeIsVerifiedContact: !session.peerPseudonymous && options.isVerifiedPeer(session.peerFingerprint))
+                callerNames.start(plan: plan, realPeer: session.peerPseudonymous ? nil : session.peerFingerprint)
             }
+            // AB3: a callee that showed a blocked person's real key gets nothing more (no name, media, presence or
+            // Wi-Fi). The Invite still goes, so the call ends like any other: the ordinary cancel, or the ordinary
+            // hang-up if it answered, after the human-like delay (`blockedEndDelay`, 3 to 7 s).
+            if realKeyBlocked { blockedRealKey = true; endBlockedAfterReveal() }
             if !testingWithholdInvite { for signal in negotiation.inviteSignals() { try sendSignal(signal) } }
+        }
+        if let wifiConfig, relayHops == 0, !isRelayed, link.sentWifiMarker || link.peerWifiMarker {
+            let uw = session.wifiExporter.flatMap { try? WifiKeys.uwCall(exporter: $0) }
+            let agent = WifiCallAgent(linkInitiator: role == .initiator, uw: uw, peerSentMarker: link.peerWifiMarker, config: wifiConfig)
+            agent.onRequest = { [weak self] request in self?.onWifiRequest?(request) }
+            agent.log = { [weak self] event, fields in self?.onWifiLog?(event, fields) }
+            agent.foreground = { [weak self] in self?.wifiForeground() ?? true }
+            wifi = agent
+            link.acceptWifi = true
         }
     }
 
     /// Android `privateCallCodecForPeer`: honour a VP9 preference bit, else any common codec.
     public static func codecForPeer(local: UInt8, peerDecode: UInt8) -> UInt8? {
         if peerDecode & NodeCapabilities.decodePrefersVP9 != 0, local & NodeCapabilities.codecVP9 != 0 { return StreamProtocol.codecVP9 }
-        if peerDecode & NodeCapabilities.decodePrefersH264 != 0, local & NodeCapabilities.codecH264 != 0, StreamProtocol.h264Enabled { return StreamProtocol.codecH264 }
         for (bit, codec) in [(NodeCapabilities.codecVP9, StreamProtocol.codecVP9), (NodeCapabilities.codecAV1, StreamProtocol.codecAV1), (NodeCapabilities.codecH264, StreamProtocol.codecH264)]
         where local & bit != 0 && peerDecode & bit != 0 {
             if codec == StreamProtocol.codecH264 && !StreamProtocol.h264Enabled { continue }
@@ -705,19 +950,42 @@ public final class CallEngine: MeshConnection {
     }
 
     public override func handleOpenRecord(_ record: SecureRecord) throws {
+        renewal?.observe(record)
         switch record.type {
         case .linkHeartbeat:
             if let report = try LinkHeartbeat.decode(record.payload) { onEvent?(.peerReport(report)) }
             else { peerAcceptsDeliveryReports = true }
         case .endToEndContent:
             guard let endpoint else { throw ProtocolError.state("No endpoint") }
-            try handleContent(try endpoint.opener.open(record.payload))
+            if let wifi {
+                let sequence = try endpoint.opener.peekSequence(record.payload)
+                guard wifi.bluetoothVerdict(sequence: sequence) == .deliver else { return }
+                try handleContent(try endpoint.opener.open(record.payload))
+                wifi.delivered(sequence: sequence)
+            } else {
+                try handleContent(try endpoint.opener.open(record.payload))
+            }
+        case .wifi:
+            guard let wifi else { throw ProtocolError.state("Unexpected Wi-Fi record") }
+            wifi.receivedOnBluetooth(record.payload, now: now)
+            try deliverWifiContent([], now: now)
         default:
             throw ProtocolError.malformed("Unexpected private-call record \(record.type)")
         }
     }
 
     private func handleContent(_ content: EndToEndContentRecord) throws {
+        if let scope = verificationScope {
+            // A verification session accepts the scanner's name label and the presence OFFER/LEASE once each (Design QL),
+            // nothing else (no Invite, OPENING, reveal, media, ...). A displayer whose code was not committed by this
+            // connection refuses every BDX1.
+            let refused = scope.expired(now: now) || (content.type == .discoveryExchange
+                ? scope.refuseDiscovery(content.payload, negotiated: discoveryNegotiated && (verificationRole == .scanner || verificationCommitted))
+                : scope.refuseContent(content.type))
+            if refused { throw ProtocolError.state("Verification session scope") }
+            // No label persistence or display: a verification session is not a call.
+            if content.type == .labels { return }
+        }
         // Rotating IDs phase 1b: the callee's first end-to-end record is its OPENING; anything else ends the call.
         if awaitingOpening && content.type != .discoveryExchange { throw ProtocolError.authentication }
         switch content.type {
@@ -737,6 +1005,9 @@ public final class CallEngine: MeshConnection {
                 throw ProtocolError.authentication
             }
             remoteHeader = header
+            remoteVideoGate = AnnexBCodec(codecId: header.codecId).map {
+                AccessUnitGate(codec: $0, headerMaxWidth: header.width, headerMaxHeight: header.height)
+            }
             onEvent?(.remoteHeader(header))
             if state?.phase == .negotiatingMedia { try transition(.mediaReady) }
         case .mediaPacket:
@@ -756,7 +1027,11 @@ public final class CallEngine: MeshConnection {
         case .keyFrameRequest:
             guard content.payload.isEmpty else { throw ProtocolError.malformed("Invalid call keyframe request") }
             onEvent?(.keyFrameRequested)
+        case .renew:
+            guard let renewal, renewal.negotiated else { throw ProtocolError.malformed("Unexpected private-call content \(content.type)") }
+            renewal.onRecord(try CallRenewalWire.decode(content.payload))
         case .labels:
+            if silentDecline != nil || blockedAfterReveal { return }
             // R3: at most one container before this session's Invite, verified when the Invite gives the call ID.
             if let state { applyLabels(content.payload, callId: state.callId) }
             else if bufferedLabels == nil { bufferedLabels = content.payload }
@@ -773,15 +1048,29 @@ public final class CallEngine: MeshConnection {
     private func applyLabels(_ payload: Data, callId: UUID) {
         guard let endpoint else { return }
         let changed = labelInbox.accept(payload, expectedSigner: endpoint.peerNodeId, expectedBinding: .call(callId))
-        if !changed.isEmpty { onEvent?(.peerLabels(name: labelInbox.text(.personName), subject: labelInbox.text(.callSubject))) }
+        if !changed.isEmpty { onEvent?(.peerLabels(name: labelInbox.text(.personName))) }
     }
 
-    /// R1: the callee's name is sent at Ringing only to a verified contact (full fingerprint), else with Accept.
+    /// Naming v2 (Android `prepareCalleeLabels` and `CallLabelPolicy.calleeMoment`): signs this callee's name once at the
+    /// Invite. "People I call or who call me": at Ringing to a verified contact (full fingerprint), else only with Accept;
+    /// "Only my contacts": at Ringing to a verified contact, or (answered as a pseudonym) after the caller's verified
+    /// reveal shows a verified contact, else never; "Nobody": never. A declined, cancelled or unanswered call never
+    /// reveals it.
     private func prepareCalleeLabels(callId: UUID) {
         guard let options = labelOptions, let endpoint, let label = signLabel(.personName, options.localName, .call(callId)),
               let container = try? SignedLabelCodec.encodeContainer([label]) else { return }
-        if options.isVerifiedPeer(endpoint.peerFingerprint) { enqueue(.content(.labels, 0, container), .control) }
-        else { pendingAcceptLabels = container }
+        let moment = CallLabelPolicy.calleeMoment(CalleeLabelContext(
+            labelsNegotiated: peerAcceptsLabels, hasName: true, audience: options.audience,
+            ownPseudonymous: endpoint.reveal?.ownPseudonymous == true,
+            callerIsVerifiedContact: !endpoint.peerPseudonymous && options.isVerifiedPeer(endpoint.peerFingerprint),
+            callerPseudonymous: endpoint.peerPseudonymous,
+            holdUntilReveal: options.calleeNameAfterReveal))
+        switch moment {
+        case .atRinging: enqueue(.content(.labels, 0, container), .control)
+        case .atAccept: pendingAcceptLabels = container
+        case .afterReveal, .afterRevealIfVerified: pendingRevealLabels = container
+        default: break
+        }
     }
 
     private func countReceived(_ bytes: Int) {
@@ -801,7 +1090,17 @@ public final class CallEngine: MeshConnection {
             onEvent?(.remoteRotation(degrees))
         } else {
             receivedVideoPackets += 1
-            onEvent?(.remoteVideo(packet))
+            guard let gate = remoteVideoGate else { onEvent?(.remoteVideo(packet)); return }
+            switch gate.check(packet.payload, flags: packet.flags, nowMs: Int64((now * 1000).rounded())) {
+            case .accept(let unit, _, _):
+                onEvent?(.remoteVideo(MediaPacket(flags: packet.flags, presentationTimeUs: packet.presentationTimeUs, payload: unit)))
+            case .reject(let rule, let nalType, let bytes, _, _):
+                // Dropped as corrupt video: ask for a keyframe (at most every 0.75 s, as RemoteVideo does).
+                onAccessUnitRejected?(gate.codec, rule, nalType, bytes)
+                if now - lastGateKeyFrameRequest >= 0.75 { lastGateKeyFrameRequest = now; requestKeyFrame() }
+            case .close(let reason):
+                throw ProtocolError.incompatible("Unsupported \(gate.codec.label) stream: \(reason)")
+            }
         }
     }
 
@@ -822,6 +1121,25 @@ public final class CallEngine: MeshConnection {
                 try sendSignal(.decline, reason: .rejected, closeAfter: true)
                 finish("Relayed call declined (\(decision.rawValue))", error: false)
                 return
+            }
+            // Call blocking (Android `declineSilentlyIfBlocked`): a blocked person (real key) or, with "Block unknown
+            // callers", any caller that is not a verified contact never rings. The caller gets this phone's OPENING when
+            // one is due and the ordinary Ringing, as for any call, then after the human-like delay the ordinary Decline.
+            // This phone shows nothing and sends no label.
+            if let gate = callGate {
+                let pseudonymous = endpoint?.peerPseudonymous == true
+                let gateDecision = gate(CallGateCaller(pseudonymous: pseudonymous, fingerprint: pseudonymous ? nil : endpoint?.peerFingerprint))
+                if gateDecision != .ring {
+                    silentDecline = gateDecision
+                    if discoveryNegotiated, endpoint?.reveal?.ownPseudonymous != true {
+                        enqueue(.content(.discoveryExchange, 0, try DiscoveryExchange.encode(.opening(calleeEntries))), .control)
+                    }
+                    try sendSignal(.ringing)
+                    ringingSince = now   // the ring timeout counts from here, as for a ringing call
+                    silentDeclineAt = now + blockedEndDelay()
+                    onEvent?(.declinedSilently(gateDecision))
+                    return
+                }
             }
             if declineAsBusy, ringInsteadOfBusy?(endpoint.flatMap { $0.peerPseudonymous ? nil : $0.peerNodeId }) == true {
                 declineAsBusy = false
@@ -850,6 +1168,9 @@ public final class CallEngine: MeshConnection {
         switch message.signal {
         case .ringing: try transition(.remoteRinging)
         case .accept:
+            // A callee revealed as someone this phone blocked: the call ends shortly with an ordinary hang-up, and
+            // nothing of this phone's (no camera, no microphone, no presence) goes to them meanwhile.
+            if blockedAfterReveal { try transition(.remoteAccept); return }
             // A pseudonymous callee's reveal precedes its Accept; an Accept without one could not prove the offer.
             if awaitingReveal { throw ProtocolError.authentication }
             try transition(.remoteAccept)
@@ -876,7 +1197,7 @@ public final class CallEngine: MeshConnection {
 
     private func startLocalMedia() {
         if testingWithholdLocalMedia { return }
-        guard !mediaStarted, let codec = selectedCodec else { return }
+        guard !mediaStarted, !blockedAfterReveal, let codec = selectedCodec else { return }
         mediaStarted = true
         let header = StreamHeader(width: settings.width, height: settings.height, fps: settings.fps, codecId: codec,
                                   rotationDegrees: settings.rotationDegrees, includeAudio: true)
@@ -886,6 +1207,89 @@ public final class CallEngine: MeshConnection {
         let config = MediaPacket(flags: StreamProtocol.flagAudio | StreamProtocol.flagCodecConfig, presentationTimeUs: 0, payload: OpusHead.make())
         enqueue(.content(.mediaPacket, config.flags, config.encoded), .control)
         onEvent?(.startLocalMedia(header, cameraEnabled ? .video : .voice))
+    }
+
+    // MARK: BVMID2 verification sessions (PROTOCOL "Verification code BVMID2", Design QL)
+
+    public enum VerificationRole: Equatable { case scanner, displayer }
+    public static let verificationFinished = "Verification session finished"
+    /// The verify-only scope, once the handshake matched the code on screen (displayer) or reached the scanned code's key
+    /// (scanner). Nil for every ordinary call.
+    public private(set) var verificationScope: QrSessionScope?
+    public private(set) var verificationRole: VerificationRole?
+    /// Displayer: this connection committed (consumed) the code; only then may it take part in Design QL.
+    public private(set) var verificationCommitted = false
+    /// Design QL: this side started its presence exchange (scanner: the user's yes; displayer: answered the scanner's OFFER).
+    public private(set) var verificationLeaseStarted = false
+    /// Displayer: this scanner may receive an answer (committed, confirmed in this visit, direct, real identity).
+    private var verificationMayAnswer = false
+    private var verificationCloseAt: TimeInterval?
+    private var verificationConfirmDeadline: TimeInterval?
+    /// The Add contact screen's visit (who its user confirmed, and a reuse alert). Nil: no visit, so a displayer never
+    /// leases in a verification session.
+    public var meetVisit: MeetVisit?
+    public var isVerificationSession: Bool { verificationScope != nil }
+
+    private func beginVerification(_ role: VerificationRole, _ session: EndToEndSession) {
+        verificationScope = QrSessionScope(startedAt: now)
+        verificationRole = role
+        verificationLeaseStarted = false
+        session.opener.acceptLabels = labelOptions != nil
+        // Design QL: eligibility is decided when a side starts (scanner: after the user's yes; displayer: when the scanner's
+        // OFFER arrives) and re-checked when each record is sent.
+        if discoveryNegotiated, rotatingOptions?.presence != nil { presenceSession = PresenceSession(localEligible: true) }
+        lastHeartbeatAt = now
+    }
+
+    /// Displayer: scope, the completion event (commit) and the 60 s limit. The scanner offers first; this side answers only
+    /// a scanner its own user confirmed in this visit, on a direct link with its real identity. Nothing is sent at the commit.
+    private func beginDisplayerVerification(_ session: EndToEndSession) {
+        beginVerification(.displayer, session)
+        let committed = bmh3?.qrGate?.complete(session.peerFingerprint) == true
+        verificationCommitted = committed
+        onEvent?(.verificationCommitted(session.peerFingerprint, committed: committed))
+        let mayAnswer = committed && presenceSession != nil && !session.peerPseudonymous && link.peerNodeId == session.peerNodeId
+            && meetVisit?.mayLease(session.peerFingerprint) == true
+        verificationMayAnswer = mayAnswer
+        if mayAnswer { verificationConfirmDeadline = now + QrSessionScope.confirmWait } else { closeVerificationAfterGrace() }
+    }
+
+    /// Design QL, scanner: the user answered "Is this X's screen?" for `peer`. Yes (the shield is stored): start the presence
+    /// exchange; its send-time checks decide again. No (or a failed shield write): end the session at once.
+    public func confirmVerification(_ peer: IdentityFingerprint, yes: Bool) {
+        guard verificationRole == .scanner, verificationScope != nil, phase != .closed, endpoint?.peerFingerprint == peer else { return }
+        guard yes else { finish("Verification scan declined", error: false); return }
+        guard let session = presenceSession else { closeVerificationAfterGrace(); return }
+        guard !verificationLeaseStarted else { return }
+        verificationLeaseStarted = true
+        verificationConfirmDeadline = nil
+        perform(session.start())
+        checkVerificationSettled()
+    }
+
+    private func verificationDisplayerAnswer() {
+        guard verificationRole == .displayer, verificationMayAnswer, !verificationLeaseStarted, let session = presenceSession else { return }
+        verificationLeaseStarted = true
+        verificationConfirmDeadline = nil
+        perform(session.start())
+    }
+
+    /// The per-visit rule, re-checked at send time on both roles (Design QL revision 2): an OFFER or LEASE of a
+    /// verification session leaves only for a person this device's user confirmed and let recognise this device during
+    /// the current visit, never after a reuse alert in it, and never without a visit (fails closed).
+    private func verificationLeaseAllowed(_ peer: IdentityFingerprint) -> Bool {
+        guard verificationScope != nil else { return true }
+        return meetVisit?.mayLease(peer) == true
+    }
+
+    /// After each presence action in a verification session: once nothing more can move, end it after the grace.
+    private func checkVerificationSettled() {
+        guard verificationScope != nil, verificationLeaseStarted else { return }
+        if presenceSession?.settled != false { closeVerificationAfterGrace() }
+    }
+
+    private func closeVerificationAfterGrace() {
+        if verificationCloseAt == nil { verificationCloseAt = now + QrSessionScope.closeGrace }
     }
 
     // MARK: User actions
@@ -903,7 +1307,10 @@ public final class CallEngine: MeshConnection {
         }
         localMediaHeldForReveal = callerRevealPending
         // R1: the callee's name travels immediately before Accept (never on decline, cancel or no answer).
-        if let labels = pendingAcceptLabels { pendingAcceptLabels = nil; enqueue(.content(.labels, 0, labels), .control) }
+        if let labels = pendingAcceptLabels {
+            pendingAcceptLabels = nil
+            if pendingCalleeLabelsMayGo() { enqueue(.content(.labels, 0, labels), .control) }
+        }
         try sendSignal(.accept)
         if answerVoice { try sendSignal(.cameraOff) }
         startPresence()
@@ -946,6 +1353,22 @@ public final class CallEngine: MeshConnection {
             try? sendSignal(.hangUp, reason: .error, closeAfter: true)
         }
         finish(CallerRevealGate.message, error: false)
+    }
+
+    /// The revealed person is on the block list (Android `endBlockedAfterReveal`). Nothing more goes to them: no media
+    /// (this phone's stays held or never starts, theirs is dropped), no label, no presence and, for a caller, no reveal.
+    /// After the human-like delay the ordinary cancel or hang-up ends the call, so the end does not say "blocked". A
+    /// caller's held name never goes (`CallerNameRelease`); only the Experimental `namesBeforeAnswer` arm sends it before
+    /// the ring. Their identity reaches no screen here.
+    private func endBlockedAfterReveal() {
+        blockedAfterReveal = true
+        callerNames.onPeerBlocked()
+        pendingAcceptLabels = nil
+        pendingRevealLabels = nil
+        callerRevealDeadlineArmed = false
+        localMediaHeldForReveal = true
+        blockedEndAt = now + blockedEndDelay()
+        onEvent?(.blockedAfterReveal)
     }
 
     /// Hang up after a local media failure (the peer sees an error hang-up, not link loss).
@@ -1010,12 +1433,33 @@ public final class CallEngine: MeshConnection {
     // MARK: Timers
 
     public override func tickOpen(now: TimeInterval) {
-        if now - lastReceiveAt > CallEngine.silentLinkTimeout { finishLost("Call peer stopped responding"); return }
+        if tickLiveness(now: now) { return }
+        if let scope = verificationScope {
+            // BVMID2: no Invite and no ring; the session ends at a fixed 60 s, 20 s without the user's answer (scanner) or
+            // the scanner's OFFER (displayer), or 2 s after nothing more can move.
+            if scope.expired(now: now) { finish(Self.verificationFinished, error: false); return }
+            if let at = verificationCloseAt, now >= at { finish(Self.verificationFinished, error: false); return }
+            if let at = verificationConfirmDeadline, now >= at, !verificationLeaseStarted { finish(Self.verificationFinished, error: false); return }
+            if now - lastHeartbeatAt >= CallEngine.heartbeatInterval {
+                lastHeartbeatAt = now
+                enqueue(.record(.linkHeartbeat, LinkHeartbeat.encode(LinkCapacityReport(arrivalKbps: 0, linkLate: false, addedDelayMs: 0,
+                                                                                        receivedBytes: nil, clockMs: nil, deliveryOnly: false))), .control)
+            }
+            return
+        }
         if state == nil {
             let since = openSince ?? now
             openSince = since
             if now - since >= CallEngine.inviteTimeout { fail(CallEngine.inviteTimeoutReason); return }
         }
+        // Call blocking: the ordinary decline of a call the gate refused, and the ordinary end of a call with a person
+        // revealed as blocked, each after the human-like delay.
+        if let at = silentDeclineAt, now >= at {
+            silentDeclineAt = nil
+            if state?.phase == .incomingRinging { try? decline(.rejected) }
+            return
+        }
+        if let at = blockedEndAt, now >= at { blockedEndAt = nil; end(); return }
         if callerRevealDeadlineArmed {
             // Counted from the first tick after Accept (ticks run several times a second).
             let start = callerRevealDeadlineStart ?? now
@@ -1045,15 +1489,225 @@ public final class CallEngine: MeshConnection {
                                             deliveryOnly: false)
             enqueue(.record(.linkHeartbeat, LinkHeartbeat.encode(report)), .control)
         }
+        if let wifi {
+            if state?.phase == .active { activeSince = activeSince ?? now }
+            // Design WF: Wi-Fi only once the call is ACTIVE and both identities are revealed.
+            let revealed = endpoint?.reveal.map { (!$0.active || $0.revealed != nil) && (!$0.ownPseudonymous || $0.ownRevealSent) } ?? true
+            let heartbeat = LinkHeartbeat.encode(LinkCapacityReport(arrivalKbps: 0, linkLate: false, addedDelayMs: 0,
+                                                                    receivedBytes: nil, clockMs: nil, deliveryOnly: false))
+            // Defence in depth (WP6NF finding 6): nothing about Wi-Fi goes to a person this device blocked (a revealed
+            // blocked person or a silently declined caller), even if such a call were ever active.
+            wifi.tick(now: now, ready: state?.phase == .active && revealed && !blockedAfterReveal && silentDecline == nil,
+                      heartbeat: heartbeat)
+            for record in wifi.takeBluetoothRecords() { enqueue(.record(.wifi, record.encoded()), .control) }
+            // Design WF: the SWITCH boundary starts a frame, so no switch while a fragmented frame is half sent (the
+            // marker leaves at the next nextOutgoing, before any further pop).
+            if queues.fragmentRemainder.isEmpty {
+                wifi.requestSwitch(now: now, activeSince: activeSince, oldestQueuedAge: queues.oldestAge(now: now))
+            }
+            do { try deliverWifiContent([], now: now) } catch { fail(describe(error)); return }
+        }
     }
 
-    private func finishLost(_ reason: String) {
+    public override var contentOnSecondCarrier: Bool { wifi?.sendingOnWifi ?? false }
+
+    public override func carrierMarker() throws -> Data? {
+        // Design SR: BIND is the first BMS1 record on the renewed link, naming its own BME1 sequence plus one.
+        if let ticket = renewal?.takePendingBind(), let endpoint {
+            let sequence = endpoint.sealer.nextSequence
+            let bind = try endpoint.sealer.seal(.renew, flags: 0, try CallRenewalWire.encode(.bind(ticket: ticket, nextSequence: sequence + 1)))
+            return try link.seal(.endToEndContent, bind)
+        }
+        guard let wifi, let endpoint, let marker = wifi.takeMarker(nextSequence: endpoint.sealer.nextSequence) else { return nil }
+        onWifiLog?("wifi_cutover", ["event": "marker_sent", "kind": "\(marker.kind)"])
+        return try link.seal(.wifi, marker.encoded())
+    }
+
+    private func deliverWifiContent(_ records: [Data], now: TimeInterval) throws {
+        guard let wifi, let endpoint else { return }
+        applyWifiFragmentActions()
+        for bme1 in records {
+            let sequence = try endpoint.opener.peekSequence(bme1)
+            if wifi.wifiVerdict(sequence: sequence, record: bme1, now: now) == .deliver {
+                try handleContent(try endpoint.opener.open(bme1)); wifi.delivered(sequence: sequence)
+            }
+        }
+        let released = wifi.takeReleased(now: now)
+        applyWifiFragmentActions()
+        for (sequence, bme1) in released {
+            try handleContent(try endpoint.opener.open(bme1)); wifi.delivered(sequence: sequence)
+        }
+    }
+
+    /// Design WF fragment rules after a fallback or a hold promotion: the reassembler drops its half frame and skips
+    /// fragments until a frame starts, and the peer is asked for a keyframe; this side's unsent fragments of the current
+    /// frame are dropped (the agent already asked the local encoder for a keyframe).
+    private func applyWifiFragmentActions() {
+        guard let wifi else { return }
+        let actions = wifi.takeFragmentActions()
+        if actions.resetSend { queues.fragmentRemainder.removeAll() }
+        if actions.suppressReceive { reassembler.suppress(); requestKeyFrame() }
+    }
+
+    // MARK: EXPERIMENTAL in-call link renewal (Design SR)
+
+    /// Nil unless this call signs end-to-end hello bit 4 (`linkRenewal` on, no BVMID2 scan, no AW1 Wi-Fi).
+    public let renewal: CallRenewalAgent?
+    /// What the app's radio must do for a renewal (scan, advertise, break the old link, end an attempt).
+    public var onRenewalRequest: ((CallRenewalAgent.Request) -> Void)?
+    /// `call_renewal` and `call_renewal_silence` lines (no address, no identity).
+    public var onRenewalLog: ((String, [String: String]) -> Void)?
+    /// DEBUG (Android `test_call_tx_stall_after_s`): this phone's call writer stops sending on its first link this
+    /// many seconds after the call became ACTIVE, once per call, to induce a one-way stall.
+    public var debugTxStallAfter: TimeInterval?
+    public var onDebugTxStall: (() -> Void)?
+    private var debugTxStallLogged = false
+    /// The DEBUG stall applies to the call's first link only: true once a renewal moved the call.
+    private var onRenewedLink = false
+    private var callActiveAt: TimeInterval?
+    private var lastCameraSignal: PrivateCallSignal?
+    private var lastLabelsPayload: Data?
+    /// Why a renewal was asked for but not offered in this call (logged at the endpoint handshake), or nil.
+    private let renewalExclusion: String?
+
+    /// The 8 s silence close (or, with a renewal possible, Android's stall tolerance; nothing while a renewal owns the
+    /// call) and the renewal's timers. True when the call closed.
+    private func tickLiveness(now: TimeInterval) -> Bool {
+        if state?.phase == .active, callActiveAt == nil { callActiveAt = now }
+        if let ends = renewal?.silenceEnds(now: now, lastReceiveAt: lastRecordAt, lastSendAt: lastWriteProgressAt) {
+            if ends { finishLost("Call peer stopped responding"); return true }
+        } else if now - lastReceiveAt > CallEngine.silentLinkTimeout { finishLost("Call peer stopped responding"); return true }
+        renewal?.tick()
+        return phase == .closed
+    }
+
+    /// The last camera signal and LABELS record this side queued, re-asserted after a renewal.
+    override func observeQueued(_ kind: OutboundItem.Kind) {
+        guard renewal != nil, case .content(let type, _, let payload) = kind else { return }
+        if type == .labels { lastLabelsPayload = payload }
+        if type == .privateCallSignal, let message = try? PrivateCallSignalMessage(decoding: payload),
+           message.signal == .cameraOn || message.signal == .cameraOff { lastCameraSignal = message.signal }
+    }
+
+    public override func holdsLinkLoss(_ reason: String) -> Bool { renewal?.holdLinkLoss(reason) ?? false }
+
+    public override var outputHeld: Bool {
+        guard let after = debugTxStallAfter, after > 0, !onRenewedLink, let since = callActiveAt, now - since >= after else { return false }
+        if !debugTxStallLogged { debugTxStallLogged = true; onDebugTxStall?() }
+        return true
+    }
+
+    // MARK: AW1 app entry points (WifiDirectGuest)
+
+    public func wifiJoined(ticket: Data, local: IPv4Interface, all: [IPv4Interface], band: DirectGuestRules.Band, now: TimeInterval) {
+        self.now = now; wifi?.joined(ticket: ticket, local: local, all: all, band: band, now: now)
+    }
+    public func wifiJoinFailed(ticket: Data, reason: DeclineReason, detail: String, now: TimeInterval) {
+        self.now = now; wifi?.joinFailed(ticket: ticket, reason: reason, detail: detail, now: now)
+    }
+    public func wifiConnected(ticket: Data, now: TimeInterval) { self.now = now; wifi?.connected(ticket: ticket, now: now) }
+    public func wifiConnectFailed(ticket: Data, detail: String, now: TimeInterval) {
+        self.now = now; wifi?.connectFailed(ticket: ticket, detail: detail, now: now)
+    }
+    public func wifiSocketClosed(ticket: Data, detail: String, now: TimeInterval) {
+        self.now = now; wifi?.socketClosed(ticket: ticket, detail: detail, now: now)
+        applyWifiFragmentActions()
+    }
+    public func wifiSendState(oldestPendingSince: TimeInterval?, ticket: Data, now: TimeInterval) {
+        self.now = now; wifi?.socketSendState(oldestPendingSince: oldestPendingSince, ticket: ticket)
+    }
+    public func wifiReceive(_ data: Data, ticket: Data, now: TimeInterval) {
+        guard phase == .open, let wifi else { return }
+        self.now = now
+        do { try deliverWifiContent(wifi.receivedOnSocket(data, ticket: ticket, now: now), now: now) } catch { fail(describe(error)) }
+    }
+
+    /// The next bytes for the Wi-Fi socket: binding frames and the carrier's own records first, then this side's
+    /// content while its direction travels on Wi-Fi. Hop records popped here go back to Bluetooth.
+    public func nextWifiOutgoing(now: TimeInterval) -> Data? {
+        guard let wifi else { return nil }
+        self.now = now
+        if let bytes = wifi.takeSocketBytes() { return bytes }
+        guard wifi.sendingOnWifi, let endpoint else { return nil }
+        while let item = queues.pop() {
+            switch item.kind {
+            case .content(let type, let flags, let payload):
+                do {
+                    guard let bytes = wifi.sealContent(try endpoint.sealer.seal(type, flags: flags, payload), now: now) else { return nil }
+                    sentBytes += UInt64(bytes.count); lastSendAt = now
+                    if item.closeAfter { closeRequested = true }
+                    return bytes
+                } catch { fail(describe(error)); return nil }
+            case .raw, .record:
+                hopBacklog.append(item)
+            default:
+                continue
+            }
+        }
+        return nil
+    }
+
+    func finishLost(_ reason: String) {
         if state != nil { try? transition(.linkLost) }
         finish(reason, error: true)
     }
 
     public override func didClose(reason: String, error: Bool) {
+        wifi?.callEnded(now: now)
+        renewal?.callEnded()
+        // BVMID2: a connection that ends before its commit releases the reservation (the attempt stays counted).
+        bmh3?.qrGate?.fail()
         if error, let phase = state?.phase, phase != .ended { if let next = try? state?.transition(.linkLost) { state = next; onEvent?(.phase(next.phase)) } }
         onEvent?(.ended(reason, error: error))
+    }
+}
+
+extension CallEngine: CallRenewalHost {
+    var renewalNow: TimeInterval { now }
+    var renewalFacts: CallRenewalScope.Facts {
+        CallRenewalScope.Facts(gattOnBothEnds: transport == .gatt, relayHops: Int(relayHops),
+                               relayedRoute: relayedOptions?.route != nil || relayReadyRelays != nil || relaySetupRequest != nil,
+                               linkPeerIsEndpointPeer: endpoint.map { session in link.peerNodeId == session.peerNodeId } ?? false,
+                               verificationSession: verificationScope != nil || bmh3Options?.qrScan != nil)
+    }
+    var renewalCallActive: Bool { state?.phase == .active }
+    var renewalActiveAt: TimeInterval? { callActiveAt }
+    var renewalCallId: UUID? { state?.callId }
+    /// Complete authenticated records only (a dribble of partial bytes never postpones a renewal or its liveness).
+    var renewalLastReceiveAt: TimeInterval { lastRecordAt }
+    /// Writes the transport completed (not records merely handed to it).
+    var renewalLastSendAt: TimeInterval { lastWriteProgressAt }
+    var renewalCurrentLink: SecureLink { link }
+
+    func renewalSend(_ message: CallRenewalWire.Message) {
+        guard let payload = try? CallRenewalWire.encode(message) else { return }
+        enqueue(.content(.renew, 0, payload), .control)
+    }
+
+    func renewalEndCall(_ reason: String) { finishLost(reason) }
+
+    func renewalAdopt(_ renewed: SecureLink, buffered: Data) {
+        onRenewedLink = true
+        adoptRenewedLink(renewed, buffered: buffered, now: now)
+    }
+
+    func renewalOpen(_ encoded: Data) throws -> EndToEndContentRecord {
+        guard let endpoint else { throw ProtocolError.state("No endpoint") }
+        return try endpoint.opener.open(encoded)
+    }
+
+    /// Re-assertion after BIND: a half frame of the old link never completes (either way), the peer is asked for a key
+    /// frame and this side's next video is one, and the current microphone and camera signals and this side's LABELS
+    /// record (if it sent one) go once more.
+    func renewalReassert() {
+        reassembler.suppress()
+        queues.fragmentRemainder.removeAll()
+        queues.restartVideoAtKeyFrame()
+        requestKeyFrame()
+        onEvent?(.keyFrameRequested)
+        guard state?.phase == .active else { return }
+        try? sendSignal(muted ? .microphoneMuted : .microphoneUnmuted)
+        if let camera = lastCameraSignal { try? sendSignal(camera) }
+        if let labels = lastLabelsPayload { enqueue(.content(.labels, 0, labels), .control) }
     }
 }

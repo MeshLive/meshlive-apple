@@ -1,0 +1,1 @@
+First release. Call people nearby by voice or video, add contacts by scanning their code, and watch or listen to nearby livestreams. It all runs over Bluetooth, with no internet and no account.

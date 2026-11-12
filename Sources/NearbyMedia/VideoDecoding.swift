@@ -22,15 +22,44 @@ public enum VideoDecoderSupport {
         if #available(iOS 17.0, macOS 14.0, *) { return VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) && probe(kCMVideoCodecType_AV1) }
         return false
     }
-    /// NodeCapabilities decode mask: VP9 is always decodable (VideoToolbox or bundled libvpx).
+    /// AB5 (Design HC): HEVC decoding (hardware, or the platform's software decoder): VideoToolbox opens a session for
+    /// Android's HEVC parameter sets (the M31 hardware encoder's Main 352x288 VPS, SPS and PPS).
+    public static let videoToolboxHEVC: Bool = probeParameterSets(.hevc, [
+        "40010c01ffff0160000003000003000003000003003c2c09",
+        "4201010160000003000003000003000003003ca00b080485a2d2bb04bb9a8101010040",
+        "4401c0667c0cc640",
+    ])
+    /// AB5: H.264 decoding: VideoToolbox opens a session for a Constrained Baseline 640x480 SPS and PPS (it also decodes
+    /// Main and High, the whole envelope the H.264 bit promises).
+    public static let videoToolboxH264: Bool = probeParameterSets(.h264, ["6742c01eda0280f640", "68ce3c80"])
+
+    /// NodeCapabilities decode mask: VP9 is always decodable (VideoToolbox or bundled libvpx); AV1 with VideoToolbox
+    /// hardware; HEVC and H.264 only with their AB5 master on and a probed VideoToolbox decoder.
     public static var decodeMask: UInt8 {
         var mask: UInt8 = 0
         if VP9Encoder.isAvailable || videoToolboxVP9 { mask |= NodeCapabilities.codecVP9 }
         if videoToolboxAV1 { mask |= NodeCapabilities.codecAV1 }
+        if StreamProtocol.hevcEnabled && videoToolboxHEVC { mask |= NodeCapabilities.codecHEVC }
+        if StreamProtocol.h264Enabled && videoToolboxH264 { mask |= NodeCapabilities.codecH264 }
         return mask
     }
-    /// Encode mask: libvpx VP9 only.
-    public static var encodeMask: UInt8 { VP9Encoder.isAvailable ? NodeCapabilities.codecVP9 : 0 }
+    /// Encode mask: libvpx VP9; HEVC and H.264 only with their AB5 master on and a hardware encoder whose output passed
+    /// the receiver rules (`HardwareEncoderSupport`).
+    public static var encodeMask: UInt8 {
+        var mask: UInt8 = VP9Encoder.isAvailable ? NodeCapabilities.codecVP9 : 0
+        if StreamProtocol.hevcEnabled && HardwareEncoderSupport.isEligible(.hevc) { mask |= NodeCapabilities.codecHEVC }
+        if StreamProtocol.h264Enabled && HardwareEncoderSupport.isEligible(.h264) { mask |= NodeCapabilities.codecH264 }
+        return mask
+    }
+
+    private static func probeParameterSets(_ codec: AnnexBCodec, _ hexSets: [String]) -> Bool {
+        guard let format = try? VideoToolboxDecoder.formatDescription(codec: codec, sets: hexSets.compactMap { Data(hex: $0) }) else { return false }
+        var session: VTDecompressionSession?
+        let status = VTDecompressionSessionCreate(allocator: nil, formatDescription: format, decoderSpecification: nil, imageBufferAttributes: nil,
+                                                  outputCallback: nil, decompressionSessionOut: &session)
+        if let session { VTDecompressionSessionInvalidate(session) }
+        return status == noErr
+    }
 
     /// Main profile, 8-bit 4:2:0, 640x360: the sequence header OBU of Tests/NearbyMediaTests/Fixtures/av1-640x360.ivf.
     static let av1ProbeSequenceHeader = Data([0x0a, 0x0b, 0x00, 0x00, 0x00, 0x0c, 0xc4, 0xff, 0x67, 0x36, 0xbe, 0x40, 0x10])
@@ -75,7 +104,7 @@ public extension VideoFrameDecoder {
 public final class VideoToolboxDecoder: VideoFrameDecoder {
     public let codecId: UInt8
     public var onPicture: ((CVPixelBuffer, Int64) -> Void)?
-    public var name: String { codecId == StreamProtocol.codecAV1 ? "VideoToolbox AV1" : "VideoToolbox VP9" }
+    public var name: String { "VideoToolbox \(VideoCodecMap.label(codecId: codecId))" }
     private var session: VTDecompressionSession?
     private var format: CMFormatDescription?
     private var configuration: Data?
@@ -86,10 +115,13 @@ public final class VideoToolboxDecoder: VideoFrameDecoder {
     public func replaceCodecConfig(_ data: Data) { outOfBandConfig = data }
 
     public init(codecId: UInt8) throws {
-        guard codecId == StreamProtocol.codecVP9 || codecId == StreamProtocol.codecAV1 else { throw VideoCodecError.unavailable("Unsupported codec") }
+        let codecs = [StreamProtocol.codecVP9, StreamProtocol.codecAV1, StreamProtocol.codecH264, StreamProtocol.codecHEVC]
+        guard codecs.contains(codecId) else { throw VideoCodecError.unavailable("Unsupported codec") }
         self.codecId = codecId
         if codecId == StreamProtocol.codecVP9, !VideoDecoderSupport.videoToolboxVP9 { throw VideoCodecError.unavailable("No VideoToolbox VP9 decoder") }
         if codecId == StreamProtocol.codecAV1, !VideoDecoderSupport.videoToolboxAV1 { throw VideoCodecError.unavailable("No AV1 hardware decoder") }
+        if codecId == StreamProtocol.codecHEVC, !VideoDecoderSupport.videoToolboxHEVC { throw VideoCodecError.unavailable("No VideoToolbox HEVC decoder") }
+        if codecId == StreamProtocol.codecH264, !VideoDecoderSupport.videoToolboxH264 { throw VideoCodecError.unavailable("No VideoToolbox H.264 decoder") }
     }
     deinit { invalidate() }
 
@@ -128,15 +160,74 @@ public final class VideoToolboxDecoder: VideoFrameDecoder {
         session = newSession; format = newFormat; configuration = identity
     }
 
+    /// Codecs 4 and 5 (AB5; PROTOCOL "Decoder input", Apple): the access unit arrives validated by the engine's gate (Annex
+    /// B, 4-byte start codes, no SEI). A keyframe's in-band parameter sets build the format description, and the session
+    /// is rebuilt when they change; the slice goes to VideoToolbox length-prefixed, without the sets.
+    private func ensureParameterSetSession(for data: Data, codec: AnnexBCodec, keyFrame: Bool) throws -> Data {
+        guard case .ok(let nals) = AnnexB.scan(data, codec: codec) else { throw VideoCodecError.failed("Malformed \(codec.label) access unit") }
+        let slices = nals.filter { codec.isSlice($0.type) }.map(\.bytes)
+        guard !slices.isEmpty else { throw VideoCodecError.failed("No \(codec.label) slice") }
+        let sets = nals.filter { codec.isParameterSet($0.type) }.map(\.bytes)
+        if keyFrame, !sets.isEmpty {
+            let identity = AnnexB.annexB(sets)
+            if session == nil || identity != configuration {
+                invalidate()
+                let newFormat = try Self.formatDescription(codec: codec, sets: sets)
+                let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                              kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+                var newSession: VTDecompressionSession?
+                let created = VTDecompressionSessionCreate(allocator: nil, formatDescription: newFormat, decoderSpecification: nil,
+                                                           imageBufferAttributes: attrs as CFDictionary, outputCallback: nil,
+                                                           decompressionSessionOut: &newSession)
+                guard created == noErr, let newSession else { throw VideoCodecError.failed("VideoToolbox \(codec.label) session failed (\(created))") }
+                session = newSession; format = newFormat; configuration = identity
+            }
+        } else if session == nil {
+            throw VideoCodecError.failed("Waiting for a key frame")
+        }
+        return AnnexB.lengthPrefixed(slices)
+    }
+
+    /// A format description from parameter sets (HEVC VPS, SPS, PPS; H.264 SPS, PPS) with 4-byte NAL lengths.
+    static func formatDescription(codec: AnnexBCodec, sets: [Data]) throws -> CMFormatDescription {
+        guard !sets.isEmpty, sets.allSatisfy({ !$0.isEmpty }) else { throw VideoCodecError.failed("No \(codec.label) parameter sets") }
+        let buffers = sets.map { set -> UnsafeMutablePointer<UInt8> in
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: set.count)
+            set.copyBytes(to: buffer, count: set.count)
+            return buffer
+        }
+        defer { buffers.forEach { $0.deallocate() } }
+        let pointers = buffers.map { UnsafePointer($0) }
+        let sizes = sets.map(\.count)
+        var format: CMFormatDescription?
+        let status: OSStatus
+        if codec == .hevc {
+            status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(allocator: nil, parameterSetCount: sets.count, parameterSetPointers: pointers,
+                                                                         parameterSetSizes: sizes, nalUnitHeaderLength: 4, extensions: nil,
+                                                                         formatDescriptionOut: &format)
+        } else {
+            status = CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator: nil, parameterSetCount: sets.count, parameterSetPointers: pointers,
+                                                                         parameterSetSizes: sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &format)
+        }
+        guard status == noErr, let format else { throw VideoCodecError.failed("\(codec.label) format description failed (\(status))") }
+        return format
+    }
+
     public func decode(_ data: Data, presentationTimeUs: Int64, keyFrame: Bool) throws {
-        try ensureSession(for: data, keyFrame: keyFrame)
+        let sampleData: Data
+        if let codec = AnnexBCodec(codecId: codecId) {
+            sampleData = try ensureParameterSetSession(for: data, codec: codec, keyFrame: keyFrame)
+        } else {
+            try ensureSession(for: data, keyFrame: keyFrame)
+            sampleData = data
+        }
         guard let session, let format else { return }
         var block: CMBlockBuffer?
-        let length = data.count
+        let length = sampleData.count
         guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: length, blockAllocator: nil, customBlockSource: nil,
                                                  offsetToData: 0, dataLength: length, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block) == noErr,
               let block else { throw VideoCodecError.failed("Block buffer allocation failed") }
-        _ = data.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: length) }
+        _ = sampleData.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: length) }
         var sample: CMSampleBuffer?
         var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMTime(value: presentationTimeUs, timescale: 1_000_000), decodeTimeStamp: .invalid)
         var size = length

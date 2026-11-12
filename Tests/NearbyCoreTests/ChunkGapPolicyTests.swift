@@ -52,3 +52,50 @@ final class ChunkGapPolicyTests: XCTestCase {
         XCTAssertNoThrow(try reader.check(now: 30))
     }
 }
+
+/// EXPERIMENTAL GATT client write pacing (`-gattWriteBurst N`): at most N data values per 10 ms window however often the
+/// link pumps (sends, CoreBluetooth's ready callbacks, GR1 ticks), with one resume scheduled at a time.
+final class GattWritePacerTests: XCTestCase {
+    /// One `GattClientLink.pump` as the app runs it: writes while the pacer allows and values wait; a refusal schedules at
+    /// most one resume (its due time is appended to `resumes`). Returns how many values were written.
+    private func pump(_ pacer: inout GattWritePacer, now: TimeInterval, waiting: inout Int, resumes: inout [TimeInterval]) -> Int {
+        var written = 0
+        while waiting > 0 {
+            guard pacer.mayWrite(now: now) else {
+                if let delay = pacer.scheduleResume(now: now) { resumes.append(now + delay) }
+                break
+            }
+            waiting -= 1; written += 1
+        }
+        return written
+    }
+
+    func testRepeatedPumpCallsAndReadyCallbacksNeverExceedTheBurstPerWindow() {
+        var pacer = GattWritePacer(burst: 4)
+        var waiting = 1_000
+        var resumes: [TimeInterval] = []
+        var writes: [TimeInterval] = []
+        var now = 0.0
+        // 200 ms with a send or a ready callback every 0.5 ms, plus every scheduled resume when it is due.
+        while now < 0.2 {
+            if let due = resumes.first, due <= now { resumes.removeFirst(); pacer.resumeFired() }
+            let count = pump(&pacer, now: now, waiting: &waiting, resumes: &resumes)
+            writes += Array(repeating: now, count: count)
+            XCTAssertLessThanOrEqual(resumes.count, 1, "one resume scheduled at a time")
+            now += 0.0005
+        }
+        for start in writes {
+            let inWindow = writes.filter { $0 >= start && $0 < start + GattWritePacer.window }.count
+            XCTAssertLessThanOrEqual(inWindow, 4, "at most 4 values in the 10 ms from \(start)")
+        }
+        XCTAssertGreaterThanOrEqual(writes.count, 4 * 18, "the link keeps writing, about 4 values per 10 ms")
+    }
+
+    func testPacingOffWritesEverythingAndNeverSchedulesAResume() {
+        var pacer = GattWritePacer(burst: 0)
+        var waiting = 500
+        var resumes: [TimeInterval] = []
+        XCTAssertEqual(pump(&pacer, now: 0, waiting: &waiting, resumes: &resumes), 500)
+        XCTAssertTrue(resumes.isEmpty)
+    }
+}

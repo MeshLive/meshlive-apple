@@ -102,17 +102,20 @@ public struct Bmh3Config {
     public let stranger: Bmh3Presentation?
     /// Route search: the `RELAY_SEEK` bits this listener signs in its responder LINK block; nil signs nothing.
     public let relaySeek: UInt8?
+    /// AW1: this initiator writes the WIFI marker in its LINK msg3 (direct calls only).
+    public let wifiMarker: Bool
     public var identity: SigningIdentity { real.identity }
 
     public init(purpose: Bmh3Purpose, identity: SigningIdentity, capabilities: NodeCapabilities,
                 entropy: Bmh3Entropy = SecureBmh3Entropy(), buildTag: BuildTag? = nil, stranger: Bmh3Presentation? = nil,
-                relaySeek: UInt8? = nil) throws {
+                relaySeek: UInt8? = nil, wifiMarker: Bool = false) throws {
         self.purpose = purpose
         real = try Bmh3Presentation(identity: identity, capabilities: capabilities, pseudonym: false)
         self.entropy = entropy
         self.buildTag = purpose == .link ? buildTag : nil
         self.stranger = stranger
         self.relaySeek = purpose == .link ? relaySeek : nil
+        self.wifiMarker = purpose == .link ? wifiMarker : false
     }
 }
 
@@ -121,6 +124,7 @@ public struct Bmh3Extensions: Equatable {
     public static let typePad: UInt8 = 0, typeOpening: UInt8 = 1, typeIntent: UInt8 = 2, typeBuildTag: UInt8 = 3, typePseudonym: UInt8 = 4
     /// Route search (Experimental): the feature bits of a listener that would admit a route search now; responder LINK blocks only.
     public static let typeRelaySeek: UInt8 = 5
+    public static let typeWifi: UInt8 = 8
     public static let criticalBit: UInt8 = 0x80
     public static let none = Bmh3Extensions()
 
@@ -134,10 +138,13 @@ public struct Bmh3Extensions: Equatable {
     public var pseudonym = false
     /// `RELAY_SEEK` feature bits (bit 0 SEEK version 1; reserved bits are carried, not rejected).
     public var relaySeek: UInt8?
+    /// AW1: the WIFI build marker (version 1), initiator LINK msg3 only.
+    public var wifiMarker = false
 
-    public init(opening: Data? = nil, intent: UInt8? = nil, buildTag: BuildTag? = nil, pseudonym: Bool = false, relaySeek: UInt8? = nil) {
+    public init(opening: Data? = nil, intent: UInt8? = nil, buildTag: BuildTag? = nil, pseudonym: Bool = false, relaySeek: UInt8? = nil,
+                wifiMarker: Bool = false) {
         self.opening = opening?.rebased; self.intent = intent; self.buildTag = buildTag
-        self.buildTagSeen = buildTag != nil; self.pseudonym = pseudonym; self.relaySeek = relaySeek
+        self.buildTagSeen = buildTag != nil; self.pseudonym = pseudonym; self.relaySeek = relaySeek; self.wifiMarker = wifiMarker
     }
 
     static func validOpening(_ value: Data) -> Bool {
@@ -156,6 +163,7 @@ public struct Bmh3Extensions: Equatable {
         if let buildTag { body.byte(Self.typeBuildTag); body.u16(2); body.u16(buildTag.encoded) }
         if pseudonym { body.byte(Self.typePseudonym); body.u16(0) }
         if let relaySeek { body.byte(Self.typeRelaySeek); body.u16(1); body.byte(relaySeek) }
+        if wifiMarker { body.byte(Self.typeWifi); body.u16(1); body.byte(WifiWire.markerVersion) }
         let spare = Bmh3Wire.extensionBytes - body.data.count
         guard spare >= 0, spare == 0 || spare >= 3 else { throw Bmh3Failure("Extensions do not fit the 112-byte area") }
         var area = BinaryWriter(capacity: Bmh3Wire.extensionBytes)
@@ -198,6 +206,10 @@ public struct Bmh3Extensions: Equatable {
             case typeRelaySeek:
                 guard value.count == 1 else { throw Bmh3Failure("relay seek malformed") }
                 out.relaySeek = value[value.startIndex]
+            case typeWifi:
+                guard value.count == 1 else { throw Bmh3Failure("wifi marker malformed") }
+                // Another version is treated as absent (Design WF).
+                out.wifiMarker = value[value.startIndex] == WifiWire.markerVersion
             default:
                 if type & criticalBit != 0 { throw Bmh3Failure("unknown critical extension") }
             }
@@ -240,6 +252,8 @@ public struct Bmh3Result {
     public let ownPseudonymous: Bool
     /// The SPKI this phone presented (what a later reveal names as its pseudonym).
     public let ownSpki: Data
+    /// Responder only: the matching tag was the live verification code's (BVMID2), so the session is verify-only.
+    public var qrTagMatched = false
 }
 
 /// Per-process memory of the last msg1 ephemerals, so a replayed msg1 costs the responder one hash (SR11).
@@ -266,9 +280,14 @@ public struct Bmh3ContactTag {
     public let binding: Data
     /// Initiator side: the contact the selected advert was recognised as; its full node ID must be the answerer's.
     public let expectedPeer: NodeId?
-    public init(key: Data, binding: Data, expectedPeer: NodeId? = nil) throws {
+    /// BVMID2: non-nil when this tag key comes from the secret `K_qr` of a verification code on the responder's screen, not
+    /// from a presence lease. A match presents the real key like any tag, but the gate reserves the code for ONE logical
+    /// attempt (both handshake layers of the connection), and the session it opens is scoped to verifying.
+    public let qrGate: QrTagGate?
+    public var isQr: Bool { qrGate != nil }
+    public init(key: Data, binding: Data, expectedPeer: NodeId? = nil, qrGate: QrTagGate? = nil) throws {
         guard key.count == 32, binding.count == Bmh3Wire.bindingBytes else { throw Bmh3Failure("tag key or binding length") }
-        self.key = key.rebased; self.binding = binding.rebased; self.expectedPeer = expectedPeer
+        self.key = key.rebased; self.binding = binding.rebased; self.expectedPeer = expectedPeer; self.qrGate = qrGate
     }
 }
 
@@ -432,7 +451,8 @@ public class Bmh3Party {
         // A pseudonymous block never carries an opening: the salt of a rotating ID confirms the owner of a node ID.
         let own = Bmh3Extensions(opening: presented.pseudonym ? nil : extensions.opening, intent: extensions.intent,
                                  buildTag: config.buildTag, pseudonym: presented.pseudonym,
-                                 relaySeek: role == "Responder" ? config.relaySeek : nil)
+                                 relaySeek: role == "Responder" ? config.relaySeek : nil,
+                                 wifiMarker: role == "Initiator" ? config.wifiMarker : false)
         prefix.bytes(try own.encodeArea())
         let prefixBytes = prefix.data
         let thSig = Bmh3Crypto.th(config.purpose, transcript + carrierPrefix + prefixBytes)
@@ -479,6 +499,7 @@ public class Bmh3Party {
         if extensions.buildTagSeen && config.purpose != .link { throw Bmh3Failure("build tag outside the link handshake") }
         if extensions.opening != nil && !responderBlock { throw Bmh3Failure("opening outside a responder block") }
         if extensions.relaySeek != nil && (!responderBlock || config.purpose != .link) { throw Bmh3Failure("relay seek outside a responder link block") }
+        if extensions.wifiMarker && (responderBlock || config.purpose != .link || message != 3) { throw Bmh3Failure("wifi marker outside msg3 of the link initiator") }
         // A throwaway key must not open a rotating ID: the salt would let a prober confirm the owner of a node ID.
         if extensions.opening != nil && extensions.pseudonym { throw Bmh3Failure("opening in a pseudonymous block") }
         if extensions.intent != nil && (responderBlock || message != 3 || blockOrder != .iFirst) {
@@ -486,7 +507,7 @@ public class Bmh3Party {
         }
     }
 
-    func finishSession(peer: Bmh3Peer, order: Bmh3Order, initiator: Bool, tagMatched: Bool) -> Bmh3Result {
+    func finishSession(peer: Bmh3Peer, order: Bmh3Order, initiator: Bool, tagMatched: Bool, qrTagMatched: Bool = false) -> Bmh3Result {
         let thFinal = Bmh3Crypto.th(config.purpose, transcript)
         let ms = Bmh3Crypto.extract(salt: thFinal, ikm: derived)
         let i2r = Bmh3Crypto.label(config.purpose, ms, "app i2r")
@@ -496,7 +517,7 @@ public class Bmh3Party {
         ephemeral = nil
         return Bmh3Result(order: order, peer: peer, sendKey: initiator ? i2r : r2i, receiveKey: initiator ? r2i : i2r,
                           exporter: exporter, tagMatched: tagMatched, ownPseudonymous: presented.pseudonym,
-                          ownSpki: presented.identity.publicKeyEncoded)
+                          ownSpki: presented.identity.publicKeyEncoded, qrTagMatched: qrTagMatched)
     }
 
     func header(_ message: UInt8, _ flags: UInt8) -> Data {
@@ -604,9 +625,10 @@ public final class Bmh3Initiator: Bmh3Party {
     }
 }
 
-/// The responder. `mode` picks the order (SR4); `tagChecks` are the K_tag values of its own lease keys.
-/// `beforeReply` runs for an R_FIRST msg1 without a matching tag, before a key is drawn or a signature made (the signing
-/// budget); it may throw. `admitInitiator` runs after the initiator's block verified: false refuses it.
+/// The responder. `mode` picks the order (SR4); `tagChecks` are the K_tag values of its own lease keys (and, BVMID2, the live
+/// verification code's, whose gate reserves the code at msg1). `beforeReply(tagMatched)` runs for every R_FIRST msg1, before a
+/// key is drawn or a signature made (the signing budget for an untagged one, the Meet screen's refusal); it may throw.
+/// `admitInitiator` runs after the initiator's block verified: false refuses it.
 public final class Bmh3Responder: Bmh3Party {
     private let mode: Bmh3ResponderMode
     private let tagChecks: [Bmh3ContactTag]
@@ -616,6 +638,8 @@ public final class Bmh3Responder: Bmh3Party {
     private let admitInitiator: (Bmh3Peer, Bool) throws -> Bool
     private var started = false
     public private(set) var contactTagMatched = false
+    /// True when the matching tag was a verification code's (BVMID2; valid after `onMessage1`).
+    public private(set) var qrTagMatched = false
 
     public init(config: Bmh3Config, mode: Bmh3ResponderMode = .everyone, tagChecks: [Bmh3ContactTag] = [], opening: Data? = nil,
                 replayCache: Bmh3ReplayCache? = nil, beforeReply: @escaping (Bool) throws -> Void = { _ in },
@@ -641,14 +665,24 @@ public final class Bmh3Responder: Bmh3Party {
         let tag = message.suffix(Bmh3Wire.tagBytes).rebased
         // Evaluate every candidate (no early exit): the cost does not depend on which key matched.
         var matched = false
+        var qrGateHit: QrTagGate?
         for check in tagChecks {
             let expected = Bmh3Crypto.contactTag(config.purpose, tagKey: check.key, msg1WithZeroTag: body + Data(count: Bmh3Wire.tagBytes), binding: check.binding)
-            if constantTimeEqual(expected, tag) { matched = true }
+            if constantTimeEqual(expected, tag) {
+                matched = true
+                if qrGateHit == nil, let gate = check.qrGate { qrGateHit = gate }
+            }
+        }
+        // A verification code: reserve it for this attempt (or fail silently) before anything else happens.
+        if let gate = qrGateHit {
+            try gate.onTagMatch(purpose: config.purpose, msg1Ephemeral: peerEphemeral)
+            qrTagMatched = true
         }
         contactTagMatched = matched
         let chosen: Bmh3Order = mode == .everyone || matched ? .rFirst : .iFirst
         if chosen == .iFirst && flags & Bmh3Wire.flagMayRevealFirst == 0 { throw Bmh3Failure("order conflict") }
-        if chosen == .rFirst && !matched { try beforeReply(false) }
+        // Every R_FIRST msg1 passes the hook (a lease holder too: the Meet screen refuses everything but its code).
+        if chosen == .rFirst { try beforeReply(matched) }
         order = chosen
         // Rule P: an R_FIRST answer to a msg1 whose tag did not match is the stranger presentation, if there is one.
         if chosen == .rFirst && !matched, let stranger = config.stranger { presented = stranger }
@@ -681,14 +715,14 @@ public final class Bmh3Responder: Bmh3Party {
             throw Bmh3Failure(chosen == .rFirst ? "initiator refused" : "stranger gets a silent close")
         }
         if chosen == .rFirst {
-            result = finishSession(peer: initiator, order: chosen, initiator: false, tagMatched: contactTagMatched)
+            result = finishSession(peer: initiator, order: chosen, initiator: false, tagMatched: contactTagMatched, qrTagMatched: qrTagMatched)
             return nil
         }
         let h4 = header(4, 0)
         let block4 = try buildBlock(carrierPrefix: h4, extensions: Bmh3Extensions(opening: opening))
         let message4 = h4 + (try Bmh3Crypto.seal(keyHsR2i, aad: h4, block4))
         transcript.append(h4); transcript.append(block4)
-        result = finishSession(peer: initiator, order: chosen, initiator: false, tagMatched: contactTagMatched)
+        result = finishSession(peer: initiator, order: chosen, initiator: false, tagMatched: contactTagMatched, qrTagMatched: qrTagMatched)
         return message4
     }
 }

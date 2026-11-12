@@ -36,10 +36,10 @@ build() { # name target extra-cflags [CC]
 if [[ "$mode" == all ]]; then
 ios_sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
 sim_sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
-build iphoneos-arm64 arm64-darwin-gcc "-miphoneos-version-min=16.0 -O2"
+build iphoneos-arm64 arm64-darwin-gcc "-miphoneos-version-min=17.0 -O2"
 # libvpx has no arm64 simulator target: use its portable C configuration (simulator speed is irrelevant).
-build iphonesimulator-arm64 generic-gnu "-O2" "$(xcrun --sdk iphonesimulator --find clang) -target arm64-apple-ios16.0-simulator -isysroot $sim_sdk"
-build iphonesimulator-x86_64 generic-gnu "-O2" "$(xcrun --sdk iphonesimulator --find clang) -target x86_64-apple-ios16.0-simulator -isysroot $sim_sdk"
+build iphonesimulator-arm64 generic-gnu "-O2" "$(xcrun --sdk iphonesimulator --find clang) -target arm64-apple-ios17.0-simulator -isysroot $sim_sdk"
+build iphonesimulator-x86_64 generic-gnu "-O2" "$(xcrun --sdk iphonesimulator --find clang) -target x86_64-apple-ios17.0-simulator -isysroot $sim_sdk"
 fi
 build macos-arm64 arm64-darwin24-gcc "-mmacosx-version-min=13.0 -O2"
 headers="$root/headers"

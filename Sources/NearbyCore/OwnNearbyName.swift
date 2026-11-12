@@ -31,3 +31,35 @@ public enum OwnNearbyName {
         shown.rotates ? "You appear as \(shown.name) \u{00B7} changes every 15 min" : "You appear as \(shown.name)"
     }
 }
+
+/// Settings › Your name (Android 2026-11-04, "a rejected name keeps the current name"): what applying the typed text
+/// does. An empty field clears the name; a name the label rules accept is saved in its canonical form, the same text
+/// a call carries; a rejected name keeps the current name, so a typo never erases or silently replaces it.
+public enum OwnNameEdit: Equatable {
+    case save(String)
+    case clear
+    case keep(reason: String)
+
+    public static func outcome(typed: String) -> OwnNameEdit {
+        if LabelText.collapseWhitespace(typed).isEmpty { return .clear }
+        switch LabelText.normalize(.personName, typed) {
+        case .success(let name): return .save(name)
+        case .failure(let rejected): return .keep(reason: rejected.reason)
+        }
+    }
+
+    /// The name to store when the typed text is applied while `current` is stored.
+    public func resolved(current: String) -> String {
+        switch self {
+        case .save(let name): return name
+        case .clear: return ""
+        case .keep: return current
+        }
+    }
+
+    /// Why the typed text cannot be used, or nil when applying it is fine.
+    public var rejection: String? {
+        if case .keep(let reason) = self { return reason }
+        return nil
+    }
+}

@@ -40,6 +40,8 @@ struct DesktopNearbyNames {
         func lines(_ data: Data) -> [String] { String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init) }
         self.adjectives = lines(adjectives); self.nouns = lines(nouns); blocked = Set(lines(blockedPairs))
         guard self.adjectives.count == 256, self.nouns.count == 256 else { return nil }
+        // Reserved name forms, rule 3 (Android NameTextRules): no person name may read as a generated name.
+        NameTextRules.install(adjectives: self.adjectives, nouns: self.nouns)
     }
 
     func name(for announcement: DiscoveryAnnouncement) -> Name? {

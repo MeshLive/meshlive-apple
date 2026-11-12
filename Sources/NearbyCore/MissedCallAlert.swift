@@ -38,3 +38,93 @@ public enum MissedCallAlert {
         }
     }
 }
+
+// MARK: - Calls and Recent (Android RecentCalls, StrangerCallFollowup, CallRinger, CallProximityCameraPause)
+
+/// How a recent call ended (Android `CallResult`), kept with the record so Recent can say "↗ Answered / Video, 5 min ago".
+public enum RecentCallOutcome: String, Codable, CaseIterable {
+    case answered, missed, declined, noAnswer, failed
+
+    /// Android `recentCallResult`: answered first; an incoming call that rang unanswered here is missed; a decline here,
+    /// the other side's decline or a busy decline is declined; a cancel or the ring timeout is no answer; else failed.
+    public static func of(answered: Bool, missed: Bool, declinedHere: Bool, cancelledHere: Bool, reason: String?) -> RecentCallOutcome {
+        if answered { return .answered }
+        if missed { return .missed }
+        let r = (reason ?? "").lowercased()
+        if declinedHere || r.contains("declined") { return .declined }
+        if cancelledHere || r.contains("cancelled") || r.contains("canceled") || r.contains("no answer")
+            || (r.contains("ring") && r.contains("timeout")) {
+            return .noAnswer
+        }
+        return .failed
+    }
+
+    /// A record saved before outcomes were kept (Android reads its legacy entries as answered).
+    public static func legacy(missed: Bool) -> RecentCallOutcome { missed ? .missed : .answered }
+
+    /// Android `recent_answered`, `recent_missed`, `recent_declined`, `recent_no_answer`, `recent_failed`.
+    public var label: String {
+        switch self {
+        case .answered: return "Answered"
+        case .missed: return "Missed"
+        case .declined: return "Declined"
+        case .noAnswer: return "No answer"
+        case .failed: return "Failed"
+        }
+    }
+
+    /// Android `recent_outcome` "<arrow> <outcome> / <text>" (↗ outgoing, ↙ incoming); with complete Recent off (the
+    /// control arm) the text alone.
+    public static func line(outgoing: Bool, outcome: RecentCallOutcome, detail: String, complete: Bool) -> String {
+        guard complete else { return detail }
+        return "\(outgoing ? "\u{2197}" : "\u{2199}") \(outcome.label) / \(detail)"
+    }
+}
+
+/// Android `StrangerCallFollowup.offer`: after a call with someone who is not saved (and not blocked), the name to offer
+/// "Add <name> as a contact?" with: their generated name, else the handle of an unsaved fixed ID; nil for nobody.
+public enum StrangerCallFollowUp {
+    public static func name(enabled: Bool, blocked: Bool, isContact: Bool, generatedName: String?, handle: String?) -> String? {
+        guard enabled, !blocked, !isContact else { return nil }
+        if let generated = generatedName?.trimmingCharacters(in: .whitespaces), !generated.isEmpty {
+            return GeneratedNameText.display(generated)
+        }
+        if let handle, !handle.isEmpty { return handle }
+        return nil
+    }
+}
+
+/// Android `ProximityCameraPausePolicy.shouldPause`: the outgoing camera pauses only while the user's camera is on, the
+/// sound is on the earpiece and the proximity sensor reads near.
+public enum EarCameraPause {
+    public static func shouldPause(enabled: Bool, userCameraOn: Bool, earpiece: Bool, near: Bool) -> Bool {
+        enabled && userCameraOn && earpiece && near
+    }
+}
+
+/// iOS stops the camera while the app is in the background: a video call sends Camera off when the app leaves and turns
+/// the camera on again once the app is active, when the user's camera was on. A second background before the app became
+/// active (unlock, then straight to the home screen) keeps what the first one saved.
+public struct BackgroundCameraRestore: Equatable {
+    public private(set) var backgrounded = false
+    public private(set) var cameraWasOn = false
+    public init() {}
+
+    public mutating func enterBackground(cameraOn: Bool) {
+        if !backgrounded { cameraWasOn = cameraOn }
+        backgrounded = true
+    }
+
+    /// True when the camera must be turned on again now.
+    public mutating func enterForeground(cameraOn: Bool, callEnded: Bool) -> Bool {
+        let restore = backgrounded && cameraWasOn && !cameraOn && !callEnded
+        backgrounded = false
+        cameraWasOn = false
+        return restore
+    }
+}
+
+/// Android `updatePrivateCallRingback`: the caller hears ringing only while the other phone rings.
+public enum CallTones {
+    public static func ringbackPlays(enabled: Bool, phase: PrivateCallPhase) -> Bool { enabled && phase == .outgoingRinging }
+}

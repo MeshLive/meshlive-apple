@@ -14,29 +14,29 @@ final class LabelEngineTests: XCTestCase {
         }
     }
 
-    func testCallNamesSubjectAndCalleeNameOnlyWithAccept() throws {
+    func testCallNamesAndCalleeNameOnlyWithAccept() throws {
         let callerId = SoftwareSigningIdentity(), calleeId = SoftwareSigningIdentity()
         let caller = CallEngine(role: .caller, transport: .gatt, identity: callerId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                labels: CallLabelOptions(localName: "Asha", subject: "Water at the school"))
+                                labels: CallLabelOptions(localName: "Asha"))
         let callee = CallEngine(role: .callee, transport: .gatt, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                labels: CallLabelOptions(localName: "Ravi", subject: nil))
+                                labels: CallLabelOptions(localName: "Ravi"))
         var callerEvents: [CallEngine.Event] = [], calleeEvents: [CallEngine.Event] = []
         caller.onEvent = { callerEvents.append($0) }; callee.onEvent = { calleeEvents.append($0) }
         try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
         XCTAssertTrue(caller.peerAcceptsLabels && callee.peerAcceptsLabels)
-        XCTAssertTrue(calleeEvents.contains(.peerLabels(name: "Asha", subject: "Water at the school")), "buffered before Invite, verified on Invite (R3)")
+        XCTAssertTrue(calleeEvents.contains(.peerLabels(name: "Asha")), "buffered before Invite, verified on Invite (R3)")
         XCTAssertFalse(callerEvents.contains { if case .peerLabels = $0 { return true }; return false }, "R1: no callee name before Accept")
         try callee.accept(as: .voice); pump(caller, callee, now: 3)
-        XCTAssertTrue(callerEvents.contains(.peerLabels(name: "Ravi", subject: nil)))
+        XCTAssertTrue(callerEvents.contains(.peerLabels(name: "Ravi")))
         XCTAssertEqual(caller.state?.phase, .active)
     }
 
     func testDeclinedCallNeverRevealsCalleeNameAndVerifiedCallerGetsItAtRinging() throws {
         let calleeId = SoftwareSigningIdentity()
         let caller = CallEngine(role: .caller, transport: .l2cap, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                labels: CallLabelOptions(localName: nil, subject: nil))
+                                labels: CallLabelOptions(localName: nil))
         let callee = CallEngine(role: .callee, transport: .l2cap, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                labels: CallLabelOptions(localName: "Ravi", subject: nil))
+                                labels: CallLabelOptions(localName: "Ravi"))
         var callerEvents: [CallEngine.Event] = []
         caller.onEvent = { callerEvents.append($0) }
         try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
@@ -44,23 +44,72 @@ final class LabelEngineTests: XCTestCase {
         XCTAssertFalse(callerEvents.contains { if case .peerLabels = $0 { return true }; return false })
 
         let caller2 = CallEngine(role: .caller, transport: .l2cap, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                 labels: CallLabelOptions(localName: nil, subject: nil))
+                                 labels: CallLabelOptions(localName: nil))
         let callee2 = CallEngine(role: .callee, transport: .l2cap, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                 labels: CallLabelOptions(localName: "Ravi", subject: nil, isVerifiedPeer: { _ in true }))
+                                 labels: CallLabelOptions(localName: "Ravi", isVerifiedPeer: { _ in true }))
         var events2: [CallEngine.Event] = []
         caller2.onEvent = { events2.append($0) }
         try caller2.start(now: 0); try callee2.start(now: 0); pump(caller2, callee2)
-        XCTAssertTrue(events2.contains(.peerLabels(name: "Ravi", subject: nil)), "verified contact gets the name at Ringing (R1)")
+        XCTAssertTrue(events2.contains(.peerLabels(name: "Ravi")), "verified contact gets the name at Ringing")
     }
 
     func testFeatureOffOnOneSideSendsNothing() throws {
         let caller = CallEngine(role: .caller, transport: .gatt, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                labels: CallLabelOptions(localName: "Asha", subject: "Hi"))
+                                labels: CallLabelOptions(localName: "Asha"))
         let callee = CallEngine(role: .callee, transport: .gatt, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9)
         try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
         XCTAssertFalse(caller.peerAcceptsLabels)
         XCTAssertEqual(callee.state?.phase, .incomingRinging, "the old peer never saw a type-10 record (it would have failed closed)")
         XCTAssertEqual(callee.endpointCapabilities.transportMask & PeerLabelFeature.capabilityBit, 0)
+    }
+
+    /// "Who sees my name" on real-key calls: Nobody sends no name; "Only my contacts" sends the caller's name only to a
+    /// verified contact. No call subject is ever sent.
+    func testTheAudienceDecidesWhetherTheNameIsSent() throws {
+        func call(callerAudience: NamesAudience, calleeAudience: NamesAudience, verified: Bool) throws -> (CallEngine, CallEngine) {
+            let caller = CallEngine(role: .caller, transport: .gatt, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                    labels: CallLabelOptions(localName: "Asha", audience: callerAudience,
+                                                             isVerifiedPeer: { _ in verified }))
+            let callee = CallEngine(role: .callee, transport: .gatt, identity: SoftwareSigningIdentity(), requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                    labels: CallLabelOptions(localName: "Ravi", audience: calleeAudience))
+            try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+            try callee.accept(as: .voice); pump(caller, callee, now: 3)
+            XCTAssertEqual(caller.state?.phase, .active)
+            return (caller, callee)
+        }
+        var (caller, callee) = try call(callerAudience: .nobody, calleeAudience: .nobody, verified: true)
+        XCTAssertNil(callee.labelInbox.text(.personName))
+        XCTAssertNil(callee.labelInbox.text(.callSubject), "no subject is ever sent")
+        XCTAssertNil(caller.labelInbox.text(.personName))
+        (caller, callee) = try call(callerAudience: .verified, calleeAudience: .everyone, verified: false)
+        XCTAssertNil(callee.labelInbox.text(.personName), "not a verified contact")
+        XCTAssertEqual(caller.labelInbox.text(.personName), "Ravi", "the callee's own audience lets its name go with Accept")
+        (caller, callee) = try call(callerAudience: .verified, calleeAudience: .everyone, verified: true)
+        XCTAssertEqual(callee.labelInbox.text(.personName), "Asha")
+    }
+
+    /// P2-1: under "Only my contacts" a relayed rotating call releases the caller's name at the OPENING, but only to a
+    /// verified contact.
+    func testARelayedVerifiedCallSendsTheCallersNameAfterTheOpeningOnlyToAVerifiedContact() throws {
+        for verified in [true, false] {
+            let calleeId = SoftwareSigningIdentity()
+            let entry = RotatingDiscoveryIds.ownEntry(presenceKey: Data(repeating: 9, count: 32), nodeId: calleeId.nodeId.bytes,
+                                                      epoch: 1_990_656, role: 0)
+            var offer = DiscoveryAnnouncement(nodeIdPrefix: entry.rdi,
+                                              flags: DiscoveryAnnouncement.flagAcceptingConnections | DiscoveryAnnouncement.flagPrivateCallAvailable,
+                                              capabilitySummary: 1, streamToken: 0, routeCost: 1)
+            offer.rotating = true
+            let caller = CallEngine(role: .caller, transport: .gatt, identity: SoftwareSigningIdentity(), requestedType: .voice,
+                                    encodeMask: vp9, decodeMask: vp9, expectedPeerPrefix: entry.rdi,
+                                    labels: CallLabelOptions(localName: "Asha", audience: .verified, isVerifiedPeer: { _ in verified }),
+                                    rotating: RotatingCallOptions(selected: offer, wallEpoch: { 1_990_656 }))
+            let callee = CallEngine(role: .callee, transport: .gatt, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                    labels: CallLabelOptions(localName: "Ravi"),
+                                    rotating: RotatingCallOptions(entries: { [entry] }))
+            try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+            XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "")")
+            XCTAssertEqual(callee.labelInbox.text(.personName), verified ? "Asha" : nil, "verified contact: \(verified)")
+        }
     }
 
     func testStreamTitleDirectAndMesh() throws {

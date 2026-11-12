@@ -108,3 +108,119 @@ public final class DiscoveryTable {
 
     public func removeAll() { entries.removeAll(); keyByHandle.removeAll() }
 }
+
+// MARK: - Copied-ID warning (Android CopiedIdTracker, Design G)
+
+/// Android's copied-ID warning (Design G, review F4) on Apple's discovery. Keys are the rotating discovery ID plus the
+/// route cost. For one key, a coincidence is a sighting while another radio address (a Core Bluetooth peripheral
+/// identifier: one per advertising address) of the same key was heard within `simultaneousMs` and, with the overlap
+/// rule, was heard again after this address first appeared: the two interleave, so two senders are on the air at once.
+/// A handover (the old address stops, a new one starts, as an advertising restart) never interleaves; a relay's mirror
+/// at route cost + 1 is another key. Coincidences closer than `simultaneousMs` count once; `repeats` of them warn.
+///
+/// PC twin: a Windows PC sends one compact call offer from two advertising sets at once. Android exempts exactly two
+/// recent addresses, one legacy and one extended, whose Flags and UUID lists (with 0x180A) are byte-identical. Core
+/// Bluetooth reports neither the legacy/extended kind nor the Flags, so Apple exempts exactly two recent addresses whose
+/// service UUID lists are identical and carry 0x180A (`twinForm`). An address replaced by a newer one of the same form
+/// (`superseded`) is left out of the twin test only.
+///
+/// It disables nothing and sends nothing: the row says so and a call asks once more. Main queue only (`MeshRadio`).
+public final class CopiedIdTracker {
+    /// What the PC twin test compares: the advert's service UUIDs as received, nil unless 0x180A is among them.
+    public struct TwinForm: Equatable {
+        public let compared: String
+    }
+
+    public static let simultaneousMs: Int64 = 2_000
+    public static let repeats = 2
+    public static let staleMs: Int64 = 20 * 60_000
+    public static let maxKeys = 512
+
+    /// Android `test_copied_id_overlap` control arm: false counts any two addresses heard within 2 s (the old rule).
+    public var requireOverlap = true
+    /// Android `test_copied_id_pc_pair` control arm: false warns for a PC's twin sets too.
+    public var pcPairExempt = true
+
+    private final class Seen {
+        let address: UUID
+        let firstMs: Int64
+        var lastMs: Int64
+        var form: TwinForm?
+        init(address: UUID, firstMs: Int64, form: TwinForm?) { self.address = address; self.firstMs = firstMs; lastMs = firstMs; self.form = form }
+    }
+
+    private var perKey: [String: [Seen]] = [:]
+    private var touched: [String: Int64] = [:]
+    private var coincidences: [String: Int] = [:]
+    private var lastCoincidenceMs: [String: Int64] = [:]
+
+    public init() {}
+
+    /// The twin form of an advert from its service UUID strings (`CBUUID.uuidString`, "180A" for 0x180A).
+    public static func twinForm(serviceUUIDs: [String]) -> TwinForm? {
+        let upper = serviceUUIDs.map { $0.uppercased() }
+        guard upper.contains("180A") else { return nil }
+        return TwinForm(compared: upper.joined(separator: ","))
+    }
+
+    private static func key(_ id: Data, _ routeCost: UInt8) -> String { "\(id.hex)/\(routeCost)" }
+
+    /// Records one rotating call offer. True when the warning is now due for this ID at this route cost.
+    @discardableResult
+    public func observe(id: Data, address: UUID, routeCost: UInt8, nowMs: Int64, form: TwinForm? = nil) -> Bool {
+        let key = Self.key(id, routeCost)
+        touched[key] = nowMs
+        if touched.count > Self.maxKeys { prune(nowMs: nowMs) }
+        var list = perKey[key] ?? []
+        let own: Seen
+        if let existing = list.first(where: { $0.address == address }) {
+            existing.lastMs = nowMs
+            // A sighting without a form never erases the form the address already showed.
+            if let form { existing.form = form }
+            own = existing
+        } else {
+            own = Seen(address: address, firstMs: nowMs, form: form)
+            list.append(own)
+        }
+        perKey[key] = list
+        let recent = list.filter { nowMs - $0.lastMs <= Self.simultaneousMs }
+        // Superseded addresses leave only the twin test; the overlap scan below still sees every address.
+        let exempt = pcPairExempt && Self.pcTwin(recent.filter { !Self.superseded($0, in: list) })
+        let other = !exempt && list.contains {
+            $0.address != address && nowMs - $0.lastMs <= Self.simultaneousMs
+                // The other address was heard after this one appeared: both on the air, not one replacing the other.
+                && (!requireOverlap || $0.lastMs > own.firstMs)
+        }
+        if other, lastCoincidenceMs[key].map({ nowMs - $0 > Self.simultaneousMs }) ?? true {
+            coincidences[key, default: 0] += 1
+            lastCoincidenceMs[key] = nowMs
+        }
+        return (coincidences[key] ?? 0) >= Self.repeats
+    }
+
+    /// Exactly two recent addresses with the same non-nil form are one PC (Apple form of Android's twin rule).
+    private static func pcTwin(_ recent: [Seen]) -> Bool {
+        guard recent.count == 2, let a = recent[0].form, let b = recent[1].form else { return false }
+        return a == b
+    }
+
+    /// `old` was replaced, not joined: another address with the same non-nil form was first heard strictly after `old`
+    /// was last heard. If `old` is heard again after that, the two interleave and `old` counts again.
+    private static func superseded(_ old: Seen, in all: [Seen]) -> Bool {
+        guard let form = old.form else { return false }
+        return all.contains { $0 !== old && $0.form == form && $0.firstMs > old.lastMs }
+    }
+
+    /// True while the warning is due for this ID at any route cost.
+    public func warned(_ id: Data) -> Bool {
+        let prefix = id.hex + "/"
+        return coincidences.contains { $0.key.hasPrefix(prefix) && $0.value >= Self.repeats }
+    }
+
+    /// Drops every key not heard for `staleMs` (an ID that left the air at an epoch change is never needed again).
+    public func prune(nowMs: Int64) {
+        for (key, at) in touched where nowMs - at > Self.staleMs {
+            touched[key] = nil; perKey[key] = nil; coincidences[key] = nil; lastCoincidenceMs[key] = nil
+        }
+    }
+}

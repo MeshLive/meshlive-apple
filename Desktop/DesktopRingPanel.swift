@@ -11,16 +11,18 @@ final class DesktopRingPanel {
     private var panel: NSPanel?
     private weak var call: CallController?
 
-    func show(call: CallController, openMain: @escaping () -> Void) {
+    func show(call: CallController, model: AppModel, openMain: @escaping () -> Void) {
         if let panel, self.call === call {
             if !panel.isVisible { panel.orderFrontRegardless() }
             return
         }
         close()
         self.call = call
-        let view = DesktopRingView(call: call, openMain: openMain)
+        let view = DesktopRingView(call: call, decline: { [weak model] in model?.declineFromScreen(call) },
+                                   declineAndBlock: { [weak model] in model?.declineAndBlock(call) },
+                                   declineAndReport: { [weak model] in model?.declineAndReport(call) }, openMain: openMain)
             .environment(\.colorScheme, .dark)
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 220),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 340),
                             styleMask: [.titled, .nonactivatingPanel, .fullSizeContentView, .utilityWindow],
                             backing: .buffered, defer: false)
         panel.title = "Incoming call"
@@ -54,20 +56,41 @@ final class DesktopRingPanel {
     }
 }
 
-/// Android's incoming-call controls (same as CallView): Decline, Voice for a video call, Accept.
+/// Android's incoming-call controls (same as CallView): Decline, Voice for a video call, Accept and, for a caller that
+/// showed its real key, Decline and block and Report under the row; the two P14 ring lines too.
 private struct DesktopRingView: View {
     @ObservedObject var call: CallController
+    let decline: () -> Void
+    let declineAndBlock: () -> Void
+    let declineAndReport: () -> Void
     let openMain: () -> Void
 
     var body: some View {
         VStack(spacing: 14) {
-            Text(call.label?.title ?? call.peerName)
-                .font(.title2.weight(.semibold)).foregroundStyle(Palette.ink)
-                .lineLimit(2).multilineTextAlignment(.center)
+            Group {
+                if let claimed = call.claimedName, call.label?.contactName == nil {
+                    Text("~").foregroundColor(Palette.dimInk) + Text(claimed)
+                } else {
+                    Text(call.label?.title ?? call.peerName)
+                }
+            }
+            .font(.title2.weight(.semibold)).foregroundStyle(Palette.ink)
+            .lineLimit(2).multilineTextAlignment(.center)
+            .accessibilityLabel(call.claimedNote.map { call.imitates == nil ? "calls itself \(call.claimedName ?? ""), not verified" : "\($0), calls itself \(call.claimedName ?? "")" } ?? (call.label?.title ?? call.peerName))
+            if let note = call.claimedNote {
+                Text(note).font(.callout).foregroundStyle(Palette.dimInk).lineLimit(2).multilineTextAlignment(.center)
+            }
+            if call.claimedNote != nil {
+                Text("calls itself, not checked").font(.caption).foregroundStyle(Palette.dimInk).accessibilityHidden(true)
+            }
+            if call.ringNotice != nil, call.claimedName == nil {
+                Text("Not verified. A new call from the same phone shows a new name.").font(.caption).foregroundStyle(Palette.dimInk)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            }
             Text(call.offeredType == .voice ? "Incoming voice call" : "Incoming video call")
                 .font(.callout).foregroundStyle(Palette.dimInk)
             HStack(spacing: 32) {
-                RoundControl(icon: "phone.down.fill", label: "Decline", fill: Palette.callEnd, foreground: .white, size: 56) { call.decline() }
+                RoundControl(icon: "phone.down.fill", label: "Decline", fill: Palette.callEnd, foreground: .white, size: 56) { decline() }
                 if call.offeredType == .video {
                     RoundControl(icon: "phone.fill", label: "Voice", size: 56) { call.accept(as: .voice); openMain() }
                 }
@@ -75,6 +98,18 @@ private struct DesktopRingView: View {
                              fill: Palette.callAccept, foreground: .black, size: 56) {
                     call.accept(as: call.offeredType); openMain()
                 }
+            }
+            // Android: only for a caller that showed its real key (a one-time ID cannot be blocked one by one).
+            if call.fingerprint != nil {
+                HStack(spacing: 32) {
+                    Button("Decline and block") { declineAndBlock() }
+                        .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                        .accessibilityIdentifier("declineAndBlock")
+                    Button("Report") { declineAndReport() }
+                        .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                        .accessibilityIdentifier("declineAndReport")
+                }
+                .font(Typo.secondary.weight(.semibold)).foregroundStyle(.white).buttonStyle(.plain)
             }
         }
         .padding(20).padding(.top, 8)

@@ -1,5 +1,10 @@
 import SwiftUI
 import NearbyCore
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 /// The shared iOS component set. Every screen builds from these (no one-off styling): SF Symbols mapped from
 /// Android's icons, list rows, the status line, primary/secondary/destructive buttons, notices and the empty
@@ -323,6 +328,21 @@ struct SettingsToggleRow: View {
     }
 }
 
+/// A row whose value is a menu (Mac Camera, Content size): Android's row style, the menu at the end.
+struct SettingsPickerRow<Value: View>: View {
+    let icon: String, title: String
+    @ViewBuilder let value: Value
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: icon).font(.system(size: 17)).foregroundStyle(Palette.dimInk).frame(width: 26).accessibilityHidden(true)
+            Text(title).font(.body.weight(.medium)).foregroundStyle(Palette.ink)
+            Spacer(minLength: 12)
+            value.labelsHidden().fixedSize()
+        }
+        .padding(.horizontal, 16).frame(minHeight: 56)
+    }
+}
+
 /// Android's switch: on = white track with a black thumb, off = dark grey track with a grey thumb. VoiceOver and
 /// XCUI still see a system switch (accessibilityRepresentation).
 struct MeshSwitchStyle: ToggleStyle {
@@ -387,42 +407,254 @@ struct CapsuleButton: View {
     }
 }
 
-/// Tab root header: large bold title and the status dot (green when the radio is ready). Three quick taps on the
-/// header ask to erase when the opt-in quick wipe is on (Android panic_wipe_gesture).
+/// Tab root title row (Android `activity_main.xml` tab rows): one row, at least 56 high, 8 from the top. Live shows the
+/// app mark and "MeshLive" at Android's Readout 22; the other tabs their name at Android's Headline 28. The status chip
+/// is the last item and never cuts the title (it drops its word first). Three quick taps on the title ask to erase
+/// when the opt-in quick wipe is on (Android panic_wipe_gesture).
 struct TabHeader: View {
     @EnvironmentObject var model: AppModel
     let title: String
     var showsLogo = false
     var body: some View {
-        let status = RadioStatus(model: model)
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             if showsLogo {
-                Image(systemName: "dot.radiowaves.forward").font(.title.weight(.semibold)).foregroundStyle(Palette.ink).accessibilityHidden(true)
+                Image(systemName: "dot.radiowaves.forward").font(.system(size: 20, weight: .semibold)).foregroundStyle(Palette.ink)
+                    .frame(width: 28, height: 28).accessibilityHidden(true)
             }
-            Text(title).font(.largeTitle.weight(.bold)).foregroundStyle(Palette.ink).accessibilityAddTraits(.isHeader)
-            Spacer()
-            Text("\u{25CF}").font(.system(size: 14)).foregroundStyle(status.ok ? Palette.connected : Palette.dimInk)
-                .frame(width: 44, height: 44)
-                .accessibilityLabel(status.title)
-                .accessibilityValue(status.detail)
+            Text(title).font(TitleFont.tab(app: showsLogo)).foregroundStyle(Palette.ink)
+                .lineLimit(1).layoutPriority(1)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("tabTitle")
+                .onTapGesture(count: 3) { if model.quickWipeGesture { model.askQuickWipe = true } }
+            Spacer(minLength: 8)
+            StatusChip()
         }
-        .padding(.top, 8).padding(.bottom, 6)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 3) { if model.quickWipeGesture { model.askQuickWipe = true } }
+        .frame(minHeight: 56)
+        .padding(.top, 8)
     }
 }
 
-/// Android's readiness states and wording (the header dot and, when something is wrong, a card on Live).
+/// Title sizes of Android's title rows. iPhone: text styles that are Android's sizes at the default text size
+/// (`.title` 28, `.title2` 22) and still follow Dynamic Type. Mac: macOS text styles are smaller, so fixed sizes; the
+/// Mac's Content size setting scales the window.
+enum TitleFont {
+    static func tab(app: Bool) -> Font {
+        #if os(macOS)
+        return .system(size: app ? 22 : 28, weight: .bold)
+        #else
+        return app ? Font.title2.weight(.bold) : Font.title.weight(.bold)
+        #endif
+    }
+    static var page: Font { tab(app: false) }
+}
+
+/// Mac pushed page title row (Android `settingsTitle` row): the page title and the status chip; the system back button
+/// stays in the window toolbar. The iPhone uses the inline navigation bar instead (`pageTitle`).
+struct PageHeader: View {
+    let title: String
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title).font(TitleFont.page).foregroundStyle(Palette.ink)
+                .lineLimit(1).layoutPriority(1)
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 8)
+            StatusChip()
+        }
+        .frame(minHeight: 56)
+    }
+}
+
+/// The status indicator at the end of every title row (Android `view_status_chip.xml`): an 8-point dot and, for a
+/// problem, one short word when it fits (`ViewThatFits` offers dot and word, then the dot alone). A tap always opens
+/// the status sheet (Android 2026-10-21). `compact` (the iPhone navigation bar, which cannot measure the title): the
+/// word only when it is short.
+struct StatusChip: View {
+    @EnvironmentObject var model: AppModel
+    var compact = false
+    @State private var showSheet = false
+    var body: some View {
+        let kind = StatusKind(model: model)
+        let word = kind.word(mac: AppPlatform.isMac).flatMap { compact && $0.count > 14 ? nil : $0 }
+        Button { showSheet = true } label: {
+            ViewThatFits(in: .horizontal) {
+                if let word { chip(kind, word: word) }
+                chip(kind, word: nil)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(kind.word(mac: AppPlatform.isMac) ?? "Status: ready")
+        .accessibilityHint("Shows what is on and what needs you")
+        .accessibilityIdentifier("statusChip-" + kind.rawValue)
+        .sheet(isPresented: $showSheet) {
+            StatusSheet().environmentObject(model).meshPresentation(height: 560, largeOnly: false)
+        }
+    }
+
+    private func chip(_ kind: StatusKind, word: String?) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(kind.problem ? Palette.ink : Palette.connected).frame(width: 8, height: 8)
+            if let word {
+                Text(word).font(.subheadline.weight(.medium)).foregroundStyle(Palette.ink).lineLimit(1).fixedSize()
+            }
+        }
+        .padding(.leading, 8).padding(.trailing, 4)
+        .frame(minWidth: 48, minHeight: 48)
+        .contentShape(Rectangle())
+    }
+}
+
+extension StatusKind {
+    /// This device's status now (Android `updateStatusIndicators` inputs): Bluetooth readiness as `RadioStatus` judges
+    /// it, the screen that owns the radio, Allow calls, Relay video for others paused by the battery, and heat.
+    init(model: AppModel) {
+        let thermal = ProcessInfo.processInfo.thermalState
+        self = StatusKind.of(readiness: RadioStatus(model: model).readiness, hidden: !model.availableForCalls,
+                             relayPaused: model.relayForOthers && model.relayBatteryPaused, hot: thermal == .serious || thermal == .critical,
+                             screen: model.live != nil ? .live : model.watch != nil ? .watching : .home,
+                             callsUnavailable: model.callsUnavailable != nil)
+    }
+}
+
+/// The status sheet behind the chip (Android `sheet_status.xml`, `showStatusSheet`): what is on and what needs you,
+/// and the one fix when there is one. Your code and ID are not here (Add contact has them).
+struct StatusSheet: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        let status = RadioStatus(model: model)
+        let kind = StatusKind(model: model)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text("Status").font(.title3.weight(.bold)).foregroundStyle(Palette.ink).accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    #if os(macOS)
+                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                    #endif
+                }
+                .padding(.bottom, 4)
+                row("Bluetooth", Self.bluetooth(status.readiness), id: "bluetooth")
+                row("Access", Self.access, id: "access")
+                row("Allow calls", calls(kind), id: "calls")
+                row("Private Bluetooth ID", model.rotatingIds ? "On" : "Off", id: "ids")
+                if model.sourceGate.showsSourceControls {
+                    row("Relay video for others", model.relayForOthers ? (model.relayBatteryPaused ? "Paused to save battery" : "On") : "Off", id: "relay")
+                }
+                row("Battery and temperature", Self.health, id: "battery")
+                if model.callAlerts != .authorized {
+                    Text("Notifications off: you won't see calls").font(.subheadline).foregroundStyle(Palette.ink)
+                        .padding(.vertical, 10).accessibilityIdentifier("status-notifications-off")
+                }
+                if let nameplate { row("Nearby you appear as", nameplate, id: "nameplate") }
+                if status.readiness != .ready, let action = status.action {
+                    CapsuleButton(title: action, kind: .white) {
+                        dismiss()
+                        if status.opensBluetooth { AppPlatform.openBluetoothSettings() } else { AppPlatform.openSettings() }
+                    }
+                    .padding(.top, 8)
+                    .accessibilityIdentifier("status-action")
+                }
+                // Android "Calls unavailable": Bluetooth settings (apps cannot turn Bluetooth off and on). The Mac opens its
+                // Bluetooth pane; iOS has no public link to it, so the iPhone shows only the text.
+                if kind == .callsUnavailable, AppPlatform.isMac {
+                    CapsuleButton(title: "Bluetooth settings", kind: .white) {
+                        dismiss()
+                        AppPlatform.openBluetoothSettings()
+                    }
+                    .padding(.top, 8)
+                    .accessibilityIdentifier("status-bluetooth-settings")
+                }
+            }
+            .padding(.horizontal, 24).padding(.top, 16).padding(.bottom, 24)
+        }
+        .background(Palette.card.ignoresSafeArea())
+    }
+
+    private func row(_ label: String, _ value: String, id: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label).font(.body.weight(.semibold)).foregroundStyle(Palette.ink)
+            Spacer(minLength: 12)
+            Text(value).font(.subheadline).foregroundStyle(Palette.dimInk).multilineTextAlignment(.trailing)
+        }
+        .frame(minHeight: 52)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("status-row-" + id)
+    }
+
+    private static func bluetooth(_ readiness: StatusReadiness) -> String {
+        switch readiness {
+        case .ready: return "On"
+        case .bluetoothOff: return "Off"
+        case .permissionsNeeded: return "Needs permission"
+        case .unsupported: return "Not available"
+        case .bluetoothProblem: return "Needs attention"
+        }
+    }
+
+    /// "All allowed", or which of Bluetooth and the microphone (and, in the call readiness control arm, the camera) are not
+    /// allowed (never prompts). Android readiness: the camera is asked at the first video use, so it is not part of it.
+    private static var access: String {
+        let needed = AppSettings.callReadinessPermissions
+            ? [("Bluetooth", MediaPermissions.bluetooth), ("microphone", MediaPermissions.microphone)]
+            : [("Bluetooth", MediaPermissions.bluetooth), ("camera", MediaPermissions.camera), ("microphone", MediaPermissions.microphone)]
+        let missing = needed
+            .filter { $0.1 != "granted" }.map(\.0)
+        guard !missing.isEmpty else { return "All allowed" }
+        let list = ListFormatter.localizedString(byJoining: missing)
+        return list.prefix(1).uppercased() + list.dropFirst() + " needed"
+    }
+
+    private func calls(_ kind: StatusKind) -> String {
+        switch kind {
+        case .watching, .live: return kind.word(mac: AppPlatform.isMac) ?? ""
+        case .callsUnavailable: return model.callsUnavailable?.statusValue(mac: AppPlatform.isMac) ?? ""
+        default: return model.availableForCalls ? "On" : "Not available for nearby calls"
+        }
+    }
+
+    /// iPhone: charge and heat; Mac: heat (the app reads no Mac battery).
+    static var health: String {
+        let heat: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: heat = "normal"
+        case .fair: heat = "warm"
+        case .serious: heat = "hot"
+        case .critical: heat = "too hot"
+        @unknown default: heat = "unknown"
+        }
+        #if os(iOS)
+        let level = UIDevice.current.batteryLevel
+        if level >= 0 {
+            let charging = UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full ? " charging" : ""
+            return "\(Int((level * 100).rounded()))%\(charging) \u{00B7} heat \(heat)"
+        }
+        #endif
+        return "Heat \(heat)"
+    }
+
+    /// Android `ownGeneratedNameLine`: the generated name of this device's current rotating call ID and when it changes.
+    private var nameplate: String? {
+        guard model.rotatingIds, model.availableForCalls, let name = model.desktopAdvertisedName else { return nil }
+        let next = Date(timeIntervalSince1970: TimeInterval((model.rotating.currentEpoch() + 1) * RotatingDiscoveryIds.epochSeconds))
+        return "\(GeneratedNameText.display(name)) until \(next.formatted(date: .omitted, time: .shortened))"
+    }
+}
+
+/// Android's readiness states and wording (the status chip's readiness and, when something is wrong, a card on Live).
 struct RadioStatus {
     let title: String, detail: String, ok: Bool, action: String?
     /// The action opens Bluetooth settings (Mac) rather than the app's settings.
     var opensBluetooth = false
+    /// What the title-bar status makes of it (`StatusKind.of`).
+    var readiness: StatusReadiness = .ready
     init(model: AppModel) {
         #if DEBUG
-        // README fixture first, so README screenshots taken under -NearbyPreview show the ordinary ready state.
-        if model.debugReadme { (title, detail, ok, action) = ("Bluetooth on \u{00B7} Reachable for calls", "Keep MeshLive open to be reached", true, nil); return }
+        // README fixture first, so README screenshots taken under -NearbyPreview show the ordinary ready state. Store
+        // screenshots pass -NearbyReadyStatus 1.
+        if model.debugReadme || RootView.debugArgument("-NearbyReadyStatus") == "1" { (title, detail, ok, action) = ("Bluetooth on \u{00B7} Reachable for calls", "Keep MeshLive open to be reached", true, nil); return }
         #endif
         if DesktopPreview.enabled {
+            // The preview has no radio; the status chip treats it as ready.
             (title, detail, ok, action) = ("Preview", "Sample people and streams. Bluetooth and media are off.", false, nil)
             return
         }
@@ -431,15 +663,23 @@ struct RadioStatus {
             (title, detail, ok, action) = (BluetoothGuidance.restartTitle, BluetoothGuidance.restartText(mac: AppPlatform.isMac), false,
                                            AppPlatform.isMac ? "Open Bluetooth settings" : nil)
             opensBluetooth = true
+            readiness = .bluetoothProblem
             return
         }
         switch model.radio.central?.state {
-        case .poweredOff?: (title, detail, ok, action) = ("Bluetooth off", "Turn it on to call, talk or go live", false, "Open Settings"); return
-        case .unauthorized?: (title, detail, ok, action) = ("Access needed", "Bluetooth, camera and microphone", false, "Open app settings"); return
-        case .unsupported?: (title, detail, ok, action) = ("No Bluetooth", "This phone cannot reach other phones", false, nil); return
+        case .poweredOff?: (title, detail, ok, action) = ("Bluetooth off", "Turn it on to call, talk or go live", false, "Open Settings"); readiness = .bluetoothOff; return
+        case .unauthorized?: (title, detail, ok, action) = ("Access needed", "Bluetooth, camera and microphone", false, "Open app settings"); readiness = .permissionsNeeded; return
+        case .unsupported?: (title, detail, ok, action) = ("No Bluetooth", "This phone cannot reach other phones", false, nil); readiness = .unsupported; return
         default: break
         }
-        if let problem = model.bluetoothProblem { (title, detail, ok, action) = ("Bluetooth problem", problem, false, nil); return }
+        if let problem = model.bluetoothProblem { (title, detail, ok, action) = ("Bluetooth problem", problem, false, nil); readiness = .bluetoothProblem; return }
+        if let reason = model.callsUnavailable {
+            // Android "Calls unavailable" on Home: why, and Bluetooth settings on the Mac (iOS has no public link to it).
+            (title, detail, ok, action) = ("Calls unavailable", reason.statusValue(mac: AppPlatform.isMac), false,
+                                           AppPlatform.isMac ? "Bluetooth settings" : nil)
+            opensBluetooth = true
+            return
+        }
         (title, detail, ok, action) = model.availableForCalls
             ? ("Bluetooth on \u{00B7} Reachable for calls", "Keep MeshLive open to be reached", true, nil)
             : ("Bluetooth on \u{00B7} Not reachable for calls", "Turn on Allow calls in Settings", true, nil)
@@ -486,4 +726,98 @@ struct PlainEmptyState: View {
         .padding(32).frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
     }
+}
+
+/// What a Block confirmation is about: the person's full fingerprint, what screens call them, and the stream route that
+/// was playing (for a report).
+struct BlockTarget: Identifiable, Equatable {
+    let fingerprint: IdentityFingerprint
+    let name: String
+    var streamRoute: String? = nil
+    var id: String { fingerprint.hex }
+}
+
+/// Android `CallBlockingUi.confirmBlock`: "Block <name>?" with Block, Report and Cancel. `onDone` runs after Block or Report.
+private struct BlockConfirmation: ViewModifier {
+    @EnvironmentObject var model: AppModel
+    @Binding var target: BlockTarget?
+    var onBlocked: ((BlockTarget) -> Void)? = nil
+    let onDone: () -> Void
+    func body(content: Content) -> some View {
+        content.alert(target.map { "Block \($0.name)?" } ?? "Block?", isPresented: Binding(get: { target != nil }, set: { if !$0 { target = nil } }),
+                      presenting: target) { t in
+            Button("Block", role: .destructive) { model.blockAndSay(t.fingerprint); onBlocked?(t); onDone() }
+            Button("Report") { model.report(t.fingerprint, streamRoute: t.streamRoute); onDone() }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Their livestreams will be hidden. Calls will be blocked when MeshLive can recognise their phone. Calls using a temporary ID may still ring; turn on Block unknown callers to stop those too. They won't be notified.")
+        }
+    }
+}
+
+/// Android's report confirmation: "Blocked and hidden on this phone." with Tell MeshLive (a mail draft with subject
+/// "MeshLive: report a concern" and body "What happened:", no identifiers) and Close; the address with Copy when no mail
+/// app takes the draft. Shown at the root (the screen that reported has closed).
+private struct ReportDoneAlert: ViewModifier {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.openURL) private var openURL
+    @State private var showAddress = false
+    static let address = "meshlive.dev@gmail.com"
+    func body(content: Content) -> some View {
+        content
+            .alert(AppPlatform.isMac ? "Blocked and hidden on this Mac." : "Blocked and hidden on this phone.", isPresented: $model.reportDone) {
+                Button("Tell MeshLive") {
+                    guard let url = URL(string: "mailto:\(Self.address)?subject=MeshLive%3A%20report%20a%20concern&body=What%20happened%3A") else {
+                        showAddress = true; return
+                    }
+                    openURL(url) { accepted in if !accepted { showAddress = true } }
+                }
+                Button("Close", role: .cancel) {}
+            }
+            .alert("Contact us", isPresented: $showAddress) {
+                Button("Copy") {
+                    #if os(iOS)
+                    UIPasteboard.general.string = Self.address
+                    #else
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(Self.address, forType: .string)
+                    #endif
+                }
+                Button("Close", role: .cancel) {}
+            } message: { Text(Self.address) }
+    }
+}
+
+/// Android offerBlockUnknownAfterDecline, once until "Not now".
+private struct BlockUnknownOffer: ViewModifier {
+    @EnvironmentObject var model: AppModel
+    func body(content: Content) -> some View {
+        content.alert("Declined. Block all unknown callers?", isPresented: $model.askBlockUnknown) {
+            Button("Block all unknown callers") { model.blockUnknownCallers = true; model.callNotice = "Block unknown callers is on" }
+            Button("Not now", role: .cancel) { AppSettings.blockUnknownOfferDismissed = true }
+        }
+    }
+}
+
+/// Android `showBlockListUnreadable` (decision 2026-11-06): a Block that could not be saved because the saved list
+/// is damaged says so and offers Reset (this alert is the confirmation). Shown at the root, like the report alert.
+private struct BlockListUnreadableAlert: ViewModifier {
+    @EnvironmentObject var model: AppModel
+    func body(content: Content) -> some View {
+        content.alert("Block list can't be read", isPresented: $model.blockListUnreadableAlert) {
+            Button("Reset") { model.resetBlockList() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This block wasn't saved because the block list can't be read, so calls aren't blocked. Reset unblocks everyone; then you can block people again.")
+        }
+    }
+}
+
+extension View {
+    func blockConfirmation(_ target: Binding<BlockTarget?>, onBlocked: ((BlockTarget) -> Void)? = nil,
+                           onDone: @escaping () -> Void = {}) -> some View {
+        modifier(BlockConfirmation(target: target, onBlocked: onBlocked, onDone: onDone))
+    }
+    /// The root-level blocking alerts: the report confirmation, the Block unknown callers offer and the unreadable list.
+    func blockingAlerts() -> some View { modifier(ReportDoneAlert()).modifier(BlockUnknownOffer()).modifier(BlockListUnreadableAlert()) }
 }

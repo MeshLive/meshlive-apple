@@ -47,6 +47,25 @@ final class SealedRecordFilesTests: XCTestCase {
         XCTAssertEqual(files.read("other.bin", purpose: "p"), .absent, "no plain text instead")
     }
 
+    func testABlockListReadsUnavailableWhileItsKeyIsLockedAndLoadsOnceUnlocked() throws {
+        let keys = Keys(), files = store(keys)
+        var list = BlockList()
+        XCTAssertEqual(list.add(SoftwareSigningIdentity().fingerprint, at: Date()), .blocked)
+        XCTAssertTrue(files.write(try list.encoded(), name: "blocked-people.bin", purpose: "p"))
+        keys.failRead = true
+        XCTAssertEqual(BlockListLoad.classify(files.read("blocked-people.bin", purpose: "p")), .unavailable)
+        keys.failRead = false
+        XCTAssertEqual(BlockListLoad.classify(files.read("blocked-people.bin", purpose: "p")), .loaded(list))
+    }
+
+    func testAStoredRecordWithNoKeyReadsDamagedSoResetIsOffered() throws {
+        let keys = Keys(), files = store(keys)
+        XCTAssertTrue(files.write(Data("blocked".utf8), name: "blocked-people.bin", purpose: "p"))
+        keys.key = nil
+        XCTAssertEqual(files.read("blocked-people.bin", purpose: "p"), .unreadable("key_missing"))
+        XCTAssertEqual(BlockListLoad.classify(files.read("blocked-people.bin", purpose: "p")), .damaged)
+    }
+
     func testAWrongLengthKeyIsReplacedWhenWriting() {
         let keys = Keys(); keys.key = Data(repeating: 1, count: 16)
         let files = store(keys)

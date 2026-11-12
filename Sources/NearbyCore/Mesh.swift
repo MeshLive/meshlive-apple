@@ -107,9 +107,26 @@ public enum CallVideoFragments {
     }
 }
 
+/// Android CallHeadOfLine, user launch (promoted 2026-10-11): call video fragments for a direct call whose endpoint
+/// transport is Bluetooth LE GATT; L2CAP CoC and relayed calls send whole frames and offer no hello bit. Android's
+/// speech-led playout (late video may grow the shared call delay by at most 150 ms) needs no code here: the Apple
+/// receiver plays audio from its own `AudioPlayout` and shows each video frame as it is decoded, so video never
+/// delays speech. An Android peer turns its speech-led playout on once fragments are negotiated, which this endpoint's
+/// hello bit allows. DEBUG control arm: launch argument `-callVideoFragments NO`.
+public enum CallHeadOfLine {
+    public static func videoFragments(enabled: Bool, transport: MeshTransport, relayHops: UInt8) -> Bool {
+        enabled && transport == .gatt && relayHops == 0
+    }
+}
+
 public struct CallVideoReassembler {
     private var total = 0, flags: UInt8 = 0, buffer = Data()
+    /// Design WF fragment suppress mode (after a carrier fallback or a hold promotion): fragments are skipped until one
+    /// starts a frame (offset 0); outside it every strict check is unchanged.
+    public private(set) var suppressing = false
     public init() {}
+    /// Drops a half-received frame and enters suppress mode.
+    public mutating func suppress() { buffer = Data(); total = 0; suppressing = true }
     public var idle: Bool { buffer.isEmpty }
     public mutating func accept(flags recordFlags: UInt8, fragment: Data) throws -> Data? {
         var r = BinaryReader(fragment)
@@ -120,6 +137,8 @@ public struct CallVideoReassembler {
             throw ProtocolError.malformed("Invalid call video fragment")
         }
         if buffer.isEmpty {
+            if suppressing, offset != 0 { return nil }
+            suppressing = false
             guard offset == 0 else { throw ProtocolError.malformed("Call video fragment gap") }
             self.total = total; flags = recordFlags
         } else {

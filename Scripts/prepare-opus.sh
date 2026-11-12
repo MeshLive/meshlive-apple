@@ -16,7 +16,7 @@ for spec in iphoneos:arm64 iphonesimulator:arm64 iphonesimulator:x86_64; do
     task_dir="$(pwd)/.build/opus/$sdk-$arch"; mkdir -p "$task_dir"
     sdk_path="$(xcrun --sdk "$sdk" --show-sdk-path)"
     compiler="$(xcrun --sdk "$sdk" --find clang)"
-    if [[ "$sdk" == iphoneos ]]; then target="$arch-apple-ios16.0"; else target="$arch-apple-ios16.0-simulator"; fi
+    if [[ "$sdk" == iphoneos ]]; then target="$arch-apple-ios17.0"; else target="$arch-apple-ios17.0-simulator"; fi
     if [[ "$arch" == arm64 ]]; then host=aarch64-apple-darwin; else host=x86_64-apple-darwin; fi
     (
         cd "$task_dir"

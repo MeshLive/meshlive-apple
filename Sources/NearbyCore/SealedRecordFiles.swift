@@ -36,23 +36,40 @@ public final class SealedRecordFiles {
         self.directory = directory; self.keys = keys; self.latched = latched; self.log = log; self.fileProtection = fileProtection
     }
 
-    private func key(create: Bool) -> Data? {
+    private enum KeyState {
+        case key(Data), absent, wrongLength, unreadable
+    }
+
+    private func keyState() -> KeyState {
         do {
-            if let existing = try keys.readKey() {
-                if existing.count == 32 { return existing }
+            guard let existing = try keys.readKey() else { return .absent }
+            guard existing.count == 32 else {
                 // A damaged key can never open or seal anything: replace it when writing; records under it are lost.
                 log("event=records_key | result=wrong_length | bytes=\(existing.count)")
-                guard create else { return nil }
-                let fresh = Self.newKey()
-                try keys.replaceKey(fresh)
-                return fresh
+                return .wrongLength
             }
+            return .key(existing)
+        } catch {
+            log("event=records_key | result=unavailable")
+            return .unreadable
+        }
+    }
+
+    private func key(create: Bool) -> Data? {
+        switch keyState() {
+        case .key(let existing): return existing
+        case .absent:
             guard create else { return nil }
             let fresh = Self.newKey()
             do { try keys.addKey(fresh); return fresh }
-            catch SealedRecordKeyError.duplicate { return try keys.readKey().flatMap { $0.count == 32 ? $0 : nil } }
-        } catch {
-            log("event=records_key | result=unavailable")
+            catch SealedRecordKeyError.duplicate { return (try? keys.readKey())?.flatMap { $0.count == 32 ? $0 : nil } }
+            catch { log("event=records_key | result=unavailable"); return nil }
+        case .wrongLength:
+            guard create else { return nil }
+            let fresh = Self.newKey()
+            do { try keys.replaceKey(fresh); return fresh }
+            catch { log("event=records_key | result=unavailable"); return nil }
+        case .unreadable:
             return nil
         }
     }
@@ -64,7 +81,12 @@ public final class SealedRecordFiles {
     public func read(_ name: String, purpose: String) -> SealedRead {
         guard FileManager.default.fileExists(atPath: url(name).path) else { return .absent }
         guard let blob = try? Data(contentsOf: url(name)) else { return .unreadable("file") }
-        guard let key = key(create: false) else { return .unreadable("key") }
+        let key: Data
+        switch keyState() {
+        case .key(let existing): key = existing
+        case .absent: return .unreadable("key_missing")
+        case .wrongLength, .unreadable: return .unreadable("key")
+        }
         guard let plain = SealedBlob.open(blob, key: key, purpose: purpose) else { return .unreadable("open") }
         return .value(plain)
     }

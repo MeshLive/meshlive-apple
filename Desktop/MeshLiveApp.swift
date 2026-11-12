@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import CoreWLAN
+import NearbyCore
 
 final class DesktopNavigation: ObservableObject {
     @Published var selection: MainTab? = .live { didSet { detailPath = [] } }
@@ -28,7 +30,6 @@ struct MeshLiveDesktopApp: App {
     @StateObject private var model = AppModel()
     @StateObject private var navigation = DesktopNavigation()
     @StateObject private var reachability = DesktopReachabilityMonitor()
-    @State private var settingsPath: [DesktopDetailRoute] = []
     /// Settings › Desktop › Show in menu bar (on by default; README explains why this one switch defaults on).
     @AppStorage(DesktopReachabilitySettings.menuBarKey, store: DesktopPreview.preferences) private var showMenuBar = true
 
@@ -53,14 +54,24 @@ struct MeshLiveDesktopApp: App {
         }
         .defaultSize(width: 1000, height: 700)
         .windowResizability(.contentMinSize)
+        // The tab's own title row is the visible title (gap audit 1.2); the window title stays for the Window menu.
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Go live") { navigation.openMain?(); navigation.selection = .live; navigation.goLive = true }
-                    .keyboardShortcut("g")
-                    .disabled(model.call != nil || model.watch != nil || model.live != nil)
+                if model.sourceGate.showsSourceControls {
+                    Button("Go live") { navigation.openMain?(); navigation.selection = .live; navigation.goLive = true }
+                        .keyboardShortcut("g")
+                        .disabled(model.call != nil || model.watch != nil || model.live != nil)
+                }
             }
             CommandGroup(after: .windowArrangement) {
                 Button("Show MeshLive") { navigation.openMain?() }.keyboardShortcut("0")
+            }
+            // One Settings (owner, 2026-11-05): Cmd+, opens Settings in the main window's sidebar, as the other
+            // clients have one Settings tab; there is no separate Settings window.
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings\u{2026}") { navigation.openMain?(); navigation.selection = .settings }
+                    .keyboardShortcut(",")
             }
             CommandMenu("Navigate") {
                 Button("Live") { navigation.openMain?(); navigation.selection = .live }.keyboardShortcut("1")
@@ -68,17 +79,6 @@ struct MeshLiveDesktopApp: App {
                 Button("Contacts") { navigation.openMain?(); navigation.selection = .contacts }.keyboardShortcut("3")
                 Button("Settings") { navigation.openMain?(); navigation.selection = .settings }.keyboardShortcut("4")
             }
-        }
-        Settings {
-            NavigationStack(path: $settingsPath) {
-                SettingsView().navigationDestination(for: DesktopDetailRoute.self) { $0.content }
-            }
-                .background(DesktopWindowReference { _ in })
-                .desktopReadingSize()
-                .environmentObject(model)
-                .defaultAppStorage(DesktopPreview.preferences)
-                .frame(minWidth: 600, idealWidth: 680, minHeight: 550, idealHeight: 700)
-                .preferredColorScheme(.dark)
         }
         MenuBarExtra(isInserted: $showMenuBar) {
             DesktopMenuBarMenu(monitor: reachability, navigation: navigation)
@@ -93,19 +93,31 @@ struct DesktopRootView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var navigation: DesktopNavigation
     @AppStorage("onboardingComplete") private var onboardingComplete = false
+    @AppStorage("termsAcceptedVersion") private var termsAcceptedVersion = 0
     @State private var onboardingDismissed = false
     @Environment(\.openWindow) private var openWindow
     @AppStorage("desktopKeepRunningWithWindowClosed") private var keepRunning = false
     @State private var recent = false
-    /// README screenshots (DEBUG `-NearbyFixture readme`) leave out the preview footer.
+    /// README screenshots (DEBUG `-NearbyFixture readme`) and store screenshots (DEBUG `-NearbyReadyStatus 1`) leave out
+    /// the preview footer.
     private var readmeFixture: Bool {
         #if DEBUG
-        model.debugReadme
+        model.debugReadme || RootView.debugArgument("-NearbyReadyStatus") == "1"
         #else
         false
         #endif
     }
     @State private var goLiveChoice: (audioOnly: Bool, preset: UInt8)?
+
+    /// The window title names the current tab, as the tab's title row does ("MeshLive" on Live).
+    private var windowTitle: String {
+        switch navigation.selection ?? .live {
+        case .live: return "MeshLive"
+        case .calls: return "Calls"
+        case .contacts: return "Contacts"
+        case .settings: return "Settings"
+        }
+    }
 
     private func sidebarItem(_ title: String, icon: String, tab: MainTab, id: String) -> some View {
         Button { navigation.selection = tab } label: {
@@ -126,8 +138,8 @@ struct DesktopRootView: View {
                 WipedView()
             } else if let error = model.identityError {
                 EmptyState(icon: "key.slash", title: "Identity unavailable", message: error)
-            } else if !onboardingDismissed && (RootView.debugScreenName == "onboarding" || (!onboardingComplete && !RootView.bypassesOnboarding)) {
-                OnboardingView {
+            } else if RootView.onboardingShows(onboardingComplete: onboardingComplete, termsAccepted: termsAcceptedVersion, dismissed: onboardingDismissed) {
+                OnboardingView(pages: RootView.onboardingPages(onboardingComplete: onboardingComplete, termsAccepted: termsAcceptedVersion)) {
                     onboardingComplete = true
                     onboardingDismissed = true
                     model.start()
@@ -157,7 +169,7 @@ struct DesktopRootView: View {
                     .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 260)
                 } detail: {
                     Group {
-                        if let call = model.call { CallView(call: call) }
+                        if let call = model.call, call.presentable { CallView(call: call) }
                         else if let live = model.live { LivePanel(live: live) }
                         else if let row = navigation.watching { WatchView(row: row, onLeave: { navigation.watching = nil }, stopOnDisappear: !keepRunning) }
                         else {
@@ -178,7 +190,7 @@ struct DesktopRootView: View {
                     }
                     .background(Palette.ground)
                 }
-                .navigationTitle("MeshLive")
+                .navigationTitle(windowTitle)
             }
         }
         .background(Palette.ground)
@@ -187,7 +199,7 @@ struct DesktopRootView: View {
         .sheet(isPresented: $navigation.goLive, onDismiss: {
             if let choice = goLiveChoice {
                 goLiveChoice = nil
-                model.goLive(audioOnly: choice.audioOnly, preset: choice.preset)
+                model.goLive(audioOnly: choice.audioOnly, preset: choice.preset, setup: choice.audioOnly)
             }
         }) {
             GoLiveSheet { audioOnly, preset in
@@ -196,11 +208,18 @@ struct DesktopRootView: View {
             }
             .environmentObject(model)
         }
-        .alert("Erase everything now?", isPresented: $model.askQuickWipe) {
-            Button("Erase now", role: .destructive) { model.emergencyWipe() }
+        .alert("Delete everything?", isPresented: $model.askQuickWipe) {
+            Button("Delete everything", role: .destructive) { model.emergencyWipe() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This deletes your identity keys, verified contacts and settings. It cannot be undone.")
+        }
+        .blockingAlerts()
+        .liveStoppedAlert()
+        .wifiAdviceAlert()
+        .onChange(of: model.liveNotice) { _, notice in
+            // The lost-stream end closes the Mac's detail-column watch view; LiveTab underneath shows the notice.
+            if notice?.closesWatch == true { navigation.watching = nil }
         }
         .onAppear {
             navigation.openMain = {
@@ -212,17 +231,89 @@ struct DesktopRootView: View {
             switch RootView.debugScreenName {
             case "people": navigation.selection = .calls
             case "contacts", "verify": navigation.selection = .contacts
-            case "settings", "privacy", "advanced-privacy", "experiments", "connection", "about": navigation.selection = .settings
+            case "settings", "privacy", "experiments", "connection", "about", "help", "video", "manual": navigation.selection = .settings
             default: break
             }
             model.configureCallAlerts()
             #if DEBUG
             if let fixture = RootView.debugArgument("-NearbyFixture") { model.applyDebugFixture(fixture) }
             if let screen = RootView.debugScreenName, screen.hasPrefix("call") { model.showDebugCall(screen) }
-            if RootView.debugScreenName == "broadcast-radio" { model.showDebugBroadcast() }
+            if let screen = RootView.debugScreenName, screen.hasPrefix("broadcast") { model.showDebugBroadcast(screen) }
             if RootView.debugScreenName == "radio" { navigation.watching = model.streams.first(where: \.audioOnly) }
             #endif
-            if onboardingComplete || RootView.bypassesOnboarding { model.start() }
+            if !RootView.onboardingShows(onboardingComplete: onboardingComplete, termsAccepted: termsAcceptedVersion, dismissed: false) { model.start() }
         }
     }
+}
+
+// MARK: - Wi-Fi advice (Android withWifiCheck; gap audit G62, Q4: Mac only, no Location request)
+
+/// The Mac's Wi-Fi band for the advice: CoreWLAN power and the current channel's band only (never the network name or
+/// BSSID, never a Location request). Unknown when Wi-Fi is off or not joined, in the preview, or when macOS withholds
+/// the channel; the advice then stays silent. DEBUG `-NearbyWifiBand 2.4|5|6|unknown` fakes it.
+enum MacWifiBand {
+    static func current() -> WifiAdvice.Band {
+        #if DEBUG
+        if let fake = UserDefaults.standard.string(forKey: "NearbyWifiBand") { return WifiAdvice.Band(rawValue: fake) ?? .unknown }
+        #endif
+        guard !DesktopPreview.enabled, let interface = CWWiFiClient.shared().interface(), interface.powerOn(),
+              let channel = interface.wlanChannel() else { return .unknown }
+        switch channel.channelBand {
+        case .band2GHz: return .ghz2_4
+        case .band5GHz: return .ghz5
+        case .band6GHz: return .ghz6
+        default: return .unknown
+        }
+    }
+}
+
+extension AppModel {
+    /// Android withWifiCheck before a video call, a video live or watching: true when the advice is shown and `action`
+    /// waits for the answer. Never before voice or audio only; once a day (`WifiAdvice.shouldAsk`).
+    func askWifiAdvice(voice: Bool, _ action: @escaping () -> Void) -> Bool {
+        let band = MacWifiBand.current()
+        let ask = WifiAdvice.shouldAsk(enabled: AppSettings.wifiAdvice, band: band, voice: voice,
+                                       now: Date().timeIntervalSince1970, answeredAt: AppSettings.wifiAdviceAnsweredAt)
+        AppLog.event("wifi_advice", ["band": band.rawValue, "voice": "\(voice)", "asked": "\(ask)"])
+        guard ask else { return false }
+        wifiAdviceAction = action
+        wifiAdviceShown = true
+        return true
+    }
+
+    /// Either answer counts for a day (Android). Continue anyway goes on at once; Open Wi-Fi settings opens System
+    /// Settings › Wi-Fi and goes on when MeshLive is active again within 5 minutes (later, nothing starts by itself).
+    func answerWifiAdvice(openSettings: Bool) {
+        AppSettings.wifiAdviceAnsweredAt = Date().timeIntervalSince1970
+        wifiAdviceShown = false
+        guard let action = wifiAdviceAction else { return }
+        wifiAdviceAction = nil
+        AppLog.event("wifi_advice", ["answer": openSettings ? "open_settings" : "continue"])
+        guard openSettings else { action(); return }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.wifi-settings-extension") { NSWorkspace.shared.open(url) }
+        if let old = wifiResumeObserver { NotificationCenter.default.removeObserver(old) }
+        let openedAt = ProcessInfo.processInfo.systemUptime
+        wifiResumeObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            if let observer = self.wifiResumeObserver { NotificationCenter.default.removeObserver(observer) }
+            self.wifiResumeObserver = nil
+            guard ProcessInfo.processInfo.systemUptime - openedAt < 300 else { AppLog.event("wifi_advice", ["resume": "expired"]); return }
+            action()
+        }
+    }
+}
+
+/// Android's wifi_advice dialog on the Mac: Open Wi-Fi settings, or Continue anyway (the cancel role).
+private struct WifiAdviceAlert: ViewModifier {
+    @EnvironmentObject var model: AppModel
+    func body(content: Content) -> some View {
+        content.alert(WifiAdvice.title, isPresented: $model.wifiAdviceShown) {
+            Button(WifiAdvice.openSettings) { model.answerWifiAdvice(openSettings: true) }
+            Button(WifiAdvice.continueAnyway, role: .cancel) { model.answerWifiAdvice(openSettings: false) }
+        } message: { Text(WifiAdvice.message) }
+    }
+}
+
+extension View {
+    func wifiAdviceAlert() -> some View { modifier(WifiAdviceAlert()) }
 }

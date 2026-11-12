@@ -15,6 +15,17 @@ enum DesktopCameraDevices {
         let id = CameraSelection.selectedID(preferred: preferred, available: devices.map(\.uniqueID), defaultID: builtIn)
         return devices.first { $0.uniqueID == id }
     }
+
+    /// Flip on the Mac (Android Flip; a Mac has no front and back lens): the next available camera becomes the selected
+    /// one, and a running capture follows it (`selectionChanged`). Nothing happens with fewer than two cameras.
+    static func selectNext() {
+        let devices = available
+        guard devices.count > 1 else { return }
+        let current = selected()?.uniqueID
+        let index = devices.firstIndex { $0.uniqueID == current } ?? -1
+        DesktopPreview.preferences.set(devices[(index + 1) % devices.count].uniqueID, forKey: "desktopCameraID")
+        NotificationCenter.default.post(name: selectionChanged, object: nil)
+    }
 }
 
 struct DesktopCameraPicker: View {
@@ -36,10 +47,3 @@ struct DesktopCameraPicker: View {
     }
 }
 
-struct DesktopMediaSettings: View {
-    var body: some View {
-        SectionLabel("Media")
-        Card { DesktopCameraPicker().padding(16) }
-        CardNote("Automatic uses a built-in camera first, then a connected camera. Microphone and sound use the devices selected in macOS Sound settings. In a call, Sound turns local playback on or off.")
-    }
-}

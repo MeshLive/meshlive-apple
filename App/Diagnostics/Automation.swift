@@ -16,6 +16,9 @@ import NearbyMedia
 /// - `-NearbyCallType voice|video` (default voice); `-NearbyCallSeconds N`: hang up N s after the call is active (default 20).
 /// - `-NearbyAutoAccept voice|video`: answer incoming calls automatically (every call while the app runs);
 ///   `-NearbyAnswerSeconds N` hangs an answered call up after N s (default: the caller hangs up).
+/// - `-NearbyAutoDecline plain|block|report`: decline every incoming call with that ring-screen action;
+///   `-NearbyDeclineAfterS N` waits N s after it first rings (default 2; `block`/`report` need a real-key caller).
+/// - `-NearbyAutoCancelAfterS N`: with `-NearbyAutoCall`, cancel after N s if the call never became active.
 /// - `-NearbyAvailable 1|0`: be reachable for calls (default unchanged).
 /// - `-NearbyRequestPermissions 1`: ask for microphone and camera at launch (one human tap each, first time only).
 /// - `-NearbyRelay 1`: experimental "Help pass streams and calls to others nearby" on for this run.
@@ -26,9 +29,12 @@ import NearbyMedia
 /// - `-NearbyAutoWatch first|<handle>` and `-NearbyWatchSeconds N`: watch a stream.
 /// - `-NearbyAutoRadio <title>`: go live audio only (title signed only with `-NearbyLabels 1`), `-NearbyRadioPreset
 ///   voice|low|music`, `-NearbyRadioSeconds N` (default 120) then end; logs `auto_radio`.
+/// - `-NearbyAutoLive video|audio` and `-NearbyAutoLiveTitle <text>` (`-` clears it): 2 s after launch, the "Go live"
+///   choice (video: "Video and audio"; audio: audio only, started at once as `-NearbyAutoRadio`); no permission is
+///   requested (a missing one is logged and nothing starts); runs until stopped; logs `autolive`.
 /// - `-NearbyAutoListen first|<handle>|<12-hex prefix>` and `-NearbyListenSeconds N` (default 60): join an
 ///   audio-only (radio) stream only; logs `auto_listen` with the verified record count at the end.
-/// - `-NearbyTransport gatt|l2cap`: transport to advertise; `-NearbyLabels 1`: experimental names and titles.
+/// - `-NearbyTransport gatt|l2cap`: transport to advertise; `-NearbyLabels 0`: names and titles off for this run (on by default).
 /// - `-NearbyAudioSelfTest N`: two back-to-back N-second runs of the call audio engine (microphone with voice
 ///   processing, packets looped back into playout, output volume 0 on a Mac); logs `auto_audio_selftest` with the
 ///   setup time and stats, so audio bring-up and teardown can be timed without a second device.
@@ -38,14 +44,18 @@ import NearbyMedia
 ///   decoder set-up time and decoded frames, so a join can be timed and profiled without a second device.
 /// - `-NearbyCallCamera off`: switch this Mac's camera off as soon as a video call is active (receive-only
 ///   video tests that must not show the room); logs `auto_camera`.
-/// Every step is logged as `BENCHMARK auto_*`.
+/// - `-NearbyInjectDecoderKeyFailures N`: the next N key-frame packets of a call fail decode; three stop video on this phone.
+/// - `-NearbyRadioReminderUnit S`: the audio-only reminder uses S seconds as its 5-minute unit (30 min = 6, 2 h = 24,
+///   5 min = 1 unit), for UI tests of the reminder and the automatic stop.
+/// Every step is logged as `BENCHMARK auto_*`. `call_name` records each name the call screen shows (never the text
+/// itself); `decoder_inject` records each injected key-frame failure.
 final class Automation {
     let args: [String: String]
     private weak var model: AppModel?
     private var timer: Timer?
     private var started = Date()
-    private var callStartedAt: Date?
-    private var callActiveAt: Date?
+    fileprivate(set) var callStartedAt: Date?
+    fileprivate(set) var callActiveAt: Date?
     private var done = false
     private var watchStartedAt: Date?
     private var listenStartedAt: Date?
@@ -53,6 +63,10 @@ final class Automation {
     private var relayStarted = false
     private var answeredActiveAt: Date?
     private var cameraOffCall: ObjectIdentifier?
+    #if DEBUG
+    /// A6: DEBUG-only state for the unattended call hooks (decline and cancel); see Automation+Calls.swift.
+    var callHooks = CallHooks()
+    #endif
     private var selfTestAudio: CallAudio?
     private var selfTestVideo: RemoteVideo?
 
@@ -148,7 +162,7 @@ final class Automation {
         if let t = args["Transport"], let transport = MeshTransport(rawValue: t) { model?.transport = transport }
         if let available = args["Available"] { model?.availableForCalls = available == "1" }
         if let rot = args["RotatingIds"] { model?.rotatingIds = rot == "1" }
-        if let fec = args["CallAudioFec"] { AppSettings.callAudioFec = fec == "1" }
+        if let fec = args["CallAudioFec"] { AppSettings.callAudioFecThisRun = fec == "1" }
         if let ladder = args["ResolutionLadder"] { AppSettings.resolutionLadder = ladder == "1" }
         if args["RequestPermissions"] == "1" { MediaPermissions.request(video: true, context: "launch") { _, _ in } }
         if args["Relay"] == "1" { model?.relayForOthers = true }
@@ -174,7 +188,34 @@ final class Automation {
                 }
             }
         }
+        if let request = AutoLiveRequest.from(args) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.autoLive(request) }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+    }
+
+    /// `-NearbyAutoLive`: the same `goLive` call as the "Go live" sheet; the result is read back from the model.
+    private func autoLive(_ request: AutoLiveRequest) {
+        guard let model else { return }
+        guard model.sourceGate.allowsGoLive else { AppLog.event("source_gate", ["event": "refused", "action": "auto_live"]); return }
+        let mode = args["AutoLive"] ?? "?"
+        func log(_ result: String, _ reason: String) {
+            let fields: KeyValuePairs<String, String> = ["mode": mode, "result": result, "reason": reason]
+            AppLog.event("autolive", fields)
+        }
+        guard case let .go(audioOnly, title) = request else { log("refused", "unknown_mode"); return }
+        var missing: [String] = []
+        if MediaPermissions.microphone != "granted" { missing.append("microphone") }
+        if !audioOnly, MediaPermissions.camera != "granted" { missing.append("camera") }
+        if !missing.isEmpty { log("refused", "permission_missing_" + missing.joined(separator: "_")); return }
+        if model.live != nil { log("refused", "already_live"); return }
+        if audioOnly, !AppSettings.audioLive { log("refused", "audio_live_off"); return }
+        if let labels = args["Labels"] { model.peerLabelsEnabled = labels == "1" }
+        if let title { model.liveTitle = title }
+        model.goLive(audioOnly: audioOnly, preset: AudioLive.presetVoice)
+        if let live = model.live, live.running { log("started", "-") }
+        else if let live = model.live { log("refused", live.state.isEmpty ? "not_running" : live.state) }
+        else { log("refused", model.liveStoppedNotice != nil ? "notice_shown" : "wifi_advice_or_no_identity") }
     }
 
     /// The person `-NearbyAutoCall` names, or nil while they are not found (yet).
@@ -198,6 +239,9 @@ final class Automation {
 
     private func tick() {
         guard let model else { return }
+        #if DEBUG
+        tickCallHooks(model)
+        #endif
         if args["CallCamera"] == "off", let call = model.call, call.phase == .active, call.cameraOn,
            cameraOffCall != ObjectIdentifier(call) {
             cameraOffCall = ObjectIdentifier(call)
@@ -257,7 +301,7 @@ final class Automation {
             if listenStartedAt == nil {
                 if let row = model.streams.first(where: { $0.audioOnly && matches(target, prefixHex: $0.announcement.prefixHex) }) {
                     AppLog.event("auto_listen", ["target": target, "prefix": row.announcement.prefixHex, "token": String(format: "%08x", row.announcement.streamToken)])
-                    model.startWatching(row); listenStartedAt = Date()
+                    model.startWatching(row); model.debugOpenStream = row; listenStartedAt = Date()
                 } else if Date().timeIntervalSince(started) > 60 {
                     AppLog.event("auto_listen", ["target": target, "result": "not_found", "streams": "\(model.streams.count)",
                                                  "radio": "\(model.streams.filter(\.audioOnly).count)"]); finish()
@@ -269,7 +313,7 @@ final class Automation {
         }
         if let target = args["AutoWatch"] {
             if watchStartedAt == nil, let row = model.streams.first(where: { matches(target, prefixHex: $0.announcement.prefixHex) }) {
-                AppLog.event("auto_watch", ["target": target, "prefix": row.announcement.prefixHex]); model.startWatching(row); watchStartedAt = Date()
+                AppLog.event("auto_watch", ["target": target, "prefix": row.announcement.prefixHex]); model.startWatching(row); model.debugOpenStream = row; watchStartedAt = Date()
             } else if let s = watchStartedAt, Date().timeIntervalSince(s) >= (Double(args["WatchSeconds"] ?? "30") ?? 30) {
                 AppLog.event("auto_watch", ["result": "stop"]); model.watch?.stop(); finish()
             }
@@ -278,17 +322,26 @@ final class Automation {
 
     /// Stops the call/watch scenario; auto-accept keeps running while the app runs.
     private func finish() { done = true; if args["AutoAccept"] == nil { timer?.invalidate() }; AppLog.flush() }
+
+    #if DEBUG
+    /// A6: the call hook ends the scenario from Automation+Calls.swift; same effect as `finish()`.
+    func finishCallHook() { finish() }
+    #endif
 }
 
 
 #if DEBUG
 extension AppModel {
-    /// UI-only broadcast fixture: no microphone, camera, stream engine or media capture is started.
-    func showDebugBroadcast() {
+    /// UI-only broadcast fixtures: no microphone, camera, stream engine or media capture is started.
+    /// `broadcast-radio` (audio only on air, the reminder runs), `broadcast-radio-setup` (the audio-only screen before
+    /// Start), `broadcast-video` (a video live on air without a camera).
+    func showDebugBroadcast(_ variant: String = "broadcast-radio") {
         guard let identity else { return }
+        let video = variant == "broadcast-video"
         let preview = LiveController(model: self, identity: identity, transport: .gatt,
-                                     title: "Priya's neighbourhood radio", audioOnly: true)
-        preview.running = true
+                                     title: video ? "Village meeting" : "Priya's neighbourhood radio", audioOnly: !video)
+        if variant != "broadcast-radio-setup" { preview.debugShowOnAir() }
+        if let count = RootView.debugArgument("-NearbyFixtureViewers").flatMap(Int.init) { preview.debugSetViewers(count) }
         live = preview
     }
 }

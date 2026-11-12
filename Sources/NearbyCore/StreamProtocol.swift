@@ -14,9 +14,14 @@ public enum StreamProtocol {
     public static let flagDiscardable: UInt8 = 128
     public static let codecVP9: UInt8 = 2
     public static let codecAV1: UInt8 = 3
-    /// Proposed (Interop/ANDROID_DISCOVERY_ADDENDUM.md section B): accepted only when `h264Enabled`.
+    /// Design HC (AB5): H.264, accepted only while `h264Enabled`.
     public static let codecH264: UInt8 = 4
+    /// Design HC (AB5): HEVC, accepted only while `hevcEnabled`.
+    public static let codecHEVC: UInt8 = 5
+    /// The Design HC masters (Experimental, off; DEBUG launch arguments `-NearbyH264 YES` and `-NearbyHEVC YES`, set once
+    /// at launch). While one is off its `BTV3` codec ID is refused and its hello bits are never signed.
     public static var h264Enabled = false
+    public static var hevcEnabled = false
     public static let audioCodecNone: UInt8 = 0
     public static let audioCodecOpus: UInt8 = 1
     public static let audioSampleRate = 48_000
@@ -29,13 +34,25 @@ public enum StreamProtocol {
     static let maxAudioGapUs: Int64 = 1_000_000
     static let maxBatchPackets = 20
 
-    /// Mask bit of a BTV3 codec in NodeCapabilities encode/decode masks and announcements.
+    /// Hello mask bit of a BTV3 codec in NodeCapabilities encode/decode masks. Announcement summaries use `VideoCodecMap`
+    /// (HEVC is hello bit 3 but summary bit 7).
     public static func capabilityMask(codecId: UInt8) -> UInt8 {
         switch codecId {
         case codecVP9: return NodeCapabilities.codecVP9
         case codecAV1: return NodeCapabilities.codecAV1
         case codecH264: return NodeCapabilities.codecH264
+        case codecHEVC: return NodeCapabilities.codecHEVC
         default: return 0
+        }
+    }
+
+    /// Whether a `BTV3` header may name `codecId`: VP9 and AV1 always, H.264 and HEVC only with their master on.
+    public static func accepts(codecId: UInt8) -> Bool {
+        switch codecId {
+        case codecVP9, codecAV1: return true
+        case codecH264: return h264Enabled
+        case codecHEVC: return hevcEnabled
+        default: return false
         }
     }
 }
@@ -80,8 +97,7 @@ public struct StreamHeader: Equatable {
         guard (1...4096).contains(width), (1...4096).contains(height), (1...120).contains(fps) else {
             throw ProtocolError.malformed("Invalid video format \(width)x\(height) at \(fps) FPS")
         }
-        let codecs: Set<UInt8> = StreamProtocol.h264Enabled ? [2, 3, 4] : [2, 3]
-        guard codecs.contains(codecId) else { throw ProtocolError.incompatible("Unsupported codec ID \(codecId)") }
+        guard StreamProtocol.accepts(codecId: codecId) else { throw ProtocolError.incompatible("Unsupported codec ID \(codecId)") }
         guard (0...3).contains(quarterTurns) else { throw ProtocolError.malformed("Invalid video rotation") }
         rotationDegrees = quarterTurns * 90
         let none = audioCodecId == 0 && audioSampleRate == 0 && audioChannelCount == 0

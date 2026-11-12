@@ -1,0 +1,513 @@
+{
+  "schema": "meshlive-conformance-vectors/1",
+  "area": "bvmid2",
+  "android_commit": "bca3031f8dae52bc149eb55e84f3f3f18f47a623",
+  "vectors": [
+    {
+      "id": "bvmid2-001",
+      "description": "Fingerprint = SHA-256 of the identity key encoding; fixed vector SHA-256(\"abc\") (the input is the ASCII text, standing in for an SPKI)",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "line": 57,
+        "method": "fingerprintIsSha256OverTheExactIdentityKeyEncodingAndExtendsTheNodeId"
+      },
+      "inputs": {
+        "public_key_encoding_hex": "616263"
+      },
+      "expected": {
+        "fingerprint": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      },
+      "expected_literal": true,
+      "kind": "derive",
+      "notes": "A real fingerprint is SHA-256 over the 91-byte P-256 SubjectPublicKeyInfo DER; the first 16 bytes are the node ID and the first 6 the announcement prefix (docs/PROTOCOL.md 'Identity verification')."
+    },
+    {
+      "id": "bvmid2-002",
+      "description": "IdentityFingerprint.fromHex accepts lowercase 64-hex only: uppercase hex and a 62-hex string are rejected",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "method": "fingerprintIsSha256OverTheExactIdentityKeyEncodingAndExtendsTheNodeId",
+        "line": 61
+      },
+      "inputs": {
+        "cases": [
+          {
+            "hex": "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+            "reason": "uppercase"
+          },
+          {
+            "hex": "7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "reason": "62 digits"
+          }
+        ]
+      },
+      "expected": {
+        "rejected": true
+      },
+      "expected_literal": false,
+      "computed_by": "tools/build_discovery.py: the test rejects the uppercase / dropped-2 variants of a random fingerprint; reproduced on the SHA-256(\"abc\") fingerprint",
+      "kind": "reject",
+      "notes": ""
+    },
+    {
+      "id": "bvmid2-003",
+      "description": "Safety code half for fingerprint 00 01 .. 1f: 6 groups of 5 digits (SHA-512 iterated 5200 times)",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "line": 570,
+        "method": "safetyCodeIsSymmetricStableAndPairSpecific"
+      },
+      "inputs": {
+        "fingerprint": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "expected": {
+        "half": "91662 04557 05960 21671 25144 22586"
+      },
+      "expected_literal": true,
+      "kind": "derive",
+      "notes": "h1 = SHA-512('BluetoothVideoMesh/IdentityVerification/SafetyCode/2' || fp); h(i+1) = SHA-512(h(i) || fp) up to h5200; group g (0..5) = big-endian 40-bit integer of bytes 5g..5g+4 modulo 100000, zero-padded to 5 digits. The test comment says the values were computed independently with Python hashlib; tools/discovery_crypto.py safety_half() reproduces both."
+    },
+    {
+      "id": "bvmid2-004",
+      "description": "Safety code half for fingerprint ff fe .. e0",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "line": 571,
+        "method": "safetyCodeIsSymmetricStableAndPairSpecific"
+      },
+      "inputs": {
+        "fingerprint": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0"
+      },
+      "expected": {
+        "half": "71883 11788 79268 78261 54534 68020"
+      },
+      "expected_literal": true,
+      "kind": "derive",
+      "notes": ""
+    },
+    {
+      "id": "bvmid2-005",
+      "description": "Pair safety code = the two halves sorted as strings and joined by a space (12 groups of 5 digits); symmetric in the two parties",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "line": 572,
+        "method": "safetyCodeIsSymmetricStableAndPairSpecific"
+      },
+      "inputs": {
+        "fingerprint_a": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "fingerprint_b": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0"
+      },
+      "expected": {
+        "pair_code": "71883 11788 79268 78261 54534 68020 91662 04557 05960 21671 25144 22586"
+      },
+      "expected_literal": true,
+      "kind": "derive",
+      "notes": "The expected value is written in the test as FIXED_HALF_Y + ' ' + FIXED_HALF_X; both argument orders give it. Format: \\d{5}( \\d{5}){11}."
+    },
+    {
+      "id": "bvmid2-006",
+      "description": "BVMID1 encode: fingerprint a0 a1 .. bf, display name \"Asha · फ़ोन\" (NFC) -> uppercase hex + base64url name",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "method": "qrPayloadRoundTripsAndRejectsMalformedText",
+        "line": 93
+      },
+      "inputs": {
+        "fingerprint": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+        "display_name": "Asha · फ़ोन",
+        "display_name_codepoints": [
+          "U+0041",
+          "U+0073",
+          "U+0068",
+          "U+0061",
+          "U+0020",
+          "U+00B7",
+          "U+0020",
+          "U+092B",
+          "U+093C",
+          "U+094B",
+          "U+0928"
+        ]
+      },
+      "expected": {
+        "text": "BVMID1.A0A1A2A3A4A5A6A7A8A9AAABACADAEAFB0B1B2B3B4B5B6B7B8B9BABBBCBDBEBF.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+      },
+      "expected_literal": false,
+      "computed_by": "tools/build_discovery.py: the test asserts text.startsWith(\"BVMID1.\" + fingerprint.hex.uppercase() + \".\") and parse(encode(x)) == x; the base64url tail is reproduced (NFC then UTF-8 then base64url without padding)",
+      "kind": "roundtrip",
+      "notes": "Name normalisation: NFC, max 64 UTF-8 bytes, not blank, no control/format/private-use/surrogate/unassigned/line-or-paragraph-separator code points (docs/PROTOCOL.md line 67)."
+    },
+    {
+      "id": "bvmid2-007",
+      "description": "BVMID1 parse accepts lowercase hex too (same payload)",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "method": "qrPayloadRoundTripsAndRejectsMalformedText",
+        "line": 97
+      },
+      "inputs": {
+        "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+      },
+      "expected": {
+        "fingerprint": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+        "display_name": "Asha · फ़ोन"
+      },
+      "expected_literal": false,
+      "computed_by": "tools/build_discovery.py (same reproduction as above)",
+      "kind": "decode",
+      "notes": ""
+    },
+    {
+      "id": "bvmid2-008",
+      "description": "BVMID1 parse normalises the display name to NFC: decomposed 'Jose' + U+0301 -> \"José\" (U+00E9)",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "method": "qrPayloadRoundTripsAndRejectsMalformedText",
+        "line": 99
+      },
+      "inputs": {
+        "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.Sm9zZcyB",
+        "name_codepoints": [
+          "U+004A",
+          "U+006F",
+          "U+0073",
+          "U+0065",
+          "U+0301"
+        ]
+      },
+      "expected": {
+        "display_name": "José",
+        "display_name_codepoints": [
+          "U+004A",
+          "U+006F",
+          "U+0073",
+          "U+00E9"
+        ]
+      },
+      "expected_literal": false,
+      "computed_by": "tools/build_discovery.py: base64url of the decomposed name reproduced; the NFC result \"José\" is the test's literal assertion",
+      "kind": "decode",
+      "notes": ""
+    },
+    {
+      "id": "bvmid2-009",
+      "description": "BVMID1 parser rejects (IdentityQrFormatException, tryParse returns null) every one of these 23 malformed texts",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "method": "qrPayloadRoundTripsAndRejectsMalformedText",
+        "line": 103
+      },
+      "inputs": {
+        "fingerprint": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+        "cases": [
+          {
+            "reason": "empty string",
+            "text": ""
+          },
+          {
+            "reason": "BVMID2 magic on a BVMID1 parser",
+            "text": "BVMID2.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+          },
+          {
+            "reason": "lowercase magic",
+            "text": "bvmid1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+          },
+          {
+            "reason": "missing name field",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+          },
+          {
+            "reason": "extra field",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg.extra"
+          },
+          {
+            "reason": "mixed-case hex (first ten digits uppercased, rest lowercase)",
+            "text": "BVMID1.A0A1A2A3A4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+          },
+          {
+            "reason": "non-hex alphabet (64 x 'g')",
+            "text": "BVMID1.gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+          },
+          {
+            "reason": "63 hex digits",
+            "text": "BVMID1.0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+          },
+          {
+            "reason": "65 hex digits",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf0.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+          },
+          {
+            "reason": "base64 padding '='",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg="
+          },
+          {
+            "reason": "non-canonical base64 (trailing '+')",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg+"
+          },
+          {
+            "reason": "empty name field",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf."
+          },
+          {
+            "reason": "name with NUL (a, U+0000, b)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.YQBi"
+          },
+          {
+            "reason": "invalid UTF-8 (c3 28)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.wyg"
+          },
+          {
+            "reason": "name of 65 bytes",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE"
+          },
+          {
+            "reason": "blank name (3 spaces)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.ICAg"
+          },
+          {
+            "reason": "leading space before the magic",
+            "text": " BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.QXNoYSDCtyDgpKvgpLzgpYvgpKg"
+          },
+          {
+            "reason": "name containing U+202E right-to-left override (name code points U+0042 U+006F U+0062 U+202E U+0065 U+0076 U+0069 U+006C)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.Qm9i4oCuZXZpbA"
+          },
+          {
+            "reason": "name containing U+2066 .. U+2069 isolates (name code points U+0042 U+006F U+0062 U+2066 U+0078 U+2069)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.Qm9i4oGmeOKBqQ"
+          },
+          {
+            "reason": "name containing U+200B zero-width space (name code points U+0042 U+006F U+200B U+0062)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.Qm_igIti"
+          },
+          {
+            "reason": "name containing U+FEFF byte order mark (name code points U+0042 U+006F U+0062 U+FEFF)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.Qm9i77u_"
+          },
+          {
+            "reason": "name containing U+E000 private use (name code points U+0042 U+006F U+0062 U+E000)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.Qm9i7oCA"
+          },
+          {
+            "reason": "name containing U+200E left-to-right mark (name code points U+0042 U+006F U+0062 U+200E)",
+            "text": "BVMID1.a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf.Qm9i4oCO"
+          }
+        ]
+      },
+      "expected": {
+        "rejected": true
+      },
+      "expected_literal": false,
+      "computed_by": "tools/build_discovery.py: the strings are rebuilt from the test's templates with fingerprint a0..bf and the valid name tail (the test builds them with string templates); the name strings with invisible characters are read from the test source file",
+      "kind": "reject",
+      "notes": "Reject reasons per PROTOCOL: other magic/version, field count, length, alphabet, mixed-case hex, base64 padding, non-canonical base64, invalid UTF-8, blank/too-long (>64 bytes) name, control/format (bidi embeddings, overrides, isolates, directional marks, zero-width, BOM)/private-use/unassigned code points."
+    },
+    {
+      "id": "bvmid2-010",
+      "description": "BVMID1 encoder refuses a 65-byte display name",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/IdentityVerificationTest.kt",
+        "class": "IdentityVerificationTest",
+        "line": 133,
+        "method": "qrPayloadRoundTripsAndRejectsMalformedText"
+      },
+      "inputs": {
+        "display_name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "expected": {
+        "encode_refused": true
+      },
+      "expected_literal": true,
+      "kind": "reject",
+      "notes": ""
+    },
+    {
+      "id": "bvmid2-011",
+      "description": "BVMID2 tag key: K_tag = HKDF-Expand(K_qr, 'BluetoothVideoMesh/BMH3/QrTag/1', 32) (HKDF-Expand only, no extract); K_qr = 80 81 .. 9f",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/Bmh3Vectors.kt",
+        "class": "Bmh3Vectors",
+        "line": 11
+      },
+      "inputs": {
+        "k_qr": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "info_ascii": "BluetoothVideoMesh/BMH3/QrTag/1",
+        "length": 32
+      },
+      "expected": {
+        "k_tag": "1789e2ace57290b7957dc1fb19fc6de1a6c3d85afe9e0c2f223bee52391c431a"
+      },
+      "expected_literal": true,
+      "kind": "derive",
+      "notes": "Literal in the generated fixture Bmh3Vectors.kt (K_QR / K_TAG_QR), asserted by Bvmid2Test.kTagIsAnHkdfExpandOfKqrAndMatchesTheReferenceVector (which also checks K_tag != K_qr, != the lease K_TAG, and that a 31-byte K_qr throws). Reproduced by tools/discovery_crypto.py. docs/PROTOCOL.md 'Verification code BVMID2' still says the vector 'is added before coding' (stale status; the formula agrees)."
+    },
+    {
+      "id": "bvmid2-012",
+      "description": "BVMID2 text layout: 'BVMID2.' + 64 uppercase hex fingerprint + '.' + 64 hex K_qr + '.' + 12 hex RDI = 149 characters, uppercase hex and '.' only; parse accepts it and the all-lowercase form",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/Bvmid2Test.kt",
+        "class": "Bvmid2Test",
+        "method": "theCodeRoundTripsInUppercaseAndAcceptsOneCaseOnly",
+        "line": 62
+      },
+      "inputs": {
+        "fingerprint": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "k_qr": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "rdi": "44e69c0a7a7d"
+      },
+      "expected": {
+        "text": "BVMID2.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F.44E69C0A7A7D",
+        "length": 149,
+        "lowercase_form_also_parses": "BVMID2.ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f.44e69c0a7a7d"
+      },
+      "expected_literal": false,
+      "computed_by": "tools/build_discovery.py: a sample payload (fingerprint = SHA-256('abc'), K_qr = K_QR vector, RDI = role-0 vector) formatted per Bvmid2.encode; the test uses a random fingerprint/K_qr and asserts length 149, charset and round trip",
+      "kind": "roundtrip",
+      "notes": "Doc: docs/PROTOCOL.md 'Verification code BVMID2' (format line agrees). Mixed-case hex is rejected only when a changed character is a letter."
+    },
+    {
+      "id": "bvmid2-013",
+      "description": "BVMID2 parser rejects malformed texts with a reason (Bvmid2FormatException.reason)",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/Bvmid2Test.kt",
+        "class": "Bvmid2Test",
+        "method": "everyMalformedFieldIsRejected",
+        "line": 72
+      },
+      "inputs": {
+        "valid_sample": "BVMID2.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F.44E69C0A7A7D",
+        "cases": [
+          {
+            "description": "BVMID1 magic (other version)",
+            "text": "BVMID1.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.Mum",
+            "reason": "other version"
+          },
+          {
+            "description": "unknown magic",
+            "text": "OTHER.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F.44E69C0A7A7D",
+            "reason": "other magic"
+          },
+          {
+            "description": "three fields only",
+            "text": "BVMID2.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F",
+            "reason": "field count"
+          },
+          {
+            "description": "five fields",
+            "text": "BVMID2.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F.44E69C0A7A7D.EXTRA",
+            "reason": "field count"
+          },
+          {
+            "description": "fingerprint 62 hex",
+            "text": "BVMID2.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F.44E69C0A7A7D",
+            "reason": "length"
+          },
+          {
+            "description": "K_qr 66 hex",
+            "text": "BVMID2.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F00.44E69C0A7A7D",
+            "reason": "length"
+          },
+          {
+            "description": "RDI 11 hex",
+            "text": "BVMID2.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F.44E69C0A7A7",
+            "reason": "length"
+          },
+          {
+            "description": "first fingerprint digit 'G'",
+            "text": "BVMID2.GA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F.44E69C0A7A7D",
+            "reason": "alphabet"
+          },
+          {
+            "description": "K_qr all zeros",
+            "text": "BVMID2.BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD.0000000000000000000000000000000000000000000000000000000000000000.44E69C0A7A7D",
+            "reason": "zero secret"
+          },
+          {
+            "description": "empty text",
+            "text": "",
+            "reason": "other magic"
+          }
+        ]
+      },
+      "expected": {
+        "reasons": [
+          "other version",
+          "other magic",
+          "field count",
+          "field count",
+          "length",
+          "length",
+          "length",
+          "alphabet",
+          "zero secret",
+          "other magic"
+        ]
+      },
+      "expected_literal": false,
+      "computed_by": "tools/build_discovery.py: texts rebuilt from the test's templates around the sample payload; the reason strings are the test's literal assertions. 'mixed case' is a further reject reason in the parser (all-upper or all-lower accepted, mixed rejected) that the test exercises only conditionally.",
+      "kind": "reject",
+      "notes": ""
+    },
+    {
+      "id": "bvmid2-014",
+      "description": "BVMID2 code lifetime and attempt limits: a code lives 300 s of monotonic time; a reservation expires after 45 s; at most 3 attempts per code; a verification session lasts at most 60 s",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/Bvmid2Test.kt",
+        "class": "Bvmid2Test",
+        "line": 107,
+        "method": "aCodeLivesThreeHundredSecondsAndThenEnds"
+      },
+      "inputs": {},
+      "expected": {
+        "lifetime_ms": 300000,
+        "reservation_ms": 45000,
+        "max_attempts": 3,
+        "max_session_ms": 60000
+      },
+      "expected_literal": true,
+      "kind": "derive",
+      "notes": "Values are the constants QrCodeDisplay.LIFETIME_MS (Bvmid2.kt:247), RESERVATION_MS (:250), MAX_ATTEMPTS (:253) and QrSessionScope.MAX_SESSION_MS (:335); the tests use them symbolically (boundary at LIFETIME_MS - 1 / + 0). docs/PROTOCOL.md agrees (300 s, cap of 3)."
+    },
+    {
+      "id": "bvmid2-015",
+      "description": "BVMID2 single-use reservation sequence: link handshake with the code's tag reserves it (LIVE -> RESERVED); a second connection is 'qr busy'; completing consumes it; a replayed msg1 closes silently as 'replay'; a new attempt on a consumed code is 'qr consumed' and raises the reuse alert; the third failed attempt hits 'qr attempts' and ends the code; signing budget exhausted is 'budget'",
+      "provenance": {
+        "file": "app/src/test/java/com/example/bluetoothtest/Bvmid2Test.kt",
+        "class": "Bvmid2Test",
+        "line": 135,
+        "method": "aMatchReservesTheCodeForOneAttemptAndLinkComesFirst"
+      },
+      "inputs": {
+        "events": [
+          "tag match (LINK)",
+          "second connection tag match",
+          "complete()",
+          "replayed first message",
+          "new first message on consumed code"
+        ]
+      },
+      "expected": {
+        "outcomes": [
+          "RESERVED",
+          "Bmh3Failure('qr busy')",
+          "CONSUMED",
+          "Bmh3Failure('replay'), no alert",
+          "Bmh3Failure('qr consumed'), reuse alert"
+        ]
+      },
+      "expected_literal": true,
+      "kind": "derive",
+      "notes": "Failure reasons are the literal strings asserted in Bvmid2Test. Behavioural; no bytes."
+    }
+  ],
+  "description": "Identity verification text formats: identity fingerprint (SHA-256 of the identity SPKI DER), the 60-digit Signal-style safety code, the static QR text BVMID1 and the live verification code BVMID2 (PROTOCOL 'Identity verification' and 'Verification code BVMID2'). BVMID1.<64 hex fingerprint>.<base64url no padding, UTF-8 NFC display name>; BVMID2.<64 hex fingerprint>.<64 hex K_qr>.<12 hex RDI> (uppercase hex and '.' only; parsers accept all-upper or all-lower, not mixed). Lowercase hex fingerprints are used on the API side."
+}

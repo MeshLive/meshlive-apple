@@ -8,8 +8,9 @@ standalone Noise XX v1 app (Experimental/V1App + Sources/NearbyV1Experimental).
 Writes MeshLive.xcodeproj with the schemes MeshLive-iOS (iPhone app, UI tests MeshLive-iOS-UITests) and MeshLive
 (native Mac app, UI tests MeshLiveUITests). Both apps are MeshLive.app with bundle ID io.github.meshlive.app."""
 from pathlib import Path
-import hashlib, sys
+import hashlib, os, sys
 v1 = "--v1-experiment" in sys.argv
+hotspot = os.environ.get("MESHLIVE_HOTSPOT") == "1"
 
 root = Path(__file__).resolve().parent.parent
 project = root / "MeshLive.xcodeproj"
@@ -28,16 +29,19 @@ else:
     # Generated nearby names (Android names-v2 lists) are shared by the iPhone and the Mac.
     sources.append("Desktop/Support/DesktopNearbyNames.swift")
 coresources = sorted(p.relative_to(root).as_posix() for p in (root / "Sources/NearbyCore").glob("*.swift"))
+# Licence texts bundled by reference at the app bundle root (one home per file). The retained v1 app is unchanged.
+legal = [] if v1 else ["LICENSE", "LICENSE-EXCEPTION.md", "Vendor/OPUS-COPYING", "Vendor/LIBVPX-LICENSE",
+                       "Vendor/LIBVPX-PATENTS", "Vendor/UNICODE-LICENSE.txt", "Vendor/WEBRTC-LICENSE"]
 buildfiles, corefiles, children, resources = [], [], [], []
 assets = ["App/Assets.xcassets"] if (root / "App/Assets.xcassets").exists() and not v1 else []
-for path in sources + coresources + ["App/Info.plist", "App/PrivacyInfo.xcprivacy"] + assets:
+for path in sources + coresources + ["App/Info.plist", "App/PrivacyInfo.xcprivacy"] + assets + legal:
     ext = Path(path).suffix
-    kind = {".swift":"sourcecode.swift", ".c":"sourcecode.c.c", ".plist":"text.plist.xml", ".xcprivacy":"text.plist.xml", ".xcassets":"folder.assetcatalog"}[ext]
+    kind = {".swift":"sourcecode.swift", ".c":"sourcecode.c.c", ".plist":"text.plist.xml", ".xcprivacy":"text.plist.xml", ".xcassets":"folder.assetcatalog"}.get(ext, "text")
     ref = obj(path, f'isa = PBXFileReference; lastKnownFileType = {kind}; path = {quote(path)}; sourceTree = SOURCE_ROOT;')
     children.append(ref)
     if path in sources: buildfiles.append(obj("build:"+path, f'isa = PBXBuildFile; fileRef = {ref};'))
     elif path in coresources: corefiles.append(obj("build:"+path, f'isa = PBXBuildFile; fileRef = {ref};'))
-    elif ext in (".xcprivacy", ".xcassets"): resources.append(obj("build:"+path, f'isa = PBXBuildFile; fileRef = {ref};'))
+    elif path in legal or ext in (".xcprivacy", ".xcassets"): resources.append(obj("build:"+path, f'isa = PBXBuildFile; fileRef = {ref};'))
 product = obj("product", 'isa = PBXFileReference; explicitFileType = wrapper.application; path = MeshLive.app; sourceTree = BUILT_PRODUCTS_DIR;')
 coreproduct = obj("core-product", 'isa = PBXFileReference; explicitFileType = archive.ar; path = libNearbyCore.a; sourceTree = BUILT_PRODUCTS_DIR;')
 core = obj("core-link", f'isa = PBXBuildFile; fileRef = {coreproduct};')
@@ -64,7 +68,7 @@ coreconfigs = []
 for name in ["Debug", "Release"]:
     settings = {
         "PRODUCT_NAME":"MeshLive", "PRODUCT_BUNDLE_IDENTIFIER":"io.github.meshlive.app",
-        "IPHONEOS_DEPLOYMENT_TARGET":"16.0", "SDKROOT":"iphoneos", "TARGETED_DEVICE_FAMILY":"1",
+        "IPHONEOS_DEPLOYMENT_TARGET":"17.0", "SDKROOT":"iphoneos", "TARGETED_DEVICE_FAMILY":"1",
         "SUPPORTED_PLATFORMS":"iphoneos iphonesimulator", "SWIFT_VERSION":"5.0",
         "INFOPLIST_FILE":"App/Info.plist", "SWIFT_OBJC_BRIDGING_HEADER":"Experimental/V1App/BridgingHeader.h" if v1 else "App/BridgingHeader.h",
         "CODE_SIGN_STYLE":"Automatic", "ENABLE_USER_SCRIPT_SANDBOXING":"YES",
@@ -81,7 +85,18 @@ for name in ["Debug", "Release"]:
     # here as well would define module VPX twice.
     settings['"HEADER_SEARCH_PATHS[sdk=iphoneos*]"'] = " ".join(device_headers)
     settings['"HEADER_SEARCH_PATHS[sdk=iphonesimulator*]"'] = " ".join(simulator_headers)
-    values = " ".join(f'{k} = {quote(v)};' for k,v in settings.items())
+    app_settings = dict(settings)
+    app_settings.update(MARKETING_VERSION="1.0", CURRENT_PROJECT_VERSION="1", MESHLIVE_DISTRIBUTION="",
+                        MESHLIVE_SOURCE_COMMIT="", SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD="NO",
+                        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD="NO")
+    if name == "Release":
+        app_settings["DEBUG_INFORMATION_FORMAT"] = "dwarf-with-dsym"
+        app_settings["VALIDATE_PRODUCT"] = "YES"
+    if hotspot:
+        app_settings["CODE_SIGN_ENTITLEMENTS"] = "App/MeshLive-iOS.entitlements"
+        conditions = app_settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"]
+        app_settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = (conditions + " HOTSPOT_ENTITLED").strip()
+    values = " ".join(f'{k} = {quote(v)};' for k,v in app_settings.items())
     configs.append(obj("config:"+name, f'isa = XCBuildConfiguration; name = {name}; buildSettings = {{ {values} }};'))
     ca = {k:v for k,v in settings.items() if k not in ["INFOPLIST_FILE", "SWIFT_OBJC_BRIDGING_HEADER", "PRODUCT_BUNDLE_IDENTIFIER"]}
     ca.update(PRODUCT_NAME="NearbyCore", PRODUCT_MODULE_NAME="NearbyCore", DEFINES_MODULE="YES", SKIP_INSTALL="YES", SWIFT_INSTALL_OBJC_HEADER="NO", MACH_O_TYPE="staticlib")
@@ -107,7 +122,7 @@ if not v1 and (root / "UITests").exists():
     uiconfigs = []
     for name in ["Debug", "Release"]:
         us = {"PRODUCT_NAME": "MeshLive-iOS-UITests", "PRODUCT_BUNDLE_IDENTIFIER": "io.github.meshlive.app.uitests", "TEST_TARGET_NAME": "MeshLive-iOS",
-              "GENERATE_INFOPLIST_FILE": "YES", "IPHONEOS_DEPLOYMENT_TARGET": "16.0", "SDKROOT": "iphoneos", "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator",
+              "GENERATE_INFOPLIST_FILE": "YES", "IPHONEOS_DEPLOYMENT_TARGET": "17.0", "SDKROOT": "iphoneos", "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator",
               "TARGETED_DEVICE_FAMILY": "1", "SWIFT_VERSION": "5.0", "CODE_SIGN_STYLE": "Automatic", "SWIFT_OPTIMIZATION_LEVEL": "-Onone"}
         uvalues = " ".join(f'{k} = {quote(v)};' for k, v in us.items())
         uiconfigs.append(obj("ui-config:" + name, f'isa = XCBuildConfiguration; name = {name}; buildSettings = {{ {uvalues} }};'))
@@ -146,7 +161,7 @@ if not v1:
         macframeworks.append(obj("mac-opus-link", f'isa = PBXBuildFile; fileRef = {ref};'))
     macsrc = obj("mac-sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(macbuild)}); runOnlyForDeploymentPostprocessing = 0;')
     maclink = obj("mac-frameworks", f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({",".join(macframeworks)}); runOnlyForDeploymentPostprocessing = 0;')
-    macresfiles = [obj("mac-resource:"+p, f'isa = PBXBuildFile; fileRef = {uid(p)};') for p in ["App/Assets.xcassets", "App/PrivacyInfo.xcprivacy"]]
+    macresfiles = [obj("mac-resource:"+p, f'isa = PBXBuildFile; fileRef = {uid(p)};') for p in ["App/Assets.xcassets", "App/PrivacyInfo.xcprivacy"] + legal]
     macaccent = obj("mac-accent-ref", 'isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Desktop/Assets.xcassets; sourceTree = SOURCE_ROOT;')
     macchildren.append(macaccent)
     macresfiles.append(obj("mac-accent-build", f'isa = PBXBuildFile; fileRef = {macaccent};'))
@@ -166,6 +181,8 @@ if not v1:
             settings.update(extra)
             if key == "mac-config" and name == "Release":
                 settings["CODE_SIGN_INJECT_BASE_ENTITLEMENTS"] = "NO"
+                settings["DEBUG_INFORMATION_FORMAT"] = "dwarf-with-dsym"
+                settings["VALIDATE_PRODUCT"] = "YES"
             values = " ".join(f'{k} = {quote(v)};' for k,v in settings.items())
             configs.append(obj(key+":"+name, f'isa = XCBuildConfiguration; name = {name}; buildSettings = {{ {values} }};'))
         return obj(key+"-list", f'isa = XCConfigurationList; buildConfigurations = ({",".join(configs)}); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;')
@@ -173,7 +190,7 @@ if not v1:
     maccorefiles = [obj("mac-core-build:"+p, f'isa = PBXBuildFile; fileRef = {uid(p)};') for p in coresources]
     maccorephase = obj("mac-core-sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({",".join(maccorefiles)}); runOnlyForDeploymentPostprocessing = 0;')
     maccoretarget = obj("mac-core-target", f'isa = PBXNativeTarget; name = NearbyCoreMac; productName = NearbyCoreMac; productReference = {maccoreproduct}; productType = "com.apple.product-type.library.static"; buildConfigurationList = {maccoreconfig}; buildPhases = ({maccorephase}); dependencies = ();')
-    macconfig = macconfigs("mac-config", dict(PRODUCT_NAME="MeshLive", PRODUCT_BUNDLE_IDENTIFIER="io.github.meshlive.app", INFOPLIST_FILE="Desktop/Info.plist", CODE_SIGN_ENTITLEMENTS="Desktop/MeshLive.entitlements", ENABLE_APP_SANDBOX="YES", ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon", ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME="DesktopAccent", SUPPORTS_MACCATALYST="NO", SWIFT_OBJC_BRIDGING_HEADER="App/BridgingHeader.h", LIBRARY_SEARCH_PATHS="$(inherited) $(SRCROOT)/.build/opus/macos-arm64/.libs", HEADER_SEARCH_PATHS="$(inherited) $(SRCROOT)/Sources/CNearbyVPX/include $(SRCROOT)/.build/opus/macos-source/opus-1.6.1/include"))
+    macconfig = macconfigs("mac-config", dict(PRODUCT_NAME="MeshLive", PRODUCT_BUNDLE_IDENTIFIER="io.github.meshlive.app", INFOPLIST_FILE="Desktop/Info.plist", CODE_SIGN_ENTITLEMENTS="Desktop/MeshLive.entitlements", ENABLE_APP_SANDBOX="YES", ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon", ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME="DesktopAccent", SUPPORTS_MACCATALYST="NO", SWIFT_OBJC_BRIDGING_HEADER="App/BridgingHeader.h", LIBRARY_SEARCH_PATHS="$(inherited) $(SRCROOT)/.build/opus/macos-arm64/.libs", HEADER_SEARCH_PATHS="$(inherited) $(SRCROOT)/Sources/CNearbyVPX/include $(SRCROOT)/.build/opus/macos-source/opus-1.6.1/include", MARKETING_VERSION="1.0", CURRENT_PROJECT_VERSION="1", MESHLIVE_DISTRIBUTION="", MESHLIVE_SOURCE_COMMIT=""))
     macdep = obj("mac-core-dependency", f'isa = PBXTargetDependency; target = {maccoretarget};')
     mactarget = obj("mac-target", f'isa = PBXNativeTarget; name = MeshLive; productName = MeshLive; productReference = {macproduct}; productType = "com.apple.product-type.application"; buildConfigurationList = {macconfig}; buildPhases = ({macsrc},{maclink},{macres}); dependencies = ({macdep});')
     macuifiles = []

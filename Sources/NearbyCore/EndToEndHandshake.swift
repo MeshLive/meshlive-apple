@@ -14,6 +14,13 @@ public struct EndToEndSession {
     /// The key this phone presented at the endpoint layer (a pseudonym signs labels in a stranger session).
     public var presentedIdentity: SigningIdentity? = nil
     public var usedBmh3 = false
+    /// AW1: the BMH3 end-to-end exporter, from which the call's Wi-Fi key UW is derived; nil for BMH2.
+    public var wifiExporter: Data? = nil
+    /// BMH3 responder only: msg1's tag matched the live verification code (BVMID2), so this session is verify-only.
+    public var qrTagMatched = false
+    /// EXPERIMENTAL in-call link renewal (Design SR): `K_renew`, derived from the two content keys when both end-to-end
+    /// hellos signed bit 4; a call engine zeroes it at once for a verification session and when the session closes.
+    public var renewalKey: CallRenewalKey? = nil
 
     public init(peerNodeId: NodeId, peerCapabilities: NodeCapabilities, peerFingerprint: IdentityFingerprint,
                 sealer: EndToEndContentSealer, opener: EndToEndContentOpener) {
@@ -100,6 +107,11 @@ public final class EndToEndHandshake {
         session.peerPseudonymous = result.peer.pseudonymous
         session.presentedIdentity = result.ownPseudonymous ? bmh3?.stranger : identity
         session.usedBmh3 = true
+        session.wifiExporter = result.exporter
+        session.qrTagMatched = result.qrTagMatched
+        if CallRenewalWire.bothSigned(local: capabilities, peer: result.peer.capabilities) {
+            session.renewalKey = (try? CallRenewalCrypto.renewalKey(result.sendKey, result.receiveKey)).map(CallRenewalKey.init)
+        }
         return session
     }
 
@@ -118,16 +130,15 @@ public final class EndToEndHandshake {
         if role == .responder, let bmh3, Bmh3Wire.isBmh3(payload) {
             let config = try Bmh3Config(purpose: .endToEnd, identity: identity, capabilities: capabilities, entropy: bmh3.entropy,
                                         stranger: try strangerPresentation())
-            let budget = bmh3.budget
-            let responder = Bmh3Responder(config: config, tagChecks: bmh3.tagChecks(), opening: bmh3.opening(), replayCache: bmh3.replayCache,
-                                          beforeReply: { _ in try budget?.spend() },
+            let responder = Bmh3Responder(config: config, tagChecks: bmh3.responderTagChecks(), opening: bmh3.opening(), replayCache: bmh3.replayCache,
+                                          beforeReply: { matched in try bmh3.beforeReply(tagMatched: matched) },
                                           admitInitiator: { [weak self] peer, matched in
-                                              guard !matched || bmh3.admitTagged(peer.nodeId) else { return false }
+                                              guard bmh3.admitInitiator(peer.nodeId, tagMatched: matched) else { return false }
                                               try self?.admit(peer); return true })
             bmh3Responder = responder
             return (nil, try responder.onMessage1(payload))
         }
-        if role == .responder, let bmh3, !bmh3.acceptBmh2 { throw Bmh3Failure("bmh2 refused") }
+        if role == .responder, let bmh3, bmh3.refusesBmh2 { throw Bmh3Failure("bmh2 refused") }
         let remote = try SignedHandshakeHello(decoding: payload)
         let keys: MeshSessionKeys
         var reply: Data?
@@ -147,6 +158,10 @@ public final class EndToEndHandshake {
         var session = EndToEndSession(peerNodeId: keys.peerNodeId, peerCapabilities: remote.capabilities, peerFingerprint: fingerprint,
                                       sealer: EndToEndContentSealer(key: keys.sendKey), opener: EndToEndContentOpener(key: keys.receiveKey))
         session.presentedIdentity = identity
+        if CallRenewalWire.bothSigned(local: capabilities, peer: remote.capabilities) {
+            let send = keys.sendKey.withUnsafeBytes { Data($0) }, receive = keys.receiveKey.withUnsafeBytes { Data($0) }
+            session.renewalKey = (try? CallRenewalCrypto.renewalKey(send, receive)).map(CallRenewalKey.init)
+        }
         return (session, reply)
     }
 }

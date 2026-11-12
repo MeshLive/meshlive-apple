@@ -50,11 +50,14 @@ final class RotatingDiscoveryTests: XCTestCase {
         XCTAssertNil(CompactAnnouncement.decode(uuid), "compact v2 is rejected when rotating IDs are off")
         let v1 = try XCTUnwrap(CompactAnnouncement.decode("C8D64010-2030-4050-60C0-000000000000", acceptRotating: true))
         XCTAssertFalse(v1.rotating); XCTAssertEqual(v1.nodeIdPrefix.hex, "010203040506")
-        // Phase 1: only call offers rotate.
+        // Phase 1b: stream offers (and viewer requests) rotate too, with the same version bits (RotatingViewerTests has
+        // Android's vectors).
         var stream = DiscoveryAnnouncement(nodeIdPrefix: Data(repeating: 1, count: 6), flags: DiscoveryAnnouncement.flagStreamAvailable, capabilitySummary: 1,
                                            streamToken: 0x80000001, routeCost: 0)
         stream.rotating = true
-        XCTAssertThrowsError(try CompactAnnouncement.encode(stream))
+        let streamUuid = try CompactAnnouncement.encode(stream)
+        XCTAssertTrue(streamUuid.hasPrefix("C8D6A"), "version 2, kind 2")
+        XCTAssertEqual(CompactAnnouncement.decode(streamUuid, acceptRotating: true)?.rotating, true)
     }
 
     func testAndroidVersion5AnnouncementVector() throws {
@@ -170,6 +173,57 @@ final class RotatingDiscoveryTests: XCTestCase {
         let recovered = clock.read(wallMs: t0 + end - 300_000 - 1_000, elapsedMs: end)
         XCTAssertTrue(recovered.newGeneration); XCTAssertEqual(clock.state.generation, 2)
         XCTAssertEqual(recovered.epoch, RotatingDiscoveryIds.wallEpoch(unixSeconds: (t0 + end - 301_000) / 1000))
+    }
+
+    /// AB4F (review finding 1): a two-epoch backward wall step leaves the clock three epochs ahead. The hour of lead is
+    /// measured on the epoch the read will advertise, so it accumulates across boundaries and the clock resets to the
+    /// wall epoch after one continuous hour (Android RotatingDiscovery.kt:316-318), never before.
+    func testAThreeEpochLeadRecoversAfterOneHourAcrossBoundaries() {
+        let t0: Int64 = 1_791_590_400_000   // a multiple of 900 s and of 60 s
+        for seconds in [Int64(900), 60] {
+            defer { DiscoveryEpochLength.resetForTests() }
+            XCTAssertTrue(DiscoveryEpochLength.set(seconds, debugBuild: true, started: false))
+            let stepMs = seconds * 1000
+            let clock = DiscoveryEpochClock(state: EpochClockState(), bootId: "b") { _ in }
+            let wall0 = RotatingDiscoveryIds.wallEpoch(unixSeconds: t0 / 1000)
+            XCTAssertEqual(clock.read(wallMs: t0, elapsedMs: 0).epoch, wall0)
+            // A fast wall clock three epochs ahead of monotonic time.
+            XCTAssertEqual(clock.read(wallMs: t0 + 3 * stepMs, elapsedMs: 5_000).epoch, wall0 + 3)
+            // The wall steps back two epochs: the stored epoch is now three ahead of it.
+            let stepWall = t0 + stepMs
+            let stepElapsed: Int64 = 10_000
+            let recoveryAt = stepElapsed + DiscoveryEpochClock.aheadRecoveryMs
+            var recovered: Int64?
+            for elapsed in stride(from: stepElapsed, through: stepElapsed + 90 * 60 * 1000, by: 5_000) {
+                let wallMs = stepWall + (elapsed - stepElapsed)
+                let wall = RotatingDiscoveryIds.wallEpoch(unixSeconds: wallMs / 1000)
+                let reading = clock.read(wallMs: wallMs, elapsedMs: elapsed)
+                if let recovered {
+                    XCTAssertEqual(reading.epoch, wall, "after recovery the wall epoch")
+                    XCTAssertGreaterThanOrEqual(elapsed, recovered)
+                } else if reading.newGeneration {
+                    XCTAssertEqual(elapsed, recoveryAt, "one continuous hour of lead")
+                    XCTAssertEqual(reading.epoch, wall, "recovered to the wall epoch")
+                    XCTAssertEqual(clock.state.generation, 2)
+                    recovered = elapsed
+                } else {
+                    XCTAssertLessThan(elapsed, recoveryAt, "never before one continuous hour")
+                    XCTAssertEqual(reading.epoch, wall + 3, "the prospective epoch keeps the three-epoch lead")
+                }
+            }
+            XCTAssertEqual(recovered, recoveryAt, "the clock recovered from the three-epoch lead")
+            // A normally running clock is unchanged.
+            DiscoveryEpochLength.resetForTests()
+            XCTAssertTrue(DiscoveryEpochLength.set(seconds, debugBuild: true, started: false))
+            let normal = DiscoveryEpochClock(state: EpochClockState(), bootId: "b") { _ in }
+            for elapsed in stride(from: Int64(0), through: 90 * 60 * 1000, by: 5_000) {
+                let wallMs = t0 + elapsed
+                let reading = normal.read(wallMs: wallMs, elapsedMs: elapsed)
+                XCTAssertEqual(reading.epoch, RotatingDiscoveryIds.wallEpoch(unixSeconds: wallMs / 1000))
+                XCTAssertFalse(reading.newGeneration)
+            }
+            XCTAssertEqual(normal.state.generation, 1)
+        }
     }
 
     func testTarpitAndVisibleWindow() {
@@ -307,8 +361,7 @@ final class RotatingStreamTests: XCTestCase {
         XCTAssertEqual(a.streamWidth, 640); XCTAssertEqual(a.streamFps, 15); XCTAssertEqual(a.streamBitrateKbps, 300)
         XCTAssertEqual(try a.encoded().hex, bytes.hex)
         XCTAssertThrowsError(try DiscoveryAnnouncement(decoding: bytes), "version 5 is rejected when off")
-        // A version 5 viewer request is still refused (the iPhone never offers a version 5 stream).
-        XCTAssertThrowsError(try DiscoveryAnnouncement(decoding: Data(hex: "05974ae410ea91090092529fc400000000000000012c")!, acceptRotating: true))
+        // AB4: a version 5 viewer request now decodes (an Apple source answers it): RotatingSourceTests.
     }
 
     private func run(sourceId: SigningIdentity, entryOwner: SigningIdentity, sourceEntries: Bool = true, verifierEpoch: Int64? = nil)
@@ -371,17 +424,19 @@ final class RotatingStreamTests: XCTestCase {
         XCTAssertEqual(presence.acceptedEntries(elapsedMs: 1_000 + OpeningPins.previousGraceMs), [e11], "the old ID is not opened after 60 s")
     }
 
-    /// Phase 1b for streams is not built here (requests and forwarder offers carry the fixed prefix): with rotating
-    /// IDs on, a rotating stream is neither joined nor forwarded; a fixed one, or the setting off, behaves as before.
-    func testARotatingStreamIsNotJoinedOrForwardedWithTheFixedPrefixWhileRotatingIdsAreOn() {
+    /// Forwarder offers do not rotate here yet: with rotating IDs on, a rotating stream is not forwarded (its join uses a
+    /// rotating request, RotatingViewerTests); with the private viewer off it is not joined either; a fixed stream, or
+    /// the setting off, behaves as before.
+    func testARotatingStreamIsNotForwardedAndNeverJoinedWithTheFixedPrefixWhileRotatingIdsAreOn() {
         var offer = DiscoveryAnnouncement(nodeIdPrefix: Data([1, 2, 3, 4, 5, 6]), flags: DiscoveryAnnouncement.flagStreamAvailable,
                                           capabilitySummary: NodeCapabilities.codecVP9, streamToken: 0x8000_1234, routeCost: 0)
-        XCTAssertNil(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: true))
+        XCTAssertNil(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: true, privateViewer: false))
         XCTAssertTrue(RotatingStreamPolicy.mayForward(offer: offer, rotatingIds: true))
         offer.rotating = true
-        XCTAssertEqual(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: true), RotatingStreamPolicy.joinRefusal)
+        XCTAssertNil(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: true, privateViewer: true))
+        XCTAssertEqual(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: true, privateViewer: false), RotatingStreamPolicy.joinRefusal)
         XCTAssertFalse(RotatingStreamPolicy.mayForward(offer: offer, rotatingIds: true))
-        XCTAssertNil(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: false), "the fixed prefix is already public")
+        XCTAssertNil(RotatingStreamPolicy.joinRefusal(offer: offer, rotatingIds: false, privateViewer: false), "the fixed prefix is already public")
         XCTAssertTrue(RotatingStreamPolicy.mayForward(offer: offer, rotatingIds: false))
     }
 }

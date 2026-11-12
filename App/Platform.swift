@@ -87,6 +87,17 @@ extension View {
         self
         #endif
     }
+    /// A pushed page's title, in one row as Android (back, title, status): the iPhone uses the inline navigation title
+    /// with the status chip as the trailing item; the Mac page draws `PageHeader` itself and the window keeps its
+    /// tab's title.
+    @ViewBuilder func pageTitle(_ title: String) -> some View {
+        #if os(iOS)
+        navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { StatusChip(compact: true) } }
+        #else
+        self
+        #endif
+    }
     @ViewBuilder func meshFullScreenCover<Item: Identifiable, Content: View>(item: Binding<Item?>,
                                                        @ViewBuilder content: @escaping (Item) -> Content) -> some View {
         #if os(iOS)

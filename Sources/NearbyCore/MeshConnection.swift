@@ -26,7 +26,7 @@ public struct OutboundItem {
 public struct OutboundQueues {
     public var audioCapacity = 150
     public var videoCapacity = 45
-    /// EXPERIMENTAL call audio coalescing (Android `test_call_audio_coalesce`, off): when an ordinary 20 ms Opus unit
+    /// Call audio coalescing (Android `callAudioCoalesce`, on in the app; the engine default stays off): when an ordinary 20 ms Opus unit
     /// leaves while more ordinary units already wait (audio that queued behind a slow write), they leave as one existing
     /// BTA1 pair or BTA2 batch (at most 20 units, 1 s span). Nothing waits for audio not yet captured; with an empty
     /// queue every record is as before. Every call receiver already splits pairs and batches: no wire change.
@@ -83,6 +83,15 @@ public struct OutboundQueues {
         return item
     }
 
+    /// AW1: the first hop record (`.raw` or `.record`) waiting in the control queue, for a Bluetooth carrier that carries
+    /// no content while content travels on Wi-Fi.
+    mutating func popFirstHopRecord() -> OutboundItem? {
+        guard let index = control.firstIndex(where: {
+            switch $0.kind { case .raw, .record: return true; default: return false }
+        }) else { return nil }
+        return control.remove(at: index)
+    }
+
     private static func ordinaryAudio(_ item: OutboundItem) -> MediaPacket? {
         guard !item.closeAfter, case .content(.mediaPacket, let flags, let payload) = item.kind, flags == StreamProtocol.flagAudio,
               let packet = try? MediaPacket(decoding: payload, authenticatedFlags: flags),
@@ -114,6 +123,17 @@ public struct OutboundQueues {
 
     /// Clears queued media; an unfinished fragmented frame is completed so the receiver never sees a gap.
     mutating func clearMedia() { audio.removeAll(); video.removeAll() }
+
+    /// Design SR re-assertion after BIND: queued video continues frames whose references may have gone with the old
+    /// link (measured: a Mac -> M31 call's size-change key frame was lost on the stalled link; its later deltas reached the
+    /// M31 first on the new link and its decoder failed). It is dropped and the queue waits for the requested key frame,
+    /// as Android drops queued video and recovers at a key frame. Kept items (codec configuration, rotation) stay.
+    mutating func restartVideoAtKeyFrame() {
+        let kept = video.filter(\.keep)
+        droppedVideoFrames += video.count - kept.count
+        video = kept
+        waitingForKeyFrame = true
+    }
     func oldestAge(now: TimeInterval) -> TimeInterval {
         [control.first, audio.first, video.first].compactMap { $0?.enqueuedAt }.min().map { now - $0 } ?? 0
     }
@@ -145,13 +165,26 @@ open class MeshConnection {
     public var queues = OutboundQueues()
     public var expectedPeerPrefix: Data?
     public weak var identityGate: PeerIdentityGate?
-    let link: SecureLink
+    /// The hop link; replaced only by an in-call link renewal (`adoptRenewedLink`).
+    private(set) var link: SecureLink
     private var endpointHandshake: EndToEndHandshake?
     var startedAt: TimeInterval = 0
     public private(set) var lastReceiveAt: TimeInterval = 0
-    public private(set) var lastSendAt: TimeInterval = 0
+    public internal(set) var lastSendAt: TimeInterval = 0
+    /// When the last complete, authenticated hop record (or the link handshake) arrived; byte arrival alone never moves
+    /// it. The in-call link renewal's trigger and liveness read this clock (Design SR: "no record for 3 s").
+    public private(set) var lastRecordAt: TimeInterval = 0
+    /// The transport's last completed write (a GATT value or notification that actually left the local queue), on this
+    /// connection's clock; set by the transport driver. Nil: no transport reports it (then sealing time is used).
+    public var writeProgress: (() -> TimeInterval?)?
+    /// This phone's own writes, for the renewal's "own writes still complete": the transport's completed writes when it
+    /// reports them, else the time records were handed to it.
+    public var lastWriteProgressAt: TimeInterval {
+        guard let writeProgress else { return lastSendAt }
+        return writeProgress() ?? -.infinity
+    }
     public private(set) var receivedBytes: UInt64 = 0
-    public private(set) var sentBytes: UInt64 = 0
+    public internal(set) var sentBytes: UInt64 = 0
     /// Sealed bytes of video media (whole packets and fragments) handed to the transport.
     public private(set) var sentVideoBytes: UInt64 = 0
     #if os(macOS)
@@ -161,7 +194,7 @@ open class MeshConnection {
     #endif
     /// Age of the oldest video frame still waiting for the transport.
     public func videoQueueAge(now: TimeInterval) -> TimeInterval { queues.videoAge(now: now) }
-    public private(set) var closeRequested = false
+    public internal(set) var closeRequested = false
     /// Fatal closure discards queued output; transports must release even if their pipe is blocked.
     public private(set) var closedWithError = false
     /// EXPERIMENTAL rotating discovery IDs: this side's BDO1 entries (a callee's pinned role-0 IDs; a caller none).
@@ -217,7 +250,7 @@ open class MeshConnection {
         self.linkCapabilities = linkCapabilities; endpointCapabilities = linkCapabilities
         bmh3 = other.bmh3; link = other.link
         queues = other.queues; heldIngress = other.heldIngress; heldHello = other.heldHello; responderHelloHandled = true
-        startedAt = other.startedAt; now = other.now; lastReceiveAt = other.lastReceiveAt; lastSendAt = other.lastSendAt
+        startedAt = other.startedAt; now = other.now; lastReceiveAt = other.lastReceiveAt; lastSendAt = other.lastSendAt; lastRecordAt = other.lastRecordAt
         receivedBytes = other.receivedBytes; sentBytes = other.sentBytes
         peerOpening = other.peerOpening; openingExpected = other.openingExpected
         phase = .open
@@ -232,6 +265,17 @@ open class MeshConnection {
     func handOver() {
         handedOver = true; phase = .closed; closeReason = "Handed over"
         queues = OutboundQueues(); heldIngress = Data(); heldHello = nil
+    }
+
+    /// EXPERIMENTAL in-call link renewal (Design SR): the connection moves to a renewed hop link on a new transport. The
+    /// end-to-end session, queues, call state and counters continue; `buffered` is the new link's input already read
+    /// (after its opening, and after a BIND the caller consumed); input of the old link is never parsed again. The
+    /// liveness clock restarts.
+    func adoptRenewedLink(_ renewed: SecureLink, buffered: Data, now: TimeInterval) {
+        link = renewed
+        heldIngress = buffered; ingressStalled = false
+        hopBacklog = []
+        self.now = now; lastReceiveAt = now; lastSendAt = now; lastRecordAt = now
     }
 
     /// Parses input already buffered in the adopted link (records that arrived with the first one).
@@ -258,7 +302,7 @@ open class MeshConnection {
     public func start(now: TimeInterval) throws {
         // A connection that already ended (the user cancelled while its link was still being set up) sends nothing.
         guard phase != .closed else { return }
-        self.now = now; startedAt = now; lastReceiveAt = now
+        self.now = now; startedAt = now; lastReceiveAt = now; lastRecordAt = now
         link.acceptDiscoveryOpening = linkCapabilities.transportMask & NodeCapabilities.transportDiscoveryOpening != 0
         if let hello = try link.start() { enqueue(.raw(hello), .control) }
     }
@@ -323,8 +367,9 @@ open class MeshConnection {
                             }
                         }
                         enqueue(.raw(bytes), .control)
-                    case .established: try linkEstablished()
+                    case .established: lastRecordAt = now; try linkEstablished()
                     case .record(let record):
+                        lastRecordAt = now
                         if phase == .closed { return }
                         try handleRecord(record)
                     }
@@ -440,7 +485,11 @@ open class MeshConnection {
         var item = OutboundItem(kind: kind, enqueuedAt: now, isKeyFrame: keyFrame, closeAfter: closeAfter)
         item.keep = keep
         _ = queues.push(item, priority)
+        observeQueued(kind)
     }
+
+    /// Subclass hook: a control or record item was queued (a call remembers what a link renewal re-asserts).
+    func observeQueued(_ kind: OutboundItem.Kind) {}
     @discardableResult
     func enqueueMedia(_ kind: OutboundItem.Kind, audio: Bool, keyFrame: Bool, keep: Bool = false) -> Bool {
         var item = OutboundItem(kind: kind, enqueuedAt: now, isKeyFrame: keyFrame, closeAfter: false)
@@ -452,11 +501,31 @@ open class MeshConnection {
     /// After a graceful finish the queue still drains (for example a final hang-up); a failure clears it.
     public func nextOutgoing(now: TimeInterval) -> Data? {
         self.now = now
+        if outputHeld { return nil }
         if let held = heldHello {
             guard now >= held.releaseAt else { return nil }
             heldHello = nil; sentBytes += UInt64(held.bytes.count); lastSendAt = now
             return held.bytes
         }
+        do {
+            if let marker = try carrierMarker() { sentBytes += UInt64(marker.count); lastSendAt = now; return marker }
+        } catch { fail(describe(error)); return nil }
+        // Hop records the second carrier's pull handed back leave first, also after a fallback; while content travels
+        // on the second carrier this link carries hop records only.
+        while let item = !hopBacklog.isEmpty ? hopBacklog.removeFirst() : (contentOnSecondCarrier ? queues.popFirstHopRecord() : nil) {
+            do {
+                let bytes: Data
+                switch item.kind {
+                case .raw(let data): bytes = data
+                case .record(let type, let payload): bytes = try link.seal(type, payload)
+                default: continue
+                }
+                sentBytes += UInt64(bytes.count); lastSendAt = now
+                if item.closeAfter { closeRequested = true }
+                return bytes
+            } catch { fail(describe(error)); return nil }
+        }
+        if contentOnSecondCarrier { return nil }
         // Pacing: nothing but control leaves before the pacer allows it (the burst allowance is 50 ms).
         if let pacer, queues.control.isEmpty, pacer.waitNs() > 0 { return nil }
         while let item = queues.pop() {
@@ -503,8 +572,16 @@ open class MeshConnection {
         return nil
     }
 
+    /// Subclass hook: nothing leaves while true (a DEBUG induced write stall on a call's first link).
+    open var outputHeld: Bool { false }
     /// Subclass hook: the next sealed record of an ordered media stream, pulled when the queues are empty.
     open func nextOrderedOutgoing(now: TimeInterval) throws -> Data? { nil }
+    /// AW1: true while content leaves on a second carrier; this link then carries only hop records.
+    open var contentOnSecondCarrier: Bool { false }
+    /// AW1: a hop record that must precede any further output on this link (a SWITCH or RESUME), sealed now.
+    open func carrierMarker() throws -> Data? { nil }
+    /// AW1: hop records the second carrier's pull took from the queues; they leave here first.
+    var hopBacklog: [OutboundItem] = []
     open var hasOrderedOutput: Bool { false }
 
     open func sealMesh(type: EndToEndContentType, flags: UInt8, payload: Data, extraMeshFlags: UInt8) throws -> Data {
@@ -527,8 +604,12 @@ open class MeshConnection {
     /// The transport closed or failed underneath.
     public func linkLost(_ reason: String) {
         guard phase != .closed else { return }
+        if holdsLinkLoss(reason) { return }
         finish(reason, error: true)
     }
+
+    /// Subclass hook: true keeps the connection open after its transport ended (an in-call link renewal owns it).
+    open func holdsLinkLoss(_ reason: String) -> Bool { false }
 
     public func fail(_ reason: String) { finish(reason, error: true) }
 

@@ -9,7 +9,7 @@ yourself. This page is the developer view; the [user guide](../user-guide.md#ins
 - Network access for the first build: the scripts download the pinned libopus and libvpx sources, check their
   SHA-256 and build them into ignored `Vendor/*.xcframework` folders. No third-party binaries are committed
   ([third-party notices](../../THIRD_PARTY_NOTICES.md), [Vendor/README.md](../../Vendor/README.md)).
-- For a phone: an iPhone on iOS 16 or newer and an Apple developer team (a free personal team works) to sign it.
+- For a phone: an iPhone on iOS 17 or newer and an Apple developer team (a free personal team works) to sign it.
 - For the native Mac app: an Apple Silicon Mac on macOS 14 or later. Local builds are ad-hoc signed and need no
   account; to keep the app's permissions across rebuilds, sign with your own certificate
   ([below](#keep-mac-permissions-across-rebuilds)).
@@ -76,6 +76,33 @@ not. Keep your identity and team in your shell environment, never in the project
 stays ad-hoc. Over SSH the login keychain is locked, so `codesign` fails with `errSecInternalComponent`; run the build
 from the logged-in desktop, or from SSH with `bash Scripts/gui-run.sh mac-build [Debug|Release]` (or `mac-uitest`),
 which runs it in that session and passes these variables along.
+
+## Archive for the App Store
+
+`Scripts/archive.sh` archives and exports the app locally. It never uploads anything; uploading is a separate manual
+step in Xcode or App Store Connect by the owner.
+
+```sh
+MESHLIVE_TEAM=<team ID> bash Scripts/archive.sh ios 12
+MESHLIVE_TEAM=<team ID> bash Scripts/archive.sh mac 12 --out .build/store/my-mac-run
+# The same value can come from the environment:
+MESHLIVE_BUILD=12 MESHLIVE_TEAM=<team ID> bash Scripts/archive.sh ios
+```
+
+- The build number is required: pass it as the first argument after `ios` or `mac`, or set `MESHLIVE_BUILD`. If both
+  are set they must match. It must be an integer greater than the project's current `CURRENT_PROJECT_VERSION`.
+  **Every TestFlight upload needs a new build number**; there is no default, so a duplicate cannot happen silently.
+  It becomes `CFBundleVersion` in the archive.
+- `MESHLIVE_TEAM` is required and is written only into the exported `ExportOptions.plist` under the output folder.
+- `ASC_KEY_PATH`, `ASC_KEY_ID` and `ASC_ISSUER_ID`, all three or none, let `-allowProvisioningUpdates` work over SSH
+  with an App Store Connect API key. They are read from the environment and never printed.
+- The default output is `.build/store/<short commit>-<build>`; it holds the `.xcarchive`, the export options and the
+  exported `.ipa` (iPhone) or `.pkg` (Mac).
+- The archive is checked with `Scripts/release-check.sh --store --archive` before export. The Mac mode is unverified:
+  the native Mac app is submitted after the iPhone.
+- `--dry-run` prints the archive, check and export commands with the team and key values redacted and runs none of them.
+
+Nothing in this script or in `store/` uploads a build or the listing.
 
 ## Test on phones
 

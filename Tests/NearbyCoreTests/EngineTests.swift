@@ -39,14 +39,25 @@ private final class Pipe {
 final class EngineTests: XCTestCase {
     let vp9 = NodeCapabilities.codecVP9
 
-    private func makeCall(type: CallType = .voice, gatt: Bool = false, calleeDecode: UInt8? = nil, fragments: Bool = false)
+    private func makeCall(type: CallType = .voice, gatt: Bool = false, calleeDecode: UInt8? = nil, fragments: Bool = false,
+                          bmh3: Bool = false, wifi: WifiCallAgent.Config? = nil)
         throws -> (CallEngine, CallEngine, Pipe, [CallEngine.Event], [CallEngine.Event]) {
         let callerId = SoftwareSigningIdentity(), calleeId = SoftwareSigningIdentity()
         let transport: MeshTransport = gatt ? .gatt : .l2cap
+        var callerOptions: Bmh3CallOptions?
+        var calleeOptions: Bmh3CallOptions?
+        if bmh3 {
+            var offer = DiscoveryAnnouncement(nodeIdPrefix: calleeId.nodeId.prefix,
+                                              flags: DiscoveryAnnouncement.flagAcceptingConnections | DiscoveryAnnouncement.flagPrivateCallAvailable,
+                                              capabilitySummary: 1 | Bmh3Choice.hintBit, streamToken: 0, routeCost: 0)
+            offer.rotating = false
+            callerOptions = Bmh3CallOptions(pseudonyms: false, selected: offer)
+            calleeOptions = Bmh3CallOptions(pseudonyms: false)
+        }
         let caller = CallEngine(role: .caller, transport: transport, identity: callerId, requestedType: type, encodeMask: vp9, decodeMask: vp9,
-                                expectedPeerPrefix: calleeId.nodeId.prefix, videoFragments: fragments)
+                                expectedPeerPrefix: calleeId.nodeId.prefix, videoFragments: fragments, wifi: wifi, bmh3: callerOptions)
         let callee = CallEngine(role: .callee, transport: transport, identity: calleeId, requestedType: .video, encodeMask: vp9, decodeMask: calleeDecode ?? vp9,
-                                videoFragments: fragments)
+                                videoFragments: fragments, wifi: wifi, bmh3: calleeOptions)
         return (caller, callee, Pipe(caller, callee, gatt: gatt), [], [])
     }
 
@@ -100,6 +111,82 @@ final class EngineTests: XCTestCase {
         XCTAssertFalse(calleeEvents.contains { if case .incomingCall = $0 { return true }; return false }, "it never rang")
         XCTAssertEqual(caller.phase, .closed)
         XCTAssertTrue(caller.closeReason?.contains("busy") == true, caller.closeReason ?? "-")
+    }
+
+    /// Order (Android): the block gate runs before busy, so a busy phone declines a blocked caller silently after the
+    /// human-like delay instead of answering BUSY at once.
+    func testABusyPhoneDeclinesABlockedCallerSilentlyAfterTheDelay() throws {
+        let (caller, callee, pipe, _, _) = try makeCall()
+        callee.callGate = { _ in .declineBlockedPerson }
+        callee.declineAsBusy = true
+        callee.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        XCTAssertEqual(callee.silentDecline, .declineBlockedPerson)
+        XCTAssertFalse(callee.declinedBusy, "the block gate wins over BUSY")
+        XCTAssertEqual(caller.state?.phase, .outgoingRinging)
+        try pipe.advance(3.5)
+        XCTAssertNotEqual(caller.state?.phase, .ended)
+        try pipe.advance(1)
+        XCTAssertEqual(caller.state?.phase, .ended)
+        XCTAssertTrue(caller.closeReason?.contains("rejected") == true, caller.closeReason ?? "-")
+    }
+
+    private func declineRun(silent: Bool, callerId: SoftwareSigningIdentity,
+                            calleeId: SoftwareSigningIdentity) throws -> ([CallEngine.Event], String?) {
+        let caller = CallEngine(role: .caller, transport: .l2cap, identity: callerId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                expectedPeerPrefix: calleeId.nodeId.prefix)
+        let callee = CallEngine(role: .callee, transport: .l2cap, identity: calleeId, requestedType: .video, encodeMask: vp9, decodeMask: vp9)
+        var events: [CallEngine.Event] = []
+        caller.onEvent = { events.append($0) }
+        if silent {
+            callee.callGate = { _ in .declineBlockedPerson }
+            callee.blockedEndDelay = { 4 }
+        }
+        let pipe = Pipe(caller, callee)
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        if silent {
+            try pipe.advance(4)
+        } else {
+            try pipe.advance(4)
+            try callee.decline(.rejected)
+            try pipe.pump()
+        }
+        return (events, caller.closeReason)
+    }
+
+    /// Wire equivalence: a gate's silent decline and a person declining at 4 s give the caller the same call records.
+    /// Link capacity reports are timing telemetry, not part of the call's control records.
+    func testASilentBlockedDeclineAndAManualDeclineLookTheSameToTheCaller() throws {
+        let callerId = SoftwareSigningIdentity(), calleeId = SoftwareSigningIdentity()
+        let silent = try declineRun(silent: true, callerId: callerId, calleeId: calleeId)
+        let manual = try declineRun(silent: false, callerId: callerId, calleeId: calleeId)
+        let records: (CallEngine.Event) -> Bool = { if case .peerReport = $0 { return false }; return true }
+        XCTAssertEqual(silent.0.filter(records), manual.0.filter(records), "the caller sees the same call records")
+        XCTAssertEqual(silent.1, manual.1)
+    }
+
+    /// An older peer that still sends a call subject (kind 3): the engine decodes and drops it, and the call connects.
+    func testAnOlderPeersCallSubjectIsDroppedAndTheCallStillConnects() throws {
+        let callerId = SoftwareSigningIdentity(), calleeId = SoftwareSigningIdentity()
+        let caller = CallEngine(role: .caller, transport: .l2cap, identity: callerId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                expectedPeerPrefix: calleeId.nodeId.prefix, labels: CallLabelOptions(localName: "Asha"))
+        let callee = CallEngine(role: .callee, transport: .l2cap, identity: calleeId, requestedType: .video, encodeMask: vp9, decodeMask: vp9,
+                                labels: CallLabelOptions(localName: "Ravi"))
+        let pipe = Pipe(caller, callee)
+        var calleeEvents: [CallEngine.Event] = []
+        callee.onEvent = { calleeEvents.append($0) }
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        XCTAssertEqual(callee.state?.phase, .incomingRinging)
+        calleeEvents.removeAll()
+        let callId = try XCTUnwrap(callee.state?.callId)
+        let subject = try SignedLabelCodec.sign(identity: callerId, kind: .callSubject, binding: .call(callId), text: "Water at the school")
+        caller.enqueue(.content(.labels, 0, try SignedLabelCodec.encodeContainer([subject])), .control)
+        try pipe.pump()
+        XCTAssertNil(callee.labelInbox.text(.callSubject), "a received subject is never shown")
+        XCTAssertTrue(calleeEvents.isEmpty, "and produces no event")
+        try callee.accept(as: .voice); try pipe.pump()
+        XCTAssertEqual(callee.state?.phase, .active)
+        XCTAssertEqual(caller.state?.phase, .active)
     }
 
     /// Glare (Android DialCollision): only the person being dialled rings while a dial still looks for its person.
@@ -272,6 +359,25 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(callerEvents.contains(.remoteCamera(false)))
     }
 
+    /// Android CallHeadOfLine (user launch): a direct GATT call negotiates video fragments; an L2CAP call, a relayed call
+    /// and the control arm do not. A large keyframe arrives whole every time.
+    func testHeadOfLineFragmentsOnlyDirectGattCalls() throws {
+        for (gatt, enabled) in [(true, true), (false, true), (true, false)] {
+            let fragments = CallHeadOfLine.videoFragments(enabled: enabled, transport: gatt ? .gatt : .l2cap, relayHops: 0)
+            let (caller, callee, pipe, _, _) = try makeCall(type: .video, gatt: gatt, fragments: fragments)
+            var videos: [MediaPacket] = []
+            callee.onEvent = { if case .remoteVideo(let p) = $0 { videos.append(p) } }
+            try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+            try callee.accept(as: .video); try pipe.pump()
+            XCTAssertEqual(caller.peerAcceptsFragments, gatt && enabled, "gatt \(gatt) enabled \(enabled)")
+            let big = Data((0..<9000).map { UInt8($0 % 251) })
+            XCTAssertTrue(caller.sendVideo(flags: StreamProtocol.flagKeyFrame, presentationTimeUs: 1, payload: big))
+            try pipe.pump()
+            XCTAssertEqual(videos.first?.payload, big, "gatt \(gatt) enabled \(enabled)")
+        }
+        XCTAssertFalse(CallHeadOfLine.videoFragments(enabled: true, transport: .gatt, relayHops: 1), "relayed calls send whole frames")
+    }
+
     func testDeclineCancelTimeoutsAndCodecMismatch() throws {
         do {
             let (caller, callee, pipe, _, _) = try makeCall()
@@ -408,6 +514,80 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(q.push(item(), .audio)); XCTAssertTrue(q.push(item(), .control))
         XCTAssertEqual(q.droppedVideoFrames, 5)
         XCTAssertEqual(q.count, 3)
+    }
+
+    /// Mac -> M31 renewal: after BIND the first video on the new link is a key frame: frames queued before it are
+    /// dropped (codec configuration and rotation stay) and deltas wait for the key frame.
+    func testARenewalRestartsTheVideoQueueAtTheNextKeyFrame() throws {
+        var q = OutboundQueues()
+        func item(_ key: Bool = false, keep: Bool = false) -> OutboundItem {
+            var i = OutboundItem(kind: .raw(Data([1])), enqueuedAt: 0, isKeyFrame: key, closeAfter: false); i.keep = keep; return i
+        }
+        XCTAssertTrue(q.push(item(true), .video)); XCTAssertTrue(q.push(item(), .video)); XCTAssertTrue(q.push(item(), .video))
+        XCTAssertTrue(q.push(item(keep: true), .video))
+        q.restartVideoAtKeyFrame()
+        XCTAssertEqual(q.droppedVideoFrames, 3, "the queued key frame and its deltas are dropped")
+        XCTAssertEqual(q.count, 1, "the kept item stays")
+        XCTAssertFalse(q.push(item(), .video), "a delta waits for the key frame")
+        XCTAssertTrue(q.push(item(true), .video), "the requested key frame is sent first")
+        XCTAssertTrue(q.push(item(), .video), "then its deltas")
+    }
+
+    func testTheEngineRenewalReassertRestartsVideoAtTheKeyFrame() throws {
+        let (caller, callee, pipe, _, _) = try makeCall(type: .video, fragments: false)
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        try callee.accept(as: .video); try pipe.pump()
+        XCTAssertTrue(caller.sendVideo(flags: StreamProtocol.flagKeyFrame, presentationTimeUs: 1, payload: Data(repeating: 3, count: 100)))
+        XCTAssertTrue(caller.sendVideo(flags: 0, presentationTimeUs: 2, payload: Data(repeating: 4, count: 100)))
+        let dropped = caller.queues.droppedVideoFrames
+        caller.renewalReassert()
+        XCTAssertGreaterThan(caller.queues.droppedVideoFrames, dropped, "queued video from before the bind is dropped")
+        XCTAssertFalse(caller.sendVideo(flags: 0, presentationTimeUs: 3, payload: Data(repeating: 5, count: 100)),
+                       "a delta before the requested key frame is not sent")
+        XCTAssertTrue(caller.sendVideo(flags: StreamProtocol.flagKeyFrame, presentationTimeUs: 4, payload: Data(repeating: 6, count: 100)))
+    }
+
+    func testWithTheWifiGateOffNoWifiRecordIsSent() throws {
+        let (caller, callee, pipe, _, _) = try makeCall(type: .video, fragments: true)
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        try callee.accept(as: .video); try pipe.pump()
+        XCTAssertTrue(caller.sendVideo(flags: StreamProtocol.flagKeyFrame, presentationTimeUs: 1, payload: Data(repeating: 3, count: 9000)))
+        try pipe.pump()
+        XCTAssertNil(caller.wifi)
+        XCTAssertNil(callee.wifi)
+    }
+
+    func testTwoAppleGuestsExchangeCapsAndStayOnBluetooth() throws {
+        let (caller, callee, pipe, _, _) = try makeCall(type: .video, fragments: true, bmh3: true, wifi: .init(directClient: true))
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        try callee.accept(as: .video); try pipe.pump()
+        try pipe.advance(1)
+        try pipe.advance(1)
+        XCTAssertNotNil(caller.wifi)
+        XCTAssertNotNil(callee.wifi)
+        XCTAssertTrue(caller.wifi?.capsSent == true)
+        XCTAssertTrue(callee.wifi?.capsSent == true)
+        XCTAssertFalse(caller.wifi?.binding ?? true, "no role tuple: no HOST attempt")
+        XCTAssertFalse(callee.wifi?.binding ?? true, "no role tuple: no HOST attempt")
+        XCTAssertFalse(caller.wifi?.carrierUp ?? true)
+        XCTAssertFalse(callee.wifi?.carrierUp ?? true)
+        let big = Data((0..<9000).map { UInt8($0 % 251) })
+        XCTAssertTrue(caller.sendVideo(flags: StreamProtocol.flagKeyFrame, presentationTimeUs: 1, payload: big))
+        try pipe.pump()
+        XCTAssertEqual(callee.receivedVideoPackets, 1)
+        XCTAssertFalse(caller.wifi?.wifiOver ?? true)
+        XCTAssertFalse(callee.wifi?.wifiOver ?? true)
+    }
+
+    func testAMalformedWifiRecordOnBluetoothEndsWifiNotTheCall() throws {
+        let (caller, callee, pipe, _, _) = try makeCall(type: .video, fragments: true, bmh3: true, wifi: .init(directClient: true))
+        try caller.start(now: 0); try callee.start(now: 0); try pipe.pump()
+        try callee.accept(as: .video); try pipe.pump()
+        try pipe.advance(1); try pipe.advance(1)
+        caller.wifi?.receivedOnBluetooth(Data([0, 1, 2, 3, 4]), now: 1)
+        XCTAssertEqual(caller.state?.phase, .active)
+        XCTAssertEqual(caller.phase, .open)
+        XCTAssertTrue(caller.wifi?.wifiOver == true)
     }
 }
 

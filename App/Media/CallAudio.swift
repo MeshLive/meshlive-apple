@@ -32,6 +32,10 @@ final class CallAudio {
     private static let control = DispatchQueue(label: "io.github.meshlive.app.audio.control", qos: .userInitiated)
     /// Other audio-session work (the ringer) runs here too, in order with call audio and off the main thread.
     static func onAudioControl(_ work: @escaping () -> Void) { control.async(execute: work) }
+    /// The route the control queue last read: `playsOnEarpiece` never touches `AVAudioSession` on the main thread.
+    static let earpieceNow = LatestValue(false)
+    /// The sound plays from the iPhone's earpiece now (not the speaker, headphones or a headset). Always false on the Mac.
+    static var playsOnEarpiece: Bool { earpieceNow.get() }
     private var control: DispatchQueue { CallAudio.control }
     /// Engine state for `logFields`, readable from any thread (the engine itself belongs to the control queue).
     private let stateLock = NSLock()
@@ -61,16 +65,31 @@ final class CallAudio {
     var onPlaybackFailed: ((String) -> Void)?
     /// Another app or the system took the audio (a phone call, Siri, an alarm): true when it began, false when it ended.
     var onInterruption: ((Bool) -> Void)?
+    /// Level meters (Android AudioLiveLevel): the RMS level of the captured and of the played sound, 0...1, on the main
+    /// thread every fifth 20 ms frame (100 ms). Set before `start`.
+    var onCaptureLevel: ((Double) -> Void)?
+    var onPlaybackLevel: ((Double) -> Void)?
+    private var captureLevelFrames = 0, playbackLevelFrames = 0
+    /// Listener Mute (Android radio listener): playout goes on silently; the link and the stream stay.
+    private(set) var playbackMuted = false
     private(set) var startedAtUptime: TimeInterval = 0
     private(set) var capturing = false
     private(set) var voiceProcessing = false
     let bitrate: Int
+    /// Which playback this is for the DEBUG `playback_gain` log line: "call", or "stream" (live and radio listening).
+    var playbackPath = "call"
+    private var gainLogged = false
     private(set) var route: Route
     private var observers: [NSObjectProtocol] = []
     private var wantCapture = false
     private var stopped = false
     private var restartPending = false
     private var bringUpGeneration = 0
+    /// The configuration-change observer belongs to one engine: registered when that engine is created, removed before
+    /// it is stopped and released. The handler never reads or captures the notification's object (AVAudioEngine can
+    /// post while it is being torn down); it compares `engineGeneration` on the control queue instead.
+    private var engineObserver: NSObjectProtocol?
+    private var engineGeneration = 0
     private var captureRetries = 0
     private var configurationRestarts: [TimeInterval] = []
     private var tapInstalled = false
@@ -241,12 +260,23 @@ final class CallAudio {
         warmEngine = nil; warmedAt = nil
         let engine = warm ?? AVAudioEngine(), player = AVAudioPlayerNode()
         self.engine = engine; self.player = player
+        engineGeneration += 1
+        let generation = engineGeneration
+        engineObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+            self?.control.async {
+                guard let self, generation == self.engineGeneration, self.engine != nil, !self.stopped else { return }
+                AppLog.event("audio_engine_configuration_change", ["running": "\(self.engine?.isRunning ?? false)", "capture": "\(self.capturing)"])
+                self.restart("engine configuration change")
+            }
+        }
         if capture && voiceProcessing && warm == nil { try engine.inputNode.setVoiceProcessingEnabled(true) }
         #if os(macOS)
         player.volume = route == .speaker ? 1 : 0
         #endif
+        if playbackMuted { player.volume = 0 }
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format48)
+        applyDebugPlaybackGain(engine)
         if capture { try installTap(on: engine, voiceProcessing: voiceProcessing) }
         engine.prepare()
         try engine.start()
@@ -255,6 +285,18 @@ final class CallAudio {
         startPlayback(player)
         startedAtUptime = ProcessInfo.processInfo.systemUptime
         publish()
+    }
+
+    /// DEBUG `-NearbyPlaybackGain`: scales everything this engine plays (both routes, call and stream) at its main mixer,
+    /// after the player's own mute/route volume; session category, mode, routing and system volume are untouched. The mixer
+    /// belongs to the engine, so `resumeSameEngine` keeps the value. Release builds never set it.
+    private func applyDebugPlaybackGain(_ engine: AVAudioEngine) {
+        guard LabSwitch.isDebugBuild else { return }
+        let gain = LabSwitch.playbackGain()
+        engine.mainMixerNode.outputVolume = gain
+        guard !gainLogged else { return }
+        gainLogged = true
+        AppLog.info("playback_gain: applied=\(gain) | path=\(playbackPath)")
     }
 
     /// Reads the input format (it must be valid: 0 Hz means the session is still switching) and installs the tap.
@@ -324,17 +366,33 @@ final class CallAudio {
 
     private func tearDownEngine() {
         queue.sync { running = false; playGeneration += 1 }
+        if let engineObserver { NotificationCenter.default.removeObserver(engineObserver) }
+        engineObserver = nil; engineGeneration += 1
         if let engine, tapInstalled { engine.inputNode.removeTap(onBus: 0) }
         tapInstalled = false
         player?.stop(); engine?.stop()
+        // AVAudioEngine posts its IO configuration change from a block on a global queue that can still be running when
+        // the engine is released here (crash 2026-11-06 02:48, objc_release in AVAudioEngineImpl::IOUnitConfigurationChanged).
+        // Keep the stopped engine and player alive a few seconds so that block never meets a freed object.
+        CallAudio.retire([engine, player])
         engine = nil; player = nil; capturing = false; voiceProcessing = false
         queue.sync { scheduled = 0 }
         publish()
     }
 
+    /// Control queue only. Stopped audio objects are released 5 s later.
+    private static var retired: [AnyObject] = []
+    private static func retire(_ objects: [AnyObject?]) {
+        let kept = objects.compactMap { $0 }
+        guard !kept.isEmpty else { return }
+        retired.append(contentsOf: kept)
+        control.asyncAfter(deadline: .now() + 5) { retired.removeFirst(min(kept.count, retired.count)) }
+    }
+
     private func logSession(_ event: String) {
         #if os(iOS)
         let s = AVAudioSession.sharedInstance()
+        Self.earpieceNow.set(s.currentRoute.outputs.contains { $0.portType == .builtInReceiver })
         let outputs = s.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: "+")
         let inputs = s.currentRoute.inputs.map { $0.portType.rawValue }.joined(separator: "+")
         AppLog.event("audio_session", ["event": event, "category": s.category.rawValue, "mode": s.mode.rawValue, "rate": "\(s.sampleRate)",
@@ -342,6 +400,7 @@ final class CallAudio {
                                         "inputs": inputs.isEmpty ? "none" : inputs, "capture": "\(capturing)", "voiceProcessing": "\(voiceProcessing)",
                                         "engineRunning": "\(engine?.isRunning ?? false)", "outputVolume": String(format: "%.2f", s.outputVolume)])
         #else
+        Self.earpieceNow.set(false)
         AppLog.event("audio_session", ["event": event, "capture": "\(capturing)", "voiceProcessing": "\(voiceProcessing)",
                                        "engineRunning": "\(engine?.isRunning ?? false)"])
         #endif
@@ -353,30 +412,28 @@ final class CallAudio {
         let center = NotificationCenter.default
         #if os(iOS)
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
-            guard let self else { return }
-            let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init) ?? .began
-            AppLog.event("audio_interruption", ["type": type == .began ? "began" : "ended"])
-            self.onInterruption?(type == .began)
-            if type == .ended { self.control.async { self.restart("interruption ended") } }
-        })
-        observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
-            let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
-            AppLog.event("audio_route_change", ["reason": "\(reason)"])
-            self?.control.async { self?.logSession("route_change") }
-        })
-        observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
-            AppLog.event("audio_media_services_reset")
-            self?.control.async { self?.restart("media services reset") }
-        })
-        #endif
-        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { [weak self] note in
-            guard let engine = note.object as? AVAudioEngine else { return }
-            self?.control.async {
-                guard let self, engine === self.engine else { return }
-                AppLog.event("audio_engine_configuration_change", ["running": "\(engine.isRunning)", "capture": "\(self.capturing)"])
-                self.restart("engine configuration change")
+            MainStall.run("CallAudio.interruption") {
+                guard let self else { return }
+                let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init) ?? .began
+                AppLog.event("audio_interruption", ["type": type == .began ? "began" : "ended"])
+                self.onInterruption?(type == .began)
+                if type == .ended { self.control.async { self.restart("interruption ended") } }
             }
         })
+        observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+            MainStall.run("CallAudio.routeChange") {
+                let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+                AppLog.event("audio_route_change", ["reason": "\(reason)"])
+                self?.control.async { self?.logSession("route_change") }
+            }
+        })
+        observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+            MainStall.run("CallAudio.mediaServicesReset") {
+                AppLog.event("audio_media_services_reset")
+                self?.control.async { self?.restart("media services reset") }
+            }
+        })
+        #endif
     }
 
     /// Debounced (300 ms, coalesced) so a burst of route/configuration changes restarts once, after the
@@ -399,7 +456,7 @@ final class CallAudio {
     }
 
     private func encode(_ buffer: AVAudioPCMBuffer) {
-        guard running, let resampler, let encoder else { return }
+        guard running, !stateLock.withLock({ stopRequested }), let resampler, let encoder else { return }
         counters.tapBuffers += 1
         if counters.tapBuffers == 1 { AppLog.event("audio_capture_first_buffer", ["frames": "\(buffer.frameLength)", "rate": "\(buffer.format.sampleRate)"]) }
         guard let samples = try? resampler.convert(buffer) else { counters.encodeErrors += 1; return }
@@ -407,6 +464,13 @@ final class CallAudio {
         let clock = clockStart
         for (pts, frame) in framer.append(samples, captureTimeUs: { Int64((ProcessInfo.processInfo.systemUptime - clock) * 1_000_000) }) {
             counters.capturedFrames += 1
+            if onCaptureLevel != nil {
+                captureLevelFrames += 1
+                if captureLevelFrames % 5 == 0 {
+                    let value = captureEnabled ? AudioLiveLevel.rms(frame) : 0
+                    DispatchQueue.main.async { self.onCaptureLevel?(value) }
+                }
+            }
             guard captureEnabled else { counters.mutedFrames += 1; continue }
             let n = frame.withUnsafeBufferPointer { f in out.withUnsafeMutableBufferPointer { o in nearby_opus_encode(encoder, f.baseAddress, 960, o.baseAddress, Int32(o.count)) } }
             guard n > 0 else { counters.encodeErrors += 1; continue }
@@ -422,7 +486,7 @@ final class CallAudio {
     }
 
     private func scheduleNext(_ generation: Int) {
-        guard running, generation == playGeneration, let player, let decoder,
+        guard running, generation == playGeneration, !stateLock.withLock({ stopRequested }), let player, let decoder,
               let buffer = AVAudioPCMBuffer(pcmFormat: format48, frameCapacity: 960) else { return }
         buffer.frameLength = 960
         let out = buffer.floatChannelData![0]
@@ -441,6 +505,13 @@ final class CallAudio {
             let n = following.withUnsafeBytes { nearby_opus_decode_fec(decoder, $0.bindMemory(to: UInt8.self).baseAddress, Int32(following.count), out, 960) }
             if n != 960 { out.initialize(repeating: 0, count: 960) }
         }
+        if onPlaybackLevel != nil {
+            playbackLevelFrames += 1
+            if playbackLevelFrames % 5 == 0 {
+                let value = playbackMuted ? 0 : AudioLiveLevel.rms(Array(UnsafeBufferPointer(start: out, count: 960)))
+                DispatchQueue.main.async { self.onPlaybackLevel?(value) }
+            }
+        }
         scheduled += 1; counters.scheduledBuffers += 1
         player.scheduleBuffer(buffer) { [weak self] in
             guard let self else { return }
@@ -448,21 +519,35 @@ final class CallAudio {
         }
     }
 
-    var stats: String {
-        queue.sync { "jitter \(playout.bufferedMilliseconds) ms · underruns \(playout.underruns) · concealed \(playout.concealed)" }
+    private struct AudioStatsSnapshot {
+        var stats = "jitter 0 ms · underruns 0 · concealed 0"
+        var logFields: [String: String] = [:]
     }
 
-    /// Log fields: captured/encoded and received/decoded/played counts plus engine state.
-    var logFields: [String: String] {
-        let (c, played, underruns, late, jitter) = queue.sync { (counters, playout.played, playout.underruns, playout.late, playout.bufferedMilliseconds) }
-        let engine = stateLock.withLock { published }
-        return ["audioTapBuffers": "\(c.tapBuffers)", "audioCaptured": "\(c.capturedFrames)", "audioEncoded": "\(c.encodedPackets)",
-                "audioEncodeErrors": "\(c.encodeErrors)", "audioMutedFrames": "\(c.mutedFrames)",
-                "audioReceived": "\(c.receivedPackets)", "audioDecoded": "\(c.decodedPackets)", "audioDecodeErrors": "\(c.decodeErrors)",
-                "audioPlayed": "\(played)", "audioConcealed": "\(c.concealedFrames)", "audioSilent": "\(c.silentFrames)",
-                "audioUnderruns": "\(underruns)", "audioLate": "\(late)", "audioJitterMs": "\(jitter)", "audioFecRecovered": "\(c.fecRecovered)",
-                "audioEngine": engine.running ? "running" : "stopped", "audioCapture": "\(engine.capturing)", "audioVP": "\(engine.voiceProcessing)"]
+    /// The counters and playout are read on the audio queue; the UI reads this snapshot without ever waiting for it.
+    private let snapshot = LatestValue(AudioStatsSnapshot())
+
+    /// Recomputes the snapshot on the audio queue; a caller reads at most one request old.
+    func requestSnapshot() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let stats = "jitter \(playout.bufferedMilliseconds) ms · underruns \(playout.underruns) · concealed \(playout.concealed)"
+            let (c, played, underruns, late, jitter) = (counters, playout.played, playout.underruns, playout.late, playout.bufferedMilliseconds)
+            let engine = stateLock.withLock { self.published }
+            let fields = ["audioTapBuffers": "\(c.tapBuffers)", "audioCaptured": "\(c.capturedFrames)", "audioEncoded": "\(c.encodedPackets)",
+                          "audioEncodeErrors": "\(c.encodeErrors)", "audioMutedFrames": "\(c.mutedFrames)",
+                          "audioReceived": "\(c.receivedPackets)", "audioDecoded": "\(c.decodedPackets)", "audioDecodeErrors": "\(c.decodeErrors)",
+                          "audioPlayed": "\(played)", "audioConcealed": "\(c.concealedFrames)", "audioSilent": "\(c.silentFrames)",
+                          "audioUnderruns": "\(underruns)", "audioLate": "\(late)", "audioJitterMs": "\(jitter)", "audioFecRecovered": "\(c.fecRecovered)",
+                          "audioEngine": engine.running ? "running" : "stopped", "audioCapture": "\(engine.capturing)", "audioVP": "\(engine.voiceProcessing)"]
+            snapshot.set(AudioStatsSnapshot(stats: stats, logFields: fields))
+        }
     }
+
+    var stats: String { snapshot.get().stats }
+
+    /// Log fields: captured/encoded and received/decoded/played counts plus engine state.
+    var logFields: [String: String] { snapshot.get().logFields }
 
     func setRoute(_ route: Route) {
         control.async {
@@ -476,16 +561,29 @@ final class CallAudio {
         }
     }
 
+    /// Listener Mute: silent playout (the meter reads 0); Unmute restores the route's volume.
+    func setPlaybackMuted(_ muted: Bool) {
+        control.async {
+            self.playbackMuted = muted
+            #if os(macOS)
+            self.player?.volume = muted || self.route != .speaker ? 0 : 1
+            #else
+            self.player?.volume = muted ? 0 : 1
+            #endif
+            AppLog.event("audio_playback_mute", ["muted": "\(muted)"])
+        }
+    }
+
     /// Returns at once: nothing is encoded or played after this, and the engine is torn down on the control queue
     /// before any later instance starts its own.
     func stop() {
         stateLock.withLock { stopRequested = true }
-        queue.sync { running = false; playGeneration += 1 }
+        queue.async { self.running = false; self.playGeneration += 1 }
         control.async {
             self.stopped = true
             self.observers.forEach(NotificationCenter.default.removeObserver); self.observers.removeAll()
             if self.warmEngine != nil { AppLog.event("audio_prewarm", ["event": "discarded"]) }
-            self.warmEngine = nil; self.warmedAt = nil
+            CallAudio.retire([self.warmEngine]); self.warmEngine = nil; self.warmedAt = nil
             self.tearDownEngine()
             self.queue.sync {
                 if let encoder = self.encoder { nearby_opus_encoder_destroy(encoder) }

@@ -102,6 +102,36 @@ final class DesktopCallCompatibilityTests: XCTestCase {
         XCTAssertEqual(mac.endpoint?.peerNodeId, identity.nodeId)
     }
 
+    /// The Mac's shipped settings since 2026-11-04 (rotating IDs, hidden identities and pseudonyms on, Android
+    /// compatibility off): a default Android phone's rotating offer is accepted and called with a pseudonym, the
+    /// phone's real identity is revealed on answer, and an incoming stranger is answered as a pseudonym too.
+    func testShippedMacSettingsCallADefaultAndroidPhone() throws {
+        let shipped = DesktopCallCompatibility(enabled: false, rotatingIds: true, hiddenIdentities: true, pseudonyms: true)
+        XCTAssertTrue(shipped.acceptsRotating)
+        XCTAssertEqual(shipped.bmh3Options(selected: nil)?.pseudonyms, true, "answers strangers as a pseudonym")
+        let identity = SoftwareSigningIdentity()
+        let (selected, entry) = offer(for: identity, rotating: true)
+        let mac = caller(policy: shipped, selected: selected)
+        let android = callee(identity: identity, entry: entry, pseudonyms: true)
+        try mac.start(now: 0); try android.start(now: 0); pump(mac, android)
+        XCTAssertEqual(android.state?.phase, .incomingRinging, mac.closeReason ?? "")
+        XCTAssertTrue(mac.linkUsedBmh3)
+        XCTAssertTrue(mac.peerIsStranger)
+        try android.accept(as: .voice); pump(mac, android)
+        XCTAssertEqual(mac.state?.phase, .active, mac.closeReason ?? "")
+        XCTAssertEqual(mac.revealedPeer?.nodeId, identity.nodeId)
+    }
+
+    /// The control arm: with the trio turned off by DEBUG launch arguments and compatibility off, a rotating offer
+    /// is neither accepted nor called (the OFF arm of the 2026-11-04 Mac <-> Android test).
+    func testControlArmWithEverythingOffRefusesRotatingOffers() throws {
+        let off = DesktopCallCompatibility(enabled: false, rotatingIds: false, hiddenIdentities: false, pseudonyms: false)
+        let (selected, _) = offer(for: SoftwareSigningIdentity(), rotating: true)
+        XCTAssertFalse(off.acceptsRotating)
+        XCTAssertNil(off.rotatingOptions(selected: selected))
+        XCTAssertNil(off.bmh3Options(selected: selected))
+    }
+
     func testCopiedRotatingOfferFailsAuthentication() throws {
         let victim = SoftwareSigningIdentity()
         let (selected, entry) = offer(for: victim, rotating: true)

@@ -29,4 +29,12 @@ final class CallAlertTests: XCTestCase {
         XCTAssertFalse(CallAlertPolicy.shouldRequest(.launch, authorization: .notDetermined, alreadyAsked: false))
         XCTAssertTrue(CallAlertPolicy.statusText(.denied).contains("Settings"))
     }
+
+    func testNamesReachALockedScreenOnlyWhenTheUserAllowsIt() {
+        XCTAssertFalse(CallAlertPolicy.namesAllowed(showNamesOnLockScreen: false, previewsAlways: true),
+                       "previews always shown and the switch off: no name in the notification")
+        XCTAssertTrue(CallAlertPolicy.namesAllowed(showNamesOnLockScreen: true, previewsAlways: true))
+        XCTAssertTrue(CallAlertPolicy.namesAllowed(showNamesOnLockScreen: false, previewsAlways: false),
+                      "a locked device hides the text itself")
+    }
 }

@@ -18,6 +18,14 @@ public enum CallAlertPolicy {
     /// Android `MAX_PEER_NAME_CHARS`: a hostile label cannot fill the notification.
     public static let maxPeerNameCharacters = 40
 
+    /// Android "Show names on lock screen" (NotificationPrivacy, off by default): may a call or missed-call notification
+    /// carry a name? A locked device shows notification text only when the user's preview setting is "Always"; with
+    /// "When Unlocked" (the default) or "Never" it shows the placeholder, so the name is safe to include. With the
+    /// switch off and previews "Always", no name goes into the notification.
+    public static func namesAllowed(showNamesOnLockScreen: Bool, previewsAlways: Bool) -> Bool {
+        showNamesOnLockScreen || !previewsAlways
+    }
+
     public struct Content: Equatable {
         public let title: String
         public let body: String

@@ -51,6 +51,19 @@ public final class StreamViewerEngine: MeshConnection {
     private var endAckHeldSince: TimeInterval?
     public private(set) var audioPackets = 0
     public private(set) var videoPackets = 0
+    /// AB5: codecs 4 and 5 pass the receiver's access-unit gate, made from the stream header.
+    private var videoGate: AccessUnitGate?
+    private var lastGateKeyFrameRequest: TimeInterval = -1_000
+    /// A dropped access unit (`au_reject`): codec, rule, NAL type, payload bytes.
+    public var onAccessUnitRejected: ((AnnexBCodec, Int, Int, Int) -> Void)?
+    /// AW2 (Experimental, off): the Wi-Fi Direct guest of this stream hop (Design WF "Stream and relay hops"); nil while
+    /// the Wi-Fi switches are off or the parent did not sign a build tag of at least `WifiWire.firstRelease`.
+    public private(set) var wifi: WifiCallAgent?
+    private let wifiConfig: WifiCallAgent.Config?
+    public var onWifiRequest: ((WifiCallAgent.Request) -> Void)?
+    public var onWifiLog: ((String, [String: String]) -> Void)?
+    /// iPhone: the app is in the foreground (Android: the screen is on); otherwise a HOST gets DECLINE 1.
+    public var wifiForeground: () -> Bool = { true }
 
     /// - Parameters:
     ///   - expectedAdjacentPrefix: the advertiser's prefix from its offer (checked against the link and endpoint).
@@ -78,10 +91,12 @@ public final class StreamViewerEngine: MeshConnection {
     public init(transport: MeshTransport, identity: SigningIdentity, decodeMask: UInt8, expectedAdjacentPrefix: Data?,
                 expectedMediaSource: NodeId? = nil, maxChildren: UInt8 = 0, labels: Bool = false,
                 rotatingOffer: DiscoveryAnnouncement? = nil, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch,
-                expectAudioOnly: Bool = false, allowAudioOnly: Bool = false) {
+                openingEntries: [OpeningEntry] = [],
+                expectAudioOnly: Bool = false, allowAudioOnly: Bool = false, wifi: WifiCallAgent.Config? = nil) {
         self.expectAudioOnly = expectAudioOnly
         self.allowAudioOnly = allowAudioOnly
-        var caps = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: 0, decodeCodecMask: decodeMask & NodeCapabilities.codecMask,
+        wifiConfig = wifi
+        var caps = NodeCapabilities(transportMask: transport.capabilityBit, encodeCodecMask: 0, decodeCodecMask: decodeMask & NodeCapabilities.helloCodecMask,
                                     maxBitrateKbps: transport.maxVideoBitrateKbps, maxChildren: maxChildren)
         self.expectedMediaSource = expectedMediaSource
         self.rotatingOffer = rotatingOffer?.rotating == true ? rotatingOffer : nil
@@ -92,11 +107,20 @@ public final class StreamViewerEngine: MeshConnection {
         if self.rotatingOffer != nil { caps.transportMask |= NodeCapabilities.transportDiscoveryOpening }
         super.init(role: .responder, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: endpointCaps)
         arrivalMeter = ArrivalTrainMeter()
+        if wifi != nil {
+            // AW2 (Design WF "BMH2 hops"): a debug build signs release 11 as its link-hello build tag while a Wi-Fi switch
+            // is on, and keeps this hop's UW once; with the switches off nothing here runs and every byte is as before.
+            link.ownBuildTag = BuildTag(releaseKey: false, release: WifiWire.firstRelease)
+            link.deriveHopWifiKey = true
+        }
         if expectAudioOnly { link.maxIncomingCiphertextBytes = 4 * 1024 }
         expectedPeerPrefix = self.rotatingOffer == nil ? expectedAdjacentPrefix : nil
         if self.rotatingOffer != nil {
-            // This viewer advertised a fixed-prefix (compact v1) request, so it opens nothing: count 0.
-            discoveryOpeningEntries = { [] }
+            // Phase 1b item 4: the listener sends the role-2 entries pinned when the connection was accepted (its compact
+            // v2 request, on air or off air for less than 60 s); the caller evaluates the pins at accept. A viewer that
+            // advertised a fixed-prefix request (rotating IDs off) passes none and opens nothing: count 0.
+            let pinned = openingEntries.filter { $0.role == RotatingDiscoveryIds.roleViewerRequest }
+            discoveryOpeningEntries = { pinned }
             onDiscoveryOpening = { [weak self] entries in try self?.checkRotatingOpening(entries) }
         }
     }
@@ -126,9 +150,11 @@ public final class StreamViewerEngine: MeshConnection {
     public override func linkDidAuthenticate() { if let id = link.peerNodeId { onEvent?(.linkAuthenticated(id)) } }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
-        // After a passing rotating check the endpoint must be the link peer that opened the ID (hop-local rule).
+        // SEC-B2: on every hop (version 2 and 5) the end-to-end peer is the authenticated link peer, by node ID.
+        try StreamHopPeerBinding.require(role: .viewer, rotating: rotatingOffer != nil, link: link.peerNodeId, endpoint: session.peerNodeId)
+        // A rotating hop's link peer must also have opened the selected ID.
         if rotatingOffer != nil {
-            guard peerOpening != nil, session.peerNodeId == link.peerNodeId else { throw ProtocolError.authentication }
+            guard peerOpening != nil else { throw ProtocolError.authentication }
         }
         lastHeartbeatAt = now
         enqueue(.record(.linkHeartbeat, LinkHeartbeat.version1), .control)
@@ -136,6 +162,17 @@ public final class StreamViewerEngine: MeshConnection {
         if let linkPeer = link.peerNodeId {
             expectLabels = PeerLabelFeature.streamHopNegotiated(localEnabled: labelsEnabled, linkPeer: linkPeer,
                                                                 endpointPeer: session.peerNodeId, peer: session.peerCapabilities)
+        }
+        if let wifiConfig, link.wifiBuildTagGate {
+            // AW2: both link hellos carried the build tag, so the parent reads BWF1. The child sends CAPS first once the
+            // header arrived (tickOpen); a hop that cannot use Wi-Fi Direct sends it all clear.
+            let agent = WifiCallAgent(linkInitiator: false, uw: link.takeHopWifiKey(), peerSentMarker: true, config: wifiConfig,
+                                      streamChild: true)
+            agent.onRequest = { [weak self] request in self?.onWifiRequest?(request) }
+            agent.log = { [weak self] event, fields in self?.onWifiLog?(event, fields) }
+            agent.foreground = { [weak self] in self?.wifiForeground() ?? true }
+            wifi = agent
+            link.acceptWifi = true
         }
         if session.peerCapabilities.maxChildren > 0 {
             awaitingGrant = true
@@ -152,6 +189,31 @@ public final class StreamViewerEngine: MeshConnection {
     }
 
     public override func handleOpenRecord(_ record: SecureRecord) throws {
+        // AW2: with a Wi-Fi agent, type 16 goes to it, the parent's carrier-0 heartbeats (written once its hop machine
+        // runs) are dropped as Android's stream child drops them, and BME1 content passes the cutover before it is opened.
+        if let wifi {
+            switch record.type {
+            case .wifi:
+                wifi.receivedOnBluetooth(record.payload, now: now)
+                try deliverWifiContent([], now: now)
+                return
+            case .linkHeartbeat:
+                return
+            case .endToEndContent:
+                guard let endpoint else { throw ProtocolError.state("No endpoint") }
+                let sequence = try endpoint.opener.peekSequence(record.payload)
+                guard wifi.bluetoothVerdict(sequence: sequence) == .deliver else { return }
+                try handleStreamRecord(record)
+                wifi.delivered(sequence: sequence)
+                return
+            default:
+                break
+            }
+        }
+        try handleStreamRecord(record)
+    }
+
+    private func handleStreamRecord(_ record: SecureRecord) throws {
         guard let endpoint else { throw ProtocolError.state("No endpoint") }
         if awaitingGrant {
             guard record.type == .endToEndContent else { throw ProtocolError.state("Expected a forwarded-stream key grant") }
@@ -235,6 +297,9 @@ public final class StreamViewerEngine: MeshConnection {
             }
             guard endpointCapabilities.decodeCodecMask & mask != 0 else { throw ProtocolError.incompatible("This phone cannot decode stream codec \(decoded.codecId)") }
             self.header = decoded
+            videoGate = AnnexBCodec(codecId: decoded.codecId).map {
+                AccessUnitGate(codec: $0, headerMaxWidth: decoded.width, headerMaxHeight: decoded.height)
+            }
             onEvent?(.header(decoded))
             // Labels are verified once the stream ID is known (after the header).
             if let payload = pendingLabels, let source = mediaSourceNodeId {
@@ -260,7 +325,19 @@ public final class StreamViewerEngine: MeshConnection {
                 onEvent?(.rotation(degrees))
             } else {
                 videoPackets += 1
-                onEvent?(.video(packet))
+                if let gate = videoGate {
+                    switch gate.check(packet.payload, flags: packet.flags, nowMs: Int64((now * 1000).rounded())) {
+                    case .accept(let unit, _, _):
+                        onEvent?(.video(MediaPacket(flags: packet.flags, presentationTimeUs: packet.presentationTimeUs, payload: unit)))
+                    case .reject(let rule, let nalType, let bytes, _, _):
+                        onAccessUnitRejected?(gate.codec, rule, nalType, bytes)
+                        if now - lastGateKeyFrameRequest >= 0.75 { lastGateKeyFrameRequest = now; requestKeyFrame() }
+                    case .close(let reason):
+                        throw ProtocolError.incompatible("Unsupported \(gate.codec.label) stream: \(reason)")
+                    }
+                } else {
+                    onEvent?(.video(packet))
+                }
             }
         case .streamState:
             let state = try StreamLifecycleState(decoding: content.payload)
@@ -384,10 +461,12 @@ public final class StreamViewerEngine: MeshConnection {
         if now - lastReceiveAt > silentTimeout, endAckHeldSince == nil { finish("The stream link went silent", error: true); return }
         // Android's viewer loop: a full report when a new train was measured or an on-time report is due, 1 s apart.
         let trains = arrivalMeter?.trains ?? 0
-        let onTimeDue = Self.onTimeReportDue(enabled: onTimeReports, measured: linkMeasured || trains > 0, late: reportedLate,
+        // AW2: while the parent's media arrives on Wi-Fi the Bluetooth meter sees only heartbeats: report on time instead.
+        let readingWifi = wifi?.cutover.acceptWifi == true
+        let onTimeDue = Self.onTimeReportDue(enabled: onTimeReports, measured: !readingWifi && (linkMeasured || trains > 0), late: reportedLate,
                                              mediaArrived: receivedMediaBytes > onTimeReportedBytes, sinceLastReport: now - lastReportAt)
-        if trains > reportedTrains || onTimeDue, now - lastReportAt >= Self.capacityReportInterval {
-            let kbps = arrivalMeter?.estimateKbps(now: now) ?? 0
+        if (!readingWifi && trains > reportedTrains) || onTimeDue, now - lastReportAt >= Self.capacityReportInterval {
+            let kbps = readingWifi ? 0 : arrivalMeter?.estimateKbps(now: now) ?? 0
             if kbps > 0 || onTimeDue {
                 lastReportAt = now; onTimeReportedBytes = receivedMediaBytes; reportedTrains = trains
                 if kbps > 0 { linkMeasured = true; measuredReportsSent += 1; lastMeasuredKbps = kbps } else { onTimeReportsSent += 1 }
@@ -398,9 +477,84 @@ public final class StreamViewerEngine: MeshConnection {
             lastHeartbeatAt = now
             enqueue(.record(.linkHeartbeat, LinkHeartbeat.version1), .control)
         }
+        if let wifi {
+            // AW2 (Android HopCapsPlan STREAM_CHILD): CAPS once the first stream header arrived; only a direct video stream
+            // (BME1 records, not mesh envelopes, not audio only) offers Wi-Fi Direct.
+            wifi.hopEligible = wireMesh == false && audioLiveGuard == nil
+            wifi.tick(now: now, ready: header != nil || audioLiveHeader != nil, heartbeat: LinkHeartbeat.version1)
+            for record in wifi.takeBluetoothRecords() { enqueue(.record(.wifi, record.encoded()), .control) }
+            do { try deliverWifiContent([], now: now) } catch { fail(describe(error)); return }
+        }
     }
 
-    public override func didClose(reason: String, error: Bool) { onEvent?(.ended(reason, error: error)) }
+    public override func didClose(reason: String, error: Bool) {
+        wifi?.callEnded(now: now)
+        onEvent?(.ended(reason, error: error))
+    }
+
+    // MARK: AW2 Wi-Fi carrier (receive only: this side's own records stay on Bluetooth)
+
+    /// A RESUME (this side never moves its own direction) leaves on Bluetooth before any further output.
+    public override func carrierMarker() throws -> Data? {
+        guard let wifi, let endpoint, let marker = wifi.takeMarker(nextSequence: endpoint.sealer.nextSequence) else { return nil }
+        onWifiLog?("wifi_cutover", ["event": "marker_sent", "kind": "\(marker.kind)"])
+        return try link.seal(.wifi, marker.encoded())
+    }
+
+    /// Content the Wi-Fi carrier delivered, then held records the cutover releases; each is opened once, in order.
+    private func deliverWifiContent(_ records: [Data], now: TimeInterval) throws {
+        guard let wifi, let endpoint else { return }
+        applyWifiResync()
+        for bme1 in records {
+            let sequence = try endpoint.opener.peekSequence(bme1)
+            if wifi.wifiVerdict(sequence: sequence, record: bme1, now: now) == .deliver {
+                try handleStreamRecord(SecureRecord(type: .endToEndContent, payload: bme1))
+                wifi.delivered(sequence: sequence)
+            }
+        }
+        let released = wifi.takeReleased(now: now)
+        applyWifiResync()
+        for (sequence, bme1) in released {
+            try handleStreamRecord(SecureRecord(type: .endToEndContent, payload: bme1))
+            wifi.delivered(sequence: sequence)
+        }
+    }
+
+    /// After a fallback or a hold promotion while the parent's media was read from Wi-Fi a frame may be lost: ask the
+    /// parent for a keyframe (stream media has no fragments).
+    private func applyWifiResync() {
+        guard let wifi else { return }
+        if wifi.takeFragmentActions().suppressReceive { requestKeyFrame() }
+    }
+
+    public func wifiJoined(ticket: Data, local: IPv4Interface, all: [IPv4Interface], band: DirectGuestRules.Band, now: TimeInterval) {
+        self.now = now; wifi?.joined(ticket: ticket, local: local, all: all, band: band, now: now)
+    }
+    public func wifiJoinFailed(ticket: Data, reason: DeclineReason, detail: String, now: TimeInterval) {
+        self.now = now; wifi?.joinFailed(ticket: ticket, reason: reason, detail: detail, now: now)
+    }
+    public func wifiConnected(ticket: Data, now: TimeInterval) { self.now = now; wifi?.connected(ticket: ticket, now: now) }
+    public func wifiConnectFailed(ticket: Data, detail: String, now: TimeInterval) {
+        self.now = now; wifi?.connectFailed(ticket: ticket, detail: detail, now: now)
+    }
+    public func wifiSocketClosed(ticket: Data, detail: String, now: TimeInterval) {
+        self.now = now; wifi?.socketClosed(ticket: ticket, detail: detail, now: now)
+        applyWifiResync()
+    }
+    public func wifiSendState(oldestPendingSince: TimeInterval?, ticket: Data, now: TimeInterval) {
+        self.now = now; wifi?.socketSendState(oldestPendingSince: oldestPendingSince, ticket: ticket)
+    }
+    public func wifiReceive(_ data: Data, ticket: Data, now: TimeInterval) {
+        guard phase == .open, let wifi else { return }
+        self.now = now
+        do { try deliverWifiContent(wifi.receivedOnSocket(data, ticket: ticket, now: now), now: now) } catch { fail(describe(error)) }
+    }
+    /// The next bytes for the Wi-Fi socket: the binding frames and the carrier's own records (BIND, READY, heartbeats).
+    public func nextWifiOutgoing(now: TimeInterval) -> Data? {
+        guard let wifi else { return nil }
+        self.now = now
+        return wifi.takeSocketBytes()
+    }
 }
 
 /// Broadcasting to one viewer: link and endpoint initiator (central). Direct BME1 records, or mesh
@@ -436,9 +590,18 @@ public final class StreamSourceEngine: MeshConnection {
     public private(set) var shedAudioRecords = 0
     private var audioHealth: [(at: TimeInterval, queued: Int, shed: Int)] = []
 
+    /// - Parameters:
+    ///   - selectedRequest: AB4: the viewer request this source dials. A rotating one (version 5 / compact v2) is checked
+    ///     by its role-2 opening (PROTOCOL phase 1b item 4) instead of `expectedViewerPrefix`; nil or a version 2 request
+    ///     keeps the prefix check exactly as before.
+    ///   - wallEpoch: this device's wall epoch, the reference of the opening's two-epoch window (RD4).
     public init(transport: MeshTransport, identity: SigningIdentity, header: StreamHeader, expectedViewerPrefix: Data?, streamId: UUID = UUID(),
                 labels: Bool = false, title: String? = nil, rotatingEntries: (() -> [OpeningEntry])? = nil,
-                linkPacing: Bool = false, seedProbeKbps: Int? = nil, audioLive: AudioLiveSigner? = nil) {
+                linkPacing: Bool = false, seedProbeKbps: Int? = nil, audioLive: AudioLiveSigner? = nil,
+                selectedRequest: DiscoveryAnnouncement? = nil, wallEpoch: @escaping () -> Int64 = RotatingDiscoveryIds.currentWallEpoch) {
+        let rotatingRequest = selectedRequest?.rotating == true ? selectedRequest : nil
+        self.rotatingRequest = rotatingRequest
+        self.wallEpoch = wallEpoch
         self.seedProbeKbps = seedProbeKbps
         self.audioLive = audioLive
         let streamId = audioLive?.streamId ?? streamId
@@ -448,23 +611,49 @@ public final class StreamSourceEngine: MeshConnection {
         self.header = header; sourceNodeId = identity.nodeId; self.streamId = streamId
         labelsEnabled = labels; labelsTitle = title
         let endpointCaps = PeerLabelFeature.advertise(caps, enabled: labels)
-        // EXPERIMENTAL rotating stream offers (phase 1b): the connector sends its pinned role-1 entries in BDO1.
-        if rotatingEntries != nil { caps.transportMask |= NodeCapabilities.transportDiscoveryOpening }
+        // EXPERIMENTAL rotating stream offers (phase 1b): the connector sends its pinned role-1 entries in BDO1. A selected
+        // rotating request needs the link opening too (with no entries of its own the connector sends count 0).
+        if rotatingEntries != nil || rotatingRequest != nil { caps.transportMask |= NodeCapabilities.transportDiscoveryOpening }
         super.init(role: .initiator, transport: transport, identity: identity, linkCapabilities: caps, endpointCapabilities: endpointCaps)
-        expectedPeerPrefix = expectedViewerPrefix
-        if let rotatingEntries { discoveryOpeningEntries = rotatingEntries }
+        expectedPeerPrefix = rotatingRequest == nil ? expectedViewerPrefix : nil
+        if let rotatingEntries { discoveryOpeningEntries = rotatingEntries } else if rotatingRequest != nil { discoveryOpeningEntries = { [] } }
+        if rotatingRequest != nil { onDiscoveryOpening = { [weak self] entries in try self?.checkRotatingRequest(entries) } }
         if linkPacing { pacer = makePacer() }
     }
     /// This phone's own fresh measurement of the transport (nil: the conservative prior).
     public let seedProbeKbps: Int?
+    /// AB4: the selected viewer request when it is rotating (its six bytes are the viewer's role-2 RDI), else nil.
+    public let rotatingRequest: DiscoveryAnnouncement?
+    private let wallEpoch: () -> Int64
+    /// AB4: the result of the role-2 opening check of a rotating request (the app logs `rotid_open`).
+    public var onOpeningChecked: ((DiscoverySelectionCheck.Result) -> Void)?
+
+    /// AB4 (PROTOCOL phase 1b item 4, RV15, RD4): the viewer's BDO1 must hold a role-2 entry that recomputes to the six
+    /// selected bytes from the authenticated link node, within two epochs of this device's wall epoch.
+    private func checkRotatingRequest(_ entries: [OpeningEntry]) throws {
+        guard let selected = rotatingRequest, let peer = link.peerNodeId else { throw ProtocolError.authentication }
+        let result = DiscoverySelectionCheck.check(selected: selected, expectedRole: RotatingDiscoveryIds.roleViewerRequest, peerNodeId: peer.bytes,
+                                                   openingEntries: entries, verifierWallEpoch: wallEpoch())
+        onOpeningChecked?(result)
+        guard result == .pass else { throw ProtocolError.authentication }
+    }
 
     public override func validateLinkPeer() throws {
         guard let caps = link.peerCapabilities else { return }
-        if let expectedPeerPrefix, link.peerNodeId?.prefix != expectedPeerPrefix { throw ProtocolError.authentication }
+        if rotatingRequest != nil {
+            // A selected rotating request: the viewer must sign bit 3 and open its ID; it never falls back to a prefix.
+            guard caps.transportMask & NodeCapabilities.transportDiscoveryOpening != 0 else { throw ProtocolError.authentication }
+        } else if let expectedPeerPrefix, link.peerNodeId?.prefix != expectedPeerPrefix { throw ProtocolError.authentication }
         if caps.maxChildren > 1 { throw ProtocolError.incompatible("Group-relay (BGK1) viewers are not supported on iPhone") }
     }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
+        // SEC-B2: on every hop (version 2 and 5) the end-to-end peer is the authenticated link peer, by node ID.
+        try StreamHopPeerBinding.require(role: .source, rotating: rotatingRequest != nil, link: link.peerNodeId, endpoint: session.peerNodeId)
+        // AB4: a rotating request's link peer must also have opened it (hop-local rule).
+        if rotatingRequest != nil {
+            guard peerOpening != nil else { throw ProtocolError.authentication }
+        }
         guard audioLive != nil || session.peerCapabilities.decodeCodecMask & StreamProtocol.capabilityMask(codecId: header.codecId) != 0 else {
             throw ProtocolError.incompatible("Final receiver cannot decode the stream codec")
         }
@@ -606,4 +795,134 @@ public final class StreamSourceEngine: MeshConnection {
     }
 
     public override func didClose(reason: String, error: Bool) { onEvent?(.ended(reason, error: error)) }
+}
+
+// MARK: - Viewer admission bounds (Android PreAuthAdmissionGate, Design QV review 1 R3)
+
+/// A key table whose entries expire, with a hard size cap (Android `BoundedExpiringMap`): a write at the cap first drops
+/// expired entries, then the entry that would expire soonest; a read drops an expired entry. Not thread-safe.
+public struct BoundedExpiringTable<Value> {
+    private var entries: [String: (until: TimeInterval, value: Value)] = [:]
+    public let maxEntries: Int
+
+    public init(maxEntries: Int) { self.maxEntries = maxEntries }
+
+    public var count: Int { entries.count }
+
+    public mutating func put(_ key: String, _ value: Value, until: TimeInterval, now: TimeInterval) {
+        entries[key] = nil
+        if entries.count >= maxEntries { sweep(now: now) }
+        while entries.count >= maxEntries, let soonest = entries.min(by: { $0.value.until < $1.value.until })?.key {
+            entries[soonest] = nil
+        }
+        entries[key] = (until, value)
+    }
+
+    /// The value while it has not expired (an expired entry is removed on the way).
+    public mutating func get(_ key: String, now: TimeInterval) -> Value? {
+        guard let entry = entries[key] else { return nil }
+        if now >= entry.until { entries[key] = nil; return nil }
+        return entry.value
+    }
+
+    /// The value whether or not it expired (callers that judge expiry themselves).
+    public func peek(_ key: String) -> Value? { entries[key]?.value }
+
+    public mutating func sweep(now: TimeInterval) { entries = entries.filter { now < $0.value.until } }
+
+    public mutating func clear() { entries = [:] }
+}
+
+/// Pre-authentication admission of viewer requests at a source (Android `PreAuthAdmissionGate`, on; DEBUG control arm
+/// `-viewerAdmissionBounds NO`). A crowd, or a flood of requests with fresh keys (new changing IDs or addresses), must not
+/// hold the source's fan-out slots:
+/// - at most `attemptsPerWindow(fanOut:)` = max(4, fan-out) new pre-authentication attempts start per 10 s; the others
+///   are deferred to the next discovery update, never refused;
+/// - requests are tried oldest key first (when this source first saw the key); a real viewer keeps its key while fake
+///   keys come and go, so it soon is the oldest;
+/// - a key whose attempt failed before authentication sorts after untried keys for 10 s, but is never excluded;
+/// - a route-recovery request (it names its previous parent) goes first and is not counted;
+/// - both tables are capped at 512 keys and expire (seen 30 s, failure 10 s).
+/// It decides only the order and the pace of connection attempts: every admitted viewer still authenticates. Times are
+/// seconds on one monotonic clock; the owner calls it on one queue.
+public final class ViewerAdmissionGate {
+    public static let window: TimeInterval = 10
+    public static let minAttemptsPerWindow = 4
+    public static let seenTTL: TimeInterval = 30
+    public static let failurePenalty: TimeInterval = 10
+    public static let maxTracked = 512
+
+    /// A source admitting a whole group at once still dials every free slot in one window.
+    public static func attemptsPerWindow(fanOut: Int) -> Int { max(minAttemptsPerWindow, fanOut) }
+
+    /// Android `recoveryPreviousSenderKey`: a request is a route recovery (tried first, not counted) only when the child
+    /// it names is a viewer this source holds now and is not the requester itself. The request's own flag is an
+    /// unauthenticated claim: alone it never skips the bound.
+    public static func isRecovery(requester: Data, namedChild: Data?, children: Set<Data>) -> Bool {
+        guard let namedChild else { return false }
+        return namedChild != requester && children.contains(namedChild)
+    }
+
+    private var firstSeen = BoundedExpiringTable<TimeInterval>(maxEntries: maxTracked)
+    private var failures = BoundedExpiringTable<Bool>(maxEntries: maxTracked)
+    private var attempts: [TimeInterval] = []
+    private let enabled: () -> Bool
+
+    public init(enabled: @escaping () -> Bool = { true }) { self.enabled = enabled }
+
+    public var trackedKeys: Int { firstSeen.count + failures.count }
+
+    /// How many new pre-authentication attempts may start now.
+    public func allowance(now: TimeInterval, fanOut: Int) -> Int {
+        attempts.removeAll { now - $0 >= Self.window }
+        return max(0, Self.attemptsPerWindow(fanOut: fanOut) - attempts.count)
+    }
+
+    /// Orders `candidates` (recovery requests first, then untried before recently failed, then oldest key first, then
+    /// as listed) and keeps the recovery requests plus at most `allowance` others; the rest are deferred. Off: all are
+    /// chosen, as listed.
+    public func select<P>(_ candidates: [P], key: (P) -> String, isRecovery: (P) -> Bool, fanOut: Int,
+                          now: TimeInterval) -> (chosen: [P], deferred: [P]) {
+        guard enabled() else { return (candidates, []) }
+        for candidate in candidates {
+            let k = key(candidate)
+            firstSeen.put(k, firstSeen.peek(k) ?? now, until: now + Self.seenTTL, now: now)
+        }
+        failures.sweep(now: now)
+        let ranked = candidates.enumerated().map { index, candidate in
+            (candidate: candidate, recovery: isRecovery(candidate) ? 0 : 1, failed: failures.peek(key(candidate)) == nil ? 0 : 1,
+             since: firstSeen.peek(key(candidate)) ?? now, index: index)
+        }.sorted { a, b in
+            if a.recovery != b.recovery { return a.recovery < b.recovery }
+            if a.failed != b.failed { return a.failed < b.failed }
+            if a.since != b.since { return a.since < b.since }
+            return a.index < b.index
+        }
+        var left = allowance(now: now, fanOut: fanOut)
+        var chosen: [P] = [], deferred: [P] = []
+        for entry in ranked {
+            if entry.recovery == 0 {
+                chosen.append(entry.candidate)
+            } else if left > 0 {
+                chosen.append(entry.candidate); left -= 1
+            } else {
+                deferred.append(entry.candidate)
+            }
+        }
+        return (chosen, deferred)
+    }
+
+    /// A non-recovery connection attempt started.
+    public func noteAttempt(now: TimeInterval) {
+        guard enabled() else { return }
+        attempts.append(now)
+    }
+
+    /// The attempt for `key` ended before the viewer authenticated.
+    public func noteFailure(_ key: String, now: TimeInterval) {
+        guard enabled() else { return }
+        failures.put(key, true, until: now + Self.failurePenalty, now: now)
+    }
+
+    public func clear() { firstSeen.clear(); failures.clear(); attempts.removeAll() }
 }

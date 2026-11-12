@@ -243,6 +243,8 @@ public final class StreamForwarderEngine: MeshConnection {
     }
 
     public override func endpointDidAuthenticate(_ session: EndToEndSession) throws {
+        // SEC-B2: the child's end-to-end peer is its authenticated link peer (forwarder offers are version 2 here).
+        try StreamHopPeerBinding.require(role: .forwarder, rotating: false, link: link.peerNodeId, endpoint: session.peerNodeId)
         guard audioOnly || session.peerCapabilities.decodeCodecMask & StreamProtocol.capabilityMask(codecId: codecId) != 0 else {
             throw ProtocolError.incompatible("The child cannot decode the stream codec")
         }

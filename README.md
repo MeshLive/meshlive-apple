@@ -11,7 +11,7 @@ No internet, no SIM, no account.
 <br/>
 
 <p>
-  <img alt="iOS 16+" src="https://img.shields.io/badge/iOS-16%2B-000000?style=flat&logo=apple&logoColor=white" />
+  <img alt="iOS 17+" src="https://img.shields.io/badge/iOS-17%2B-000000?style=flat&logo=apple&logoColor=white" />
   <img alt="macOS 14+ on Apple Silicon" src="https://img.shields.io/badge/macOS-14%2B%20Apple%20Silicon-000000?style=flat&logo=apple&logoColor=white" />
   <img alt="License GPLv3" src="https://img.shields.io/badge/License-GPLv3-FF3B30?style=flat&logo=gnu&logoColor=white" />
   <a href="https://github.com/MeshLive/meshlive-apple/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/MeshLive/meshlive-apple?style=flat&color=FF3B30&labelColor=181717&logo=github" /></a>
@@ -92,12 +92,12 @@ livestream or call hops from device to device, so the more people around you use
 
 | Platform | Status |
 | --- | --- |
-| iPhone (iOS 16+) | Build it yourself (no App Store or TestFlight build yet). Tested in the iPhone simulator; not yet on a real iPhone. |
-| Mac (Apple Silicon, macOS 14+) | Build it yourself. Experimental native app: voice and video calls with Android phones work in both directions. |
+| iPhone (iOS 17+) | Build it yourself (no App Store or TestFlight build yet). Voice and video calls with Android phones and with a Mac, watching livestreams and adding contacts were tested on an iPhone 12 in November 2026. |
+| Mac (Apple Silicon, macOS 14+) | Build it yourself. Experimental native app: voice and video calls with an iPhone and with Android phones work in both directions. |
 | Android 10+ | Available: [meshlive-android](https://github.com/MeshLive/meshlive-android) |
 | Windows | Beta: [meshlive-windows](https://github.com/MeshLive/meshlive-windows/releases/latest) |
 
-Android phones list iPhones and Macs when their Advanced setting "Experimental: find iPhones" is on; see
+Android phones list iPhones and Macs by default (Settings > Advanced > Connection > Find iPhones); see
 [Talking to Android phones](docs/user-guide.md#talking-to-android-phones).
 
 ### Build it yourself

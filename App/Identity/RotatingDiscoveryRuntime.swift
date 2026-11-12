@@ -7,10 +7,16 @@ import NearbyCore
 final class RotatingDiscoveryRuntime {
     private let defaults = DesktopPreview.preferences
     let pins = OpeningPins()
+    /// Phase 1b: a waiting viewer's role-2 request, its boundary rotation and its own pins (separate from the call role's).
+    let viewerRequest = RotatingViewerRequest()
+    /// AB4 (Experimental, `-rotatingSource`): this device's own rotating stream offer, its boundary rotation and its
+    /// role-1 pins (separate from the call role's and the viewer role's).
+    let streamOffer = RotatingStreamOffer()
     let tarpit = StrangerTarpit()
     private var clock: DiscoveryEpochClock
 
     init() {
+        RotatingDiscoveryRuntime.applyDebugEpochLength()
         let state = (defaults.data(forKey: "rotatingEpochClock")).flatMap { try? JSONDecoder().decode(EpochClockState.self, from: $0) } ?? EpochClockState()
         let defaults = self.defaults
         clock = DiscoveryEpochClock(state: state, bootId: RotatingDiscoveryRuntime.bootId) { s in
@@ -21,6 +27,18 @@ final class RotatingDiscoveryRuntime {
 
     static var nowMs: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
     static var elapsedMs: Int64 { Int64(ProcessInfo.processInfo.systemUptime * 1000) }
+
+    /// AB4: DEBUG `-NearbyRotidEpochS <60...900>` (Android `test_rotid_epoch_s`), read once per process before the epoch
+    /// clock loads its state. Release builds never read it (`RootView.debugArgument` is nil there, and
+    /// `DiscoveryEpochLength` refuses a non-DEBUG build). Give the other phone of the test the same value.
+    private static var epochLengthChecked = false
+    static func applyDebugEpochLength() {
+        guard !epochLengthChecked else { return }
+        epochLengthChecked = true
+        guard let value = RootView.debugArgument("-NearbyRotidEpochS") else { return }
+        let applied = DiscoveryEpochLength.set(Int64(value) ?? 0, debugBuild: LabSwitch.isDebugBuild, started: false)
+        AppLog.event("rotid_epoch_s", ["requested": value, "epochSeconds": "\(RotatingDiscoveryIds.epochSeconds)", "applied": "\(applied)"])
+    }
 
     /// Boot identifier (kern.boottime): monotonic time is comparable only within one boot.
     static var bootId: String {

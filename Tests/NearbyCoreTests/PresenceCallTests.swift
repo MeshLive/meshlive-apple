@@ -84,6 +84,35 @@ final class PresenceCallTests: XCTestCase {
         XCTAssertTrue(a.stored.isEmpty && b.stored.isEmpty)
         XCTAssertTrue(a.delivered.isEmpty && b.delivered.isEmpty, "an offer that is not answered by an offer gets no lease")
     }
+
+    /// AB3 (Windows WP6N real-key screen): a caller whose callee showed the real key of someone it blocked sends that
+    /// person no OFFER and no LEASE and stores none of theirs, even when both are verified contacts and the callee offers.
+    func testABlockedRealKeyCalleeGetsNoPresenceAndGivesNone() throws {
+        let (a, b) = mutual()
+        a.dayKeys = DayKeyWindow.fresh(epoch: epoch); b.dayKeys = DayKeyWindow.fresh(epoch: epoch)
+        let entry = PresenceLeases.ownEntry(dayKeys: b.dayKeys, nodeId: b.id.nodeId.bytes, epoch: epoch, role: 0)!
+        var offer = DiscoveryAnnouncement(nodeIdPrefix: entry.rdi, flags: DiscoveryAnnouncement.flagAcceptingConnections | DiscoveryAnnouncement.flagPrivateCallAvailable,
+                                          capabilitySummary: 1, streamToken: 0, routeCost: 0)
+        offer.rotating = true
+        let e = epoch
+        var callerRotating = RotatingCallOptions(selected: offer, wallEpoch: { e }); callerRotating.presence = a.hooks(epoch: epoch)
+        var calleeRotating = RotatingCallOptions(entries: { [entry] }, wallEpoch: { e }); calleeRotating.presence = b.hooks(epoch: epoch)
+        let caller = CallEngine(role: .caller, transport: .gatt, identity: a.id, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                rotating: callerRotating)
+        let callee = CallEngine(role: .callee, transport: .gatt, identity: b.id, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
+                                rotating: calleeRotating)
+        caller.personBlocked = { $0 == b.id.fingerprint }
+        caller.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, caller.closeReason ?? callee.closeReason ?? "")
+        XCTAssertTrue(caller.blockedAfterReveal)
+        try callee.accept(as: .voice); pump(caller, callee)
+        XCTAssertEqual(callee.presenceOffersSent, 1, "the callee offered")
+        XCTAssertEqual(caller.presenceOffersSent, 0, "no OFFER to a blocked person")
+        XCTAssertEqual(caller.presenceLeasesSent, 0, "no LEASE to a blocked person")
+        XCTAssertEqual(caller.presenceLeasesStored, 0, "nothing of theirs is stored")
+        XCTAssertTrue(a.delivered.isEmpty && a.stored.isEmpty && b.stored.isEmpty)
+    }
 }
 
 /// Phase 2 + BMH3: a recognised contact is called with the lease-derived tag, so both sides present real keys even in

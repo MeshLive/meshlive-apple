@@ -16,7 +16,10 @@ public enum CrashReport {
     public static let keepSeconds: TimeInterval = 7 * 24 * 3600
 
     public static let promptTitle = "MeshLive closed unexpectedly"
-    public static let promptText = "Share a crash report? It lists where the app failed, its version and the device model. It has no names, messages, keys or IDs, and you choose where to send it."
+    /// Android `crash_prompt_text` ("the phone model"; "the Mac model" on a Mac).
+    public static func promptText(mac: Bool) -> String {
+        "Share a crash report? It lists where the app failed, its version and the \(mac ? "Mac" : "phone") model. It has no names, messages, keys or IDs, and you choose where to send it."
+    }
 
     /// One text per crash in a MetricKit diagnostic payload (`MXDiagnosticPayload.jsonRepresentation()`); [] when it
     /// holds no crash or cannot be read.
@@ -78,16 +81,22 @@ public enum CrashReport {
         return name.isEmpty ? "?" : name
     }
 
-    /// Free text from the system: paths, long hex or digit runs (addresses, IDs) and e-mail-like strings removed.
+    /// Free text from the system, as Android's crash filter: links, e-mail-like strings, UUIDs, Bluetooth addresses,
+    /// paths, quoted text, long hex or digit runs and long key-like runs are replaced.
     public static func scrub(_ text: String) -> String {
         var out = text.replacingOccurrences(of: "\n", with: " ")
         let rules: [(String, String)] = [
+            (#"https?://\S+"#, "<url>"),
             (#"[\w.+-]+@[\w-]+\.[\w.-]+"#, "<email>"),
-            (#"(~|/)[^\s,;:]*/[^\s,;:]*"#, "<path>"),
             (#"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"#, "<id>"),
+            (#"\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b"#, "<address>"),
+            (#"(~|/)[^\s,;:]*/[^\s,;:]*"#, "<path>"),
+            (#""[^"\n]*""#, "\"<text>\""),
+            (#"'[^'\n]*'"#, "'<text>'"),
             (#"0x[0-9A-Fa-f]+"#, "<hex>"),
             (#"\b[0-9A-Fa-f]{8,}\b"#, "<hex>"),
             (#"\d{6,}"#, "<number>"),
+            (#"(?=[A-Za-z0-9+/=_-]*\d)[A-Za-z0-9+/=_-]{20,}"#, "<data>"),
         ]
         for (pattern, replacement) in rules {
             out = out.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)

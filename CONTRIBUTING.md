@@ -85,6 +85,9 @@ The working rules for people and coding agents are in [AGENTS.md](AGENTS.md).
 MeshLive for iPhone is licensed under **GPL-3.0-or-later** ([LICENSE](LICENSE)). Contributions are accepted under the
 same licence, and you keep your copyright. Copyright lines read "The MeshLive Authors" ([AUTHORS](AUTHORS)).
 
+By contributing you agree that your contribution is licensed under GPL-3.0-or-later with the additional permission in
+[LICENSE-EXCEPTION.md](LICENSE-EXCEPTION.md).
+
 - Sign off every commit with `git commit -s`. That adds a `Signed-off-by:` line and certifies the
   [Developer Certificate of Origin 1.1](https://developercertificate.org/).
 - Do not copy code, assets, test media or protocol text from another project unless its licence is compatible with

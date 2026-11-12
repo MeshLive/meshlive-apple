@@ -15,6 +15,9 @@ protocol MeshLink: AnyObject {
     var onWritable: (() -> Void)? { get set }
     /// Bytes accepted by `send` but not yet handed to Core Bluetooth / the stream.
     var queuedBytes: Int { get }
+    /// When a data write last actually left this side (a GATT value written or notification accepted, stream bytes
+    /// written), on the system uptime clock; nil before the first. The in-call link renewal's "own writes complete".
+    var lastWriteAt: TimeInterval? { get }
     /// CoreBluetooth's per-peer identifier of the remote device (stable for this device's view of the peer while its
     /// address does not change); nil when unknown. Used only as a local rate-limit key, never sent or logged.
     var peerIdentifier: UUID? { get }
@@ -31,15 +34,28 @@ extension MeshLink {
 }
 #endif
 
+extension MeshLink {
+    var lastWriteAt: TimeInterval? { nil }
+}
+
 /// GATT lost-chunk fail-fast (Android ChunkGapPolicy, `test_gatt_gap_fast_fail`, on): a gap held 1 s or behind 128
 /// later chunks ends the link with its reason. Control arm for tests only: launch argument `-gattGapFastFail NO`.
 enum GattLinkSettings {
     static var gapFastFail: Bool { LabSwitch.read("gattGapFastFail", shipped: true) }
-    /// EXPERIMENTAL GR1 lost-chunk recovery (Android `test_gatt_chunk_recovery`, off): `-gattChunkRecovery YES`.
-    static var chunkRecovery: Bool { LabSwitch.read("gattChunkRecovery", shipped: false) }
+    /// GR1 lost-chunk recovery (Android `gattChunkRecovery`, on since 2026-10-21). Control arm for tests only: launch
+    /// argument `-gattChunkRecovery NO` (no history, no type-2 values; the fail-fast alone).
+    static var chunkRecovery: Bool { LabSwitch.read("gattChunkRecovery", shipped: true) }
     /// EXPERIMENTAL aligned values (Android `test_gatt_aligned_writes`, off): ATT values of whole 251-octet LE data PDUs
     /// (495 instead of 512). `-gattAlignedValues YES`; read when a link opens.
     static var alignedValues: Bool { LabSwitch.read("gattAlignedValues", shipped: false) }
+    /// EXPERIMENTAL client write pacing (`-gattWriteBurst N`, off = 0; DEBUG builds only, as every lab switch): the
+    /// central writes at most N data values per 10 ms window (`GattWritePacer`) instead of filling CoreBluetooth's whole
+    /// write queue. A full queue delayed the peer's notifications (GR1 NACKs) by 0.5-0.9 s on a Mac -> Android video
+    /// call. Read when a client link opens.
+    static var writeBurst: Int { storedWriteBurst(in: .standard) }
+    static func storedWriteBurst(in store: UserDefaults, debugBuild: Bool = LabSwitch.isDebugBuild) -> Int {
+        max(0, LabSwitch.integer("gattWriteBurst", shipped: 0, in: store, debugBuild: debugBuild))
+    }
 }
 
 /// GR1 for one GATT link: the recovery object, its 50 ms timer, and the shared receive/timer steps.
@@ -84,6 +100,7 @@ final class L2CAPLink: NSObject, PausableMeshLink, StreamDelegate {
     /// Keeps the owning connection (central side) alive for the channel's lifetime.
     var onRelease: (() -> Void)?
     var queuedBytes: Int { writer.queuedBytes }
+    private(set) var lastWriteAt: TimeInterval?
     var readingPaused = false {
         didSet {
             guard oldValue, !readingPaused else { return }
@@ -109,7 +126,9 @@ final class L2CAPLink: NSObject, PausableMeshLink, StreamDelegate {
     private func drain() throws {
         try writer.drain { data in
             guard !closed, channel.outputStream.hasSpaceAvailable else { return 0 }
-            return data.withUnsafeBytes { raw in channel.outputStream.write(raw.bindMemory(to: UInt8.self).baseAddress!, maxLength: raw.count) }
+            let written = data.withUnsafeBytes { raw in channel.outputStream.write(raw.bindMemory(to: UInt8.self).baseAddress!, maxLength: raw.count) }
+            if written > 0 { lastWriteAt = ProcessInfo.processInfo.systemUptime }
+            return written
         }
     }
 
@@ -158,6 +177,8 @@ final class GattClientLink: MeshLink {
     let peripheral: CBPeripheral
     var peerIdentifier: UUID? { peripheral.identifier }
     private let write: CBCharacteristic
+    /// EXPERIMENTAL write pacing (`-gattWriteBurst N`, off = 0), read when the link opens.
+    private var pacer = GattWritePacer(burst: GattLinkSettings.writeBurst)
     private var chunker = GattChunkWriter()
     private let aligned = GattLinkSettings.alignedValues
     private var reader = GattChunkReader(failFast: GattLinkSettings.gapFastFail)
@@ -177,11 +198,22 @@ final class GattClientLink: MeshLink {
     #endif
     var onRelease: (() -> Void)?
     var queuedBytes: Int { pendingBytes }
+    private(set) var lastWriteAt: TimeInterval?
+
+    /// The notify characteristic this link subscribed to (notifications of another instance on the same peripheral are
+    /// not this link's).
+    var notifyCharacteristic: CBCharacteristic?
+    /// Design SR, offerer over the existing connection: closing this (old) link unsubscribes it but keeps the LE
+    /// connection, which the renewed link then uses.
+    var keepConnectionOnClose = false
+    /// The data service instance this link writes to.
+    var service: CBService? { write.service }
 
     init(peripheral: CBPeripheral, write: CBCharacteristic, label: String) {
         self.peripheral = peripheral; self.write = write; self.label = label
         let limit = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        AppLog.event("gatt_values", ["link": "client", "limit": "\(limit)", "value": "\(GattChunk.valueBytes(valueLimit: limit, aligned: aligned))", "aligned": "\(aligned)"])
+        AppLog.event("gatt_values", ["link": "client", "limit": "\(limit)", "value": "\(GattChunk.valueBytes(valueLimit: limit, aligned: aligned))", "aligned": "\(aligned)",
+                                     "writeBurst": "\(pacer.burst)"])
         if let recovery = GattLinkRecovery.make(label: "client") {
             self.recovery = recovery; reader.recovery = recovery.core
             recovery.start(valueLimit: peripheral.maximumWriteValueLength(for: .withoutResponse)) { [weak self] in self?.recoveryTick() }
@@ -201,8 +233,19 @@ final class GattClientLink: MeshLink {
             // GR1 control values and resends go ahead of new data.
             if let control = recovery?.core.nextPriorityValue(now: now) { peripheral.writeValue(control, for: write, type: .withoutResponse); continue }
             guard let value = pending.first else { break }
+            // EXPERIMENTAL pacing: at most N data values per 10 ms window, whoever pumps; one resume at a time.
+            guard pacer.mayWrite(now: now) else {
+                if let delay = pacer.scheduleResume(now: now) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        guard let self else { return }
+                        self.pacer.resumeFired(); self.pump()
+                    }
+                }
+                return
+            }
             peripheral.writeValue(value, for: write, type: .withoutResponse)
             pending.removeFirst(); pendingBytes -= value.count
+            lastWriteAt = now
             recovery?.core.onDataSent(sequence: GattLinkRecovery.sequence(of: value), value: value, now: now)
         }
         if pending.isEmpty { onWritable?() }
@@ -247,7 +290,11 @@ final class GattClientLink: MeshLink {
 
     func fail(_ reason: String) { guard !closed else { return }; shutdown(); onClosed?(reason) }
     func close() { guard !closed else { return }; shutdown() }
-    private func shutdown() { closed = true; recovery?.stop(); pending.removeAll(); pendingBytes = 0; onRelease?(); onRelease = nil }
+    private func shutdown() {
+        closed = true; recovery?.stop(); pending.removeAll(); pendingBytes = 0
+        if keepConnectionOnClose, let notify = notifyCharacteristic, peripheral.state == .connected { peripheral.setNotifyValue(false, for: notify) }
+        onRelease?(); onRelease = nil
+    }
 }
 
 /// Android GATT byte stream as a peripheral (iPhone hosts c8d5a105): central writes in, notifications out.
@@ -280,6 +327,13 @@ final class GattServerLink: MeshLink {
     #endif
     var onRelease: (() -> Void)?
     var queuedBytes: Int { pendingBytes }
+    private(set) var lastWriteAt: TimeInterval?
+    /// Not closed yet (a renewal never takes a central that still holds a live server link).
+    var isOpen: Bool { !closed }
+    /// Design SR: a renewal connection (its own first HELLO is never a new stream).
+    var isRenewal = false
+    /// The peer's GR1 HELLO arrived on this link (a later HELLO starts a new stream on the same connection).
+    var peerHelloSeen: Bool { recovery?.core.peerHello != nil }
 
     init(central: CBCentral, manager: CBPeripheralManager, notify: CBMutableCharacteristic, label: String) {
         self.central = central; self.manager = manager; self.notify = notify; self.label = label
@@ -308,6 +362,7 @@ final class GattServerLink: MeshLink {
             guard let value = pending.first else { break }
             guard manager.updateValue(value, for: notify, onSubscribedCentrals: [central]) else { return }
             pending.removeFirst(); pendingBytes -= value.count
+            lastWriteAt = now
             recovery?.core.onDataSent(sequence: GattLinkRecovery.sequence(of: value), value: value, now: now)
         }
         if pending.isEmpty { onWritable?() }
@@ -359,7 +414,10 @@ final class GattServerLink: MeshLink {
 /// link has little queued (so priority is decided late), runs timers and closes after a graceful finish.
 final class ConnectionDriver {
     let engine: MeshConnection
-    let link: MeshLink
+    /// Replaced only by an in-call link renewal (`replaceLink`).
+    private(set) var link: MeshLink
+    /// Design SR: the engine kept the call after its transport ended (a renewal owns it); nothing is pulled meanwhile.
+    private(set) var linkDown = false
     private var timer: Timer?
     private var closing = false
     #if os(macOS)
@@ -391,18 +449,52 @@ final class ConnectionDriver {
         onFinished = nil
     }
 
-    init(engine: MeshConnection, link: MeshLink) {
-        self.engine = engine; self.link = link
+    /// The driver's monotonic clock (system uptime; a test passes its own).
+    private let clock: () -> TimeInterval
+
+    init(engine: MeshConnection, link: MeshLink, clock: @escaping () -> TimeInterval = { ConnectionDriver.now }) {
+        self.engine = engine; self.link = link; self.clock = clock
+        bind(link)
+        // Design SR: "own writes still complete" is the current transport's completed writes, not records handed to it.
+        engine.writeProgress = { [weak self] in self?.link.lastWriteAt }
+    }
+
+    private func bind(_ link: MeshLink) {
         link.onBytes = { [weak self] data in
             guard let self else { return }
-            self.engine.receive(data, now: Self.now); self.pump()
+            self.engine.receive(data, now: self.clock()); self.pump()
         }
         link.onWritable = { [weak self] in self?.pump() }
-        link.onClosed = { [weak self] reason in
-            guard let self else { return }
-            AppLog.event("link_closed", ["link": self.link.label, "reason": reason, "rxBytes": "\(self.engine.receivedBytes)", "txBytes": "\(self.engine.sentBytes)"])
-            self.engine.linkLost(reason); self.finish(reason)
+        link.onClosed = { [weak self, weak link] reason in
+            guard let self, let link, link === self.link else { return }
+            AppLog.event("link_closed", ["link": link.label, "reason": reason, "rxBytes": "\(self.engine.receivedBytes)", "txBytes": "\(self.engine.sentBytes)"])
+            self.engine.linkLost(reason)
+            // Design SR: a renewal that owns the call keeps it (and this driver's timer) without a transport.
+            if self.engine.phase != .closed { self.linkDown = true; return }
+            self.finish(reason)
         }
+    }
+
+    private func unbind(_ link: MeshLink) { link.onBytes = nil; link.onWritable = nil; link.onClosed = nil }
+
+    /// Design SR, offerer: stops sending on the old link and closes it (the call goes on; nothing is pulled until
+    /// `replaceLink`).
+    func dropLink() {
+        unbind(link); link.close()
+        linkDown = true
+    }
+
+    /// Design SR: the call's engine now runs on `renewed` (its renewed hop link was adopted); the old link closes and
+    /// nothing that still arrives on it is read.
+    func replaceLink(_ renewed: MeshLink) {
+        let old = link
+        unbind(old)
+        link = renewed
+        bind(renewed)
+        linkDown = false
+        if old !== renewed { old.close() }
+        engine.processBufferedInput(now: clock())
+        pump()
     }
 
     static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
@@ -420,8 +512,8 @@ final class ConnectionDriver {
 
     /// - Parameter adopted: the engine took over an already authenticated link (no start, parse what it buffered).
     func start(adopted: Bool = false) {
-        if adopted { engine.processBufferedInput(now: Self.now) }
-        else { do { try engine.start(now: Self.now) } catch { engine.fail("\(error)") } }
+        if adopted { engine.processBufferedInput(now: clock()) }
+        else { do { try engine.start(now: clock()) } catch { engine.fail("\(error)") } }
         pump()
         #if os(macOS)
         // A synchronous setup/send failure may already have finished the driver in pump().
@@ -429,7 +521,7 @@ final class ConnectionDriver {
         #endif
         let tick: (Timer) -> Void = { [weak self] _ in
             guard let self else { return }
-            let now = Self.now
+            let now = self.clock()
             #if os(macOS)
             if let last = self.lastTickAt { self.maxTickGapMs = max(self.maxTickGapMs, Int((now - last) * 1000)) }
             self.lastTickAt = now
@@ -455,11 +547,16 @@ final class ConnectionDriver {
     func pump() {
         guard !closing else { return }
         guard !releaseFailedEngine() else { return }
+        if linkDown {
+            // A local hang-up during a renewal ends the call here at once (the peer ends at its own bound).
+            if engine.phase == .closed { closing = true; finish(engine.closeReason ?? "Closed") }
+            return
+        }
         // Stop reading while the engine holds input (call relay backpressure); resume once it parsed it.
         if let pausable = link as? PausableMeshLink, pausable.readingPaused != engine.ingressHeld {
             pausable.readingPaused = engine.ingressHeld
         }
-        while link.queuedBytes < Self.lowWater, let bytes = engine.nextOutgoing(now: Self.now) {
+        while link.queuedBytes < Self.lowWater, let bytes = engine.nextOutgoing(now: clock()) {
             link.send(bytes)
             #if os(macOS)
             guard !closing else { return }

@@ -8,7 +8,8 @@ import CryptoKit
 // L_d(e). Mutual verified contacts exchange 28 days of keys in an answered call (BDX1 OFFER + LEASE).
 
 public enum PresenceLeases {
-    public static let epochsPerDay: Int64 = 96
+    /// Epochs in one real-time day (96 at the release 900 s; a DEBUG short epoch keeps real days, Android `epochsPerDay`).
+    public static var epochsPerDay: Int64 { 86_400 / RotatingDiscoveryIds.epochSeconds }
     public static let daysPerDelivery = 28
     public static let leaseDomain = Data("BluetoothVideoMesh/Discovery/Lease/2".utf8) + Data([0])
 
@@ -69,7 +70,7 @@ public enum DayKeyWindow {
 
 /// What this phone stores for one contact's presence.
 public struct ContactPresence: Equatable {
-    public static let maxSkewEpochs: Int64 = 30 * PresenceLeases.epochsPerDay
+    public static var maxSkewEpochs: Int64 { 30 * PresenceLeases.epochsPerDay }
     public static let maxDaysKept = 32
     public let nodeId: Data
     public let generation: UInt32
@@ -167,7 +168,12 @@ public final class PresenceSession {
     public enum Action: Equatable { case sendOffer, sendLease, storeLease(DiscoveryExchange.PresenceLease), reject(String) }
     private let localEligible: Bool
     private var started = false, sentOffer = false, receivedOffer = false, sentLease = false, receivedLease = false
+    private var withheld = false
     public init(localEligible: Bool) { self.localEligible = localEligible }
+
+    /// Nothing more can move in this session: this side does not take part, withheld its OFFER, or has sent its lease and
+    /// received the peer's. A verification session (Design QL) ends shortly after this.
+    public var settled: Bool { !localEligible || withheld || (sentLease && receivedLease) }
 
     /// Once, when the call is answered. A peer that offered first gets the lease right after this side's OFFER.
     public func start() -> [Action] {
@@ -178,7 +184,7 @@ public final class PresenceSession {
     }
 
     /// The OFFER could not be sent after all: this side never offered, so it neither sends nor stores a lease.
-    public func offerWithheld() { sentOffer = false; sentLease = true }
+    public func offerWithheld() { sentOffer = false; sentLease = true; withheld = true }
 
     public func onRecord(_ record: DiscoveryExchange.Record, peerVerifiedNow: Bool) -> [Action] {
         switch record {

@@ -278,7 +278,7 @@ public final class PresenceVaultCore {
     /// Switch-offs fully stored in the vault (visible off, and no current lease left to revoke) leave the guard.
     private func clearStoredSwitchOffs() {
         guard let record = guardRecord, !record.switchOffPending.isEmpty, let current = state else { return }
-        let stored = Set(current.contacts.filter { !$0.value.canSeeMe && !current.holdsCurrentLease($0.key) }.keys.map(guardKey))
+        let stored = Set(current.contacts.filter { $0.value.canSeeMe == false && !current.holdsCurrentLease($0.key) }.keys.map(guardKey))
         let remaining = record.switchOffPending.filter { !stored.contains($0) }
         guard remaining != record.switchOffPending else { return }
         var cleared = record; cleared.switchOffPending = remaining
@@ -384,9 +384,18 @@ public final class PresenceVaultCore {
         return record.switchOffPending.contains(guardKey(peerHex))
     }
 
+    /// "Can see when I'm nearby": on only after the user answered yes and while no switch-off waits; not yet asked
+    /// counts as off (decision 2026-11-06).
     public func canSeeMe(_ peer: NodeId) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return !switchOffPending(peer.hex) && (state?.canSeeMe(peer.hex) ?? true)
+        return !switchOffPending(peer.hex) && (state?.canSeeMe(peer.hex) ?? false)
+    }
+
+    /// The user's answer for `peer`: false while a switch-off waits, nil while not yet asked.
+    public func answer(_ peer: NodeId) -> Bool? {
+        lock.lock(); defer { lock.unlock() }
+        if switchOffPending(peer.hex) { return false }
+        return state?.answer(peer.hex)
     }
 
     public func deliveredTo(_ peer: NodeId) -> Bool { lock.lock(); defer { lock.unlock() }; return state?.holdsCurrentLease(peer.hex) ?? false }
@@ -413,7 +422,9 @@ public final class PresenceVaultCore {
             }
             return nil
         }
-        guard current.canSeeMe(peer.hex), !pendingResetAll, !pendingForgets.contains(peer.hex) else { return nil }
+        // A stored no never gets a lease. A contact not yet asked is refused before this by the caller's eligibility
+        // (`canSeeMe`, which the app also passes in `verified`), as in every OFFER.
+        guard current.answer(peer.hex) != false, !pendingResetAll, !pendingForgets.contains(peer.hex) else { return nil }
         guard rollLocked(epoch), let rolled = state else { return nil }
         guard PresenceLeases.delivery(dayKeys: rolled.dayKeys, generation: rolled.generation, epoch: epoch) != nil else { return nil }
         guard mutate({ s in
@@ -459,7 +470,7 @@ public final class PresenceVaultCore {
         _ = updateGuard(revokeGeneration: revoke ? state?.generation : nil, switchOff: (peer.hex, !on))
         guard let current = state else { return failClosed(revoke: !on) }
         if revoke { return bumpLocked(reason: "contact_switch_off") }
-        if current.canSeeMe(peer.hex) != on {
+        if current.answer(peer.hex) != on {
             _ = mutate { s in
                 var record = s.contacts[peer.hex] ?? PresenceVaultState.ContactRecord()
                 record.canSeeMe = on

@@ -4,6 +4,18 @@ import NearbyCore
 #if canImport(NearbyMedia)
 import NearbyMedia
 #endif
+#if os(macOS)
+import CoreLocation
+import CoreWLAN
+#endif
+
+#if os(macOS)
+/// AW1: the one Location authorisation ask of the Mac "Join Wi-Fi Direct groups" switch.
+private final class WifiLocationDelegate: NSObject, CLLocationManagerDelegate {
+    var onAuthorization: ((CLAuthorizationStatus) -> Void)?
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) { onAuthorization?(manager.authorizationStatus) }
+}
+#endif
 
 struct PersonRow: Identifiable, Equatable {
     let id: UUID
@@ -15,13 +27,15 @@ struct PersonRow: Identifiable, Equatable {
     /// Experimental relayed calls : an on-demand route through helpers, dialled at `hopRowId`.
     var relayRoute: RelayRoute? = nil
     var hopRowId: UUID? = nil
+    /// Android copied-ID warning: this rotating ID is heard from more than one phone at once (local only, never sent).
+    var copiedId = false
     /// One plain sentence: where the person is, never technical words.
     var routeText: String {
         if let relayRoute {
             // A reach page is a hint, not proof of identity (Android people_reach_relayed).
             return relayRoute.relays == 1 ? "Via 1 phone \u{00B7} not confirmed" : "Via \(relayRoute.relays) phones \u{00B7} not confirmed"
         }
-        let place = relays == 0 ? "Nearby" : relays == 1 ? "Through 1 other phone" : "Through \(relays) other phones"
+        let place = relays == 0 ? "Nearby" : relays == 1 ? "Via 1 phone" : "Via \(relays) phones"
         return label.handle.isEmpty ? place : "\(place), ID \(label.shortHandle)"
     }
 }
@@ -32,6 +46,8 @@ struct StreamRow: Identifiable, Equatable {
     let announcement: DiscoveryAnnouncement
     /// Public title page (unconfirmed until the signed title arrives after joining).
     var advertisedTitle: String? = nil
+    /// Android `supportsAdvertisedCodec` (`StreamPlayability`): false shows "This phone can't play it" and greys the row.
+    var playable = true
     var title: String { advertisedTitle.map { "\($0) (unconfirmed)" } ?? "Live from \(label.title)" }
     /// "direct" / "via 2 phones", plus Paused/Full when they apply.
     var detail: String {
@@ -42,6 +58,8 @@ struct StreamRow: Identifiable, Equatable {
     var route: String { announcement.routeCost == 0 ? "direct" : "via \(announcement.routeCost) phone\(announcement.routeCost == 1 ? "" : "s")" }
     var paused: Bool { announcement.flags & DiscoveryAnnouncement.flagStreamPaused != 0 }
     var full: Bool { announcement.isFullStreamOffer }
+    /// Android: a full or unplayable row cannot be opened (and recovery never picks it).
+    var joinable: Bool { playable && !full }
     /// Experimental audio-only live ("radio"): the offer carries the 0x40 marker (unauthenticated hint; the
     /// signed BTL1 header must agree when joining).
     var audioOnly: Bool { announcement.isAudioOnlyOffer }
@@ -57,6 +75,7 @@ final class AppModel: ObservableObject {
     @Published var people: [PersonRow] = []
     @Published var streams: [StreamRow] = []
     @Published var streamNotice: String?
+    @Published var liveNotice: LiveNotice?
     let streamRoutePenalties = StreamRoutePenalties()
     let audioRelayMemory = AudioLiveRelayMemory()
     @Published var call: CallController? {
@@ -81,8 +100,59 @@ final class AppModel: ObservableObject {
     }
     /// Settings > Safety "Quick wipe: triple-tap the status line" (off by default, as Android).
     @Published var quickWipeGesture = AppSettings.quickWipeGesture { didSet { AppSettings.quickWipeGesture = quickWipeGesture } }
+    /// AW1 (Experimental, off): "Use Wi-Fi for faster connections".
+    @Published var wifiCarrier = AppSettings.wifiCarrier { didSet { AppSettings.wifiCarrier = wifiCarrier } }
+    /// AW1 (Experimental, off): "Join Wi-Fi Direct groups" (Apple joins an Android host; it never hosts).
+    @Published var wifiDirect = AppSettings.wifiDirect {
+        didSet {
+            AppSettings.wifiDirect = wifiDirect
+            #if os(macOS)
+            if wifiDirect && !oldValue { requestLocationForWifi() }
+            #endif
+        }
+    }
+    /// A Settings notice shown at the top of Connection (for example the Mac Location refusal).
+    @Published var settingsNotice: String?
+    #if os(macOS)
+    private let wifiLocation = CLLocationManager()
+    private let wifiLocationDelegate = WifiLocationDelegate()
+    #endif
+    /// AW1: both switches on and this platform can join a Wi-Fi Direct group now.
+    var wifiDirectClientPossible: Bool {
+        guard wifiCarrier, wifiDirect else { return false }
+        #if os(iOS)
+        #if HOTSPOT_ENTITLED
+        return true
+        #else
+        return false
+        #endif
+        #else
+        let status = wifiLocation.authorizationStatus
+        let authorized = status == .authorizedAlways || status == .authorized
+        return authorized && CWWiFiClient.shared().interface()?.powerOn() == true
+        #endif
+    }
+    #if os(macOS)
+    /// Asks for Location once when the Wi-Fi Direct switch goes on; a refusal leaves the switch off.
+    private func requestLocationForWifi() {
+        switch wifiLocation.authorizationStatus {
+        case .notDetermined: wifiLocation.requestWhenInUseAuthorization()
+        case .denied, .restricted:
+            wifiDirect = false
+            settingsNotice = "MeshLive needs Location to find Wi-Fi Direct networks on a Mac. It never reads your location."
+        default: break
+        }
+    }
+    #endif
     /// Set by three quick taps on a tab header (when the quick wipe is on): the root view asks to erase.
     @Published var askQuickWipe = false
+    #if os(macOS)
+    /// Mac Wi-Fi advice (Android withWifiCheck): the alert, the call or stream waiting for its answer, and the return from
+    /// System Settings (`askWifiAdvice` and `answerWifiAdvice` in Desktop/MeshLiveApp.swift).
+    @Published var wifiAdviceShown = false
+    var wifiAdviceAction: (() -> Void)?
+    var wifiResumeObserver: NSObjectProtocol?
+    #endif
     /// Local incoming-call alerts (notification permission), shown in Settings.
     @Published var callAlerts: CallAlertPolicy.Authorization = .notDetermined
     private var notifierConfigured = false
@@ -93,11 +163,18 @@ final class AppModel: ObservableObject {
         CallNotifier.shared.configure(model: self)
     }
     /// The app left or regained the front while a call may ring (inactive or background).
-    func appActivityChanged() { CallNotifier.shared.update(for: call) }
+    func appActivityChanged() {
+        MainStall.run("AppModel.appActivityChanged") {
+            reloadBlockListIfNeeded()
+            reconcileBlockedPresenceIfNeeded()
+        }
+        MainStall.run("CallNotifier.update") { CallNotifier.shared.update(for: call) }
+    }
     @Published var wiped = false
-    /// Generated nearby names (Android names-v2) on iPhone and Mac, on by default as on Android.
+    /// Generated nearby names (Android names-v2) on iPhone and Mac: always on, no Settings switch since 2026-11-04.
+    /// A DEBUG launch argument or fixture may change it for one run; nothing is stored.
     @Published var desktopGeneratedNames = AppSettings.desktopGeneratedNames {
-        didSet { AppSettings.desktopGeneratedNames = desktopGeneratedNames; rebuildLists(); refreshAdvertising() }
+        didSet { rebuildLists(); refreshAdvertising() }
     }
     /// The generated name of this device's own advertised rotating ID (what people nearby see), or nil.
     @Published private(set) var desktopAdvertisedName: String?
@@ -114,22 +191,46 @@ final class AppModel: ObservableObject {
         bluetoothRestartNeeded = needed
         AppLog.event("bluetooth_guidance", ["restart": "\(needed)", "state": "\(radio.guidanceState)", "hostingFailed": "\(radio.hostingFailed)"])
     }
+    /// Android "Calls unavailable" (`CallsEndpointWatch`): Allow calls is on and Bluetooth is ready, but the call service
+    /// has not been hosted for 5 s. Nil while calls can reach this device.
+    @Published private(set) var callsEndpointFault: CallsUnavailableReason?
+    private var callsWatch = CallsEndpointWatch()
+    /// What the chip, the status sheet, the Live card and the Mac menu show: nil with Allow calls off or the control arm
+    /// `-callsUnavailableStatus NO`; DEBUG `-NearbyFixtureCallsUnavailable 1` forces it for UI tests and screenshots.
+    var callsUnavailable: CallsUnavailableReason? {
+        guard availableForCalls, AppSettings.callsUnavailableStatus else { return nil }
+        #if DEBUG
+        if RootView.debugArgument("-NearbyFixtureCallsUnavailable") == "1" { return .stalled }
+        #endif
+        return callsEndpointFault
+    }
+    /// Every 2 s after the restart guidance: a refused service is that guidance (Bluetooth problem), so it is not "wanted".
+    func checkCallsAvailability() {
+        let wanted = availableForCalls && radio.centralReady && !bluetoothRestartNeeded && bluetoothProblem == nil
+        let fault = callsWatch.observe(enabled: AppSettings.callsUnavailableStatus, wanted: wanted,
+                                       endpointReady: radio.peripheralReady, now: ProcessInfo.processInfo.systemUptime)
+        guard fault != callsEndpointFault else { return }
+        callsEndpointFault = fault
+        AppLog.event("calls_status", ["kind": fault == nil ? "ready" : "callsUnavailable", "reason": fault?.rawValue ?? "-"])
+    }
     /// "You appear as ..." (OwnNearbyName): what people nearby who have not added you see for this device now, or nil.
     var ownNearbyLine: String? {
         OwnNearbyName.shown(reachableForCalls: availableForCalls, rotatingOn: rotatingIds,
-                            generatedNamesOn: desktopGeneratedNames, generatedName: desktopAdvertisedName).map(OwnNearbyName.line)
+                            generatedNamesOn: desktopGeneratedNames, generatedName: desktopAdvertisedName.map(GeneratedNameText.display)).map(OwnNearbyName.line)
     }
-    /// EXPERIMENTAL rotating discovery IDs (Settings > Advanced).
+    /// Rotating discovery IDs: always on, no Settings switch since 2026-11-04. DEBUG automation
+    /// (`-NearbyRotatingIds 1|0`) or a fixture may change it for one run; nothing is stored.
     @Published var rotatingIds = AppSettings.rotatingIds {
         didSet {
-            AppSettings.rotatingIds = rotatingIds; updateDiscoveryCompatibility()
+            updateDiscoveryCompatibility()
             // A join or forwarder of a rotating stream started with the setting off advertises the fixed prefix:
             // stop it now that the setting hides that prefix (RotatingStreamPolicy).
-            if let watch, let refusal = RotatingStreamPolicy.joinRefusal(offer: watch.offer, rotatingIds: rotatingIds) {
+            if let watch, let refusal = RotatingStreamPolicy.joinRefusal(offer: watch.offer, rotatingIds: rotatingIds, privateViewer: rotatingViewer) {
                 AppLog.event("rotating_ids", ["event": "join_stopped", "role": "viewer"])
                 watch.stop()
                 streamNotice = refusal
             }
+            if rotatingIds && !oldValue { reconcileBlockedPresenceIfNeeded() }
             refreshAdvertising()
         }
     }
@@ -143,12 +244,8 @@ final class AppModel: ObservableObject {
     @Published var desktopCallDeliveryFeedback = AppSettings.desktopCallDeliveryFeedback {
         didSet { AppSettings.desktopCallDeliveryFeedback = desktopCallDeliveryFeedback }
     }
-    @Published var desktopAndroidCompatibility = AppSettings.desktopAndroidCompatibility {
-        didSet {
-            AppSettings.desktopAndroidCompatibility = desktopAndroidCompatibility
-            updateDiscoveryCompatibility()
-        }
-    }
+    /// Android compatibility: a DEBUG control arm only since 2026-11-04 (no Settings row).
+    private let desktopAndroidCompatibility = AppSettings.desktopAndroidCompatibility
     private var desktopCallCompatibility: DesktopCallCompatibility {
         DesktopCallCompatibility(enabled: desktopAndroidCompatibility, rotatingIds: rotatingIds,
                                  hiddenIdentities: hiddenIdentities, pseudonyms: bmh3Pseudonyms)
@@ -177,9 +274,21 @@ final class AppModel: ObservableObject {
     func withPresence(_ options: RotatingCallOptions) -> RotatingCallOptions {
         var options = options
         let vault = rotating.vault, runtime = rotating, book = book
+        let blocked: (IdentityFingerprint) -> Bool = { [weak self] in self?.isBlocked($0) ?? false }
+        // Naming v2 (CodeOnlyLeaseRule): a contact only checked by code gets no new leases until scanned both ways.
+        let codeOnly: (NodeId, IdentityFingerprint) -> Bool = { id, fp in
+            let contact = book.contacts.first { $0.fingerprintHex == fp.hex }
+            let holds = vault.deliveredTo(id) || vault.leaseKey(of: id.bytes, day: PresenceLeases.dayOf(runtime.currentEpoch())) != nil
+            return CodeOnlyLeaseRule.blocked(method: contact?.method, scannedBothWays: contact?.scannedBothWaysAt != nil, holdsLease: holds)
+        }
         options.presence = PresenceCallHooks(
-            eligible: { id, fp in book.state(of: fp) == .verified && vault.persistent && vault.canSeeMe(id) },
-            lease: { id, fp in vault.deliverLease(to: id, epoch: runtime.currentEpoch(), verified: book.state(of: fp) == .verified) },
+            eligible: { id, fp in book.state(of: fp) == .verified && !blocked(fp) && vault.persistent && vault.canSeeMe(id) && !codeOnly(id, fp) },
+            lease: { [weak self] id, fp in
+                self?.reconcileBlockedPresenceIfNeeded()
+                // A contact not yet asked ("Can see when I'm nearby") gets no lease, as no OFFER (decision 2026-11-06).
+                return vault.deliverLease(to: id, epoch: runtime.currentEpoch(),
+                                          verified: book.state(of: fp) == .verified && !blocked(fp) && vault.canSeeMe(id))
+            },
             store: { id, lease in vault.store(lease, from: id, myEpoch: runtime.currentEpoch()) },
             verified: { fp in book.state(of: fp) == .verified })
         return options
@@ -198,9 +307,11 @@ final class AppModel: ObservableObject {
         return PeerLabel.nearbyPhone(seed: announcement.nodeIdPrefix)
     }
 
-    /// EXPERIMENTAL BMH3 (Settings > Advanced "Hidden identities" and its child "Pseudonymous toward strangers").
-    @Published var hiddenIdentities = AppSettings.hiddenIdentities { didSet { AppSettings.hiddenIdentities = hiddenIdentities } }
-    @Published var bmh3Pseudonyms = AppSettings.bmh3Pseudonyms { didSet { AppSettings.bmh3Pseudonyms = bmh3Pseudonyms } }
+    /// BMH3 "Hidden identities" and "Pseudonymous toward strangers": always on since 2026-11-04, as Android, with no
+    /// Settings switch (DEBUG launch arguments `-experimentalBmh3 NO` and `-experimentalBmh3Pseudonyms NO` are the
+    /// control arms).
+    let hiddenIdentities = AppSettings.hiddenIdentities
+    let bmh3Pseudonyms = AppSettings.bmh3Pseudonyms
     @Published var relayedCalls = AppSettings.relayedCalls {
         didSet { AppSettings.relayedCalls = relayedCalls; configureRelayedCalls(); refreshAdvertising(); rebuildLists() }
     }
@@ -252,9 +363,18 @@ final class AppModel: ObservableObject {
     /// The BMH3 options of one call, or nil (BMH2 only). Mac compatibility can use a per-attempt
     /// pseudonym for a selected rotating offer independently of this Mac's own advertising setting.
     /// The call listener's BMH3 options: RELAY_SEEK is signed while this device would admit a search (route search, Experimental).
+    /// A busy listener still checks the code on screen, so a second phone using a consumed code raises the reuse alert.
+    private func busyBmh3Options() -> Bmh3CallOptions? {
+        var options = bmh3Options(selected: nil)
+        options?.qrDisplay = meet.display
+        return options
+    }
+
     private func listenerBmh3Options() -> Bmh3CallOptions? {
         var options = bmh3Options(selected: nil)
         if relaySeekSigning { options?.relaySeek = RelaySeek.featureSeekV1 }
+        // BVMID2: while a code is on screen its K_tag is one more tag check (one gate per connection).
+        options?.qrDisplay = meet.display
         return options
     }
 
@@ -284,6 +404,16 @@ final class AppModel: ObservableObject {
         return options
     }
     let rotating = RotatingDiscoveryRuntime()
+    /// D1: this device's watch sessions with join keys (AppModel+Protocol.swift).
+    let joinSessions = StreamJoinSessions(onClose: { keys, reason in AppModel.logJoinKeys(keys, .close, reason: reason.rawValue, role: .viewer) })
+    /// Phase 1b viewer side (`AppSettings.rotatingViewer`, on): a rotating stream is joined with a role-2 request.
+    let rotatingViewer = AppSettings.rotatingViewer
+    /// The offer of the last finished join (the automatic retry keeps a rotating join on rotating routes).
+    private var streamRetryOffer: DiscoveryAnnouncement?
+    /// The end of a waiting viewer's boundary silence is already scheduled.
+    private var viewerSilenceScheduled = false
+    /// AB4: the end of this device's live offer's boundary silence is already scheduled.
+    private var sourceSilenceScheduled = false
     private var rotationTimer: Timer?
     #if !os(macOS)
     private var advertisedEpoch: Int64 = -1
@@ -313,11 +443,88 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             self.desktopAdvertisedName = self.desktopGeneratedNames
                 ? announcement.flatMap { DesktopNearbyNames.shared?.name(for: $0)?.text } : nil
-            self.radio.advertise(announcement, name: self.displayName)
+            self.radio.advertise(announcement, name: "")   // "Your name" never goes to the radio code (never broadcast)
         }, refresh: { [weak self] in self?.refreshAdvertising() })
     #endif
 
     private var reachTableEpoch: Int64?
+
+    /// Phase 1b: the waiting viewer's compact v2 request for its selected rotating offer, or nil while the boundary
+    /// silence runs (the end of the silence is scheduled once and recomputes the role and epoch).
+    private func rotatingViewerAnnouncement(watch: WatchController, identity: SigningIdentity) -> DiscoveryAnnouncement? {
+        let request = rotating.viewerRequest, vault = rotating.vault, node = identity.nodeId
+        let now = RotatingDiscoveryRuntime.elapsedMs
+        let epoch = rotating.currentEpoch()
+        // D1: a join-key watch takes J's entries (AppModel+Protocol.swift).
+        guard let entryFor = viewerRequestEntries(for: watch, epoch: epoch, presenceEntry: {
+            vault.entry(nodeId: node, epoch: $0, role: RotatingDiscoveryIds.roleViewerRequest)
+        }) else { return nil }
+        let decision = request.decide(epoch: epoch, elapsedMs: now, entryFor: entryFor)
+        switch decision {
+        case .silent(let until):
+            if !viewerSilenceScheduled {
+                viewerSilenceScheduled = true
+                let waitMs = max(0, until - now)
+                AppLog.event("rotating_ids", ["event": "boundary", "role": "viewer", "silenceS": String(format: "%.1f", Double(waitMs) / 1000)])
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(waitMs) / 1000 + 0.05) { [weak self] in
+                    self?.viewerSilenceScheduled = false
+                    self?.refreshAdvertising()
+                }
+            }
+            return nil
+        case .advertise(let entry):
+            do {
+                return try RotatingViewerRequest.announcement(entry: entry, offer: watch.offer, transport: watch.transport)
+            } catch {
+                AppLog.event("rotating_ids", ["event": "request_refused", "role": "viewer"])
+                return nil
+            }
+        }
+    }
+
+    /// AB4 (Experimental, `-rotatingSource`): this device's live offer. The fixed-prefix offer while the rotating arm is off
+    /// or a Visible-by-handle window runs (version 2, as Android); otherwise this epoch's role-1 offer, or nil while its
+    /// boundary silence runs (the end of the silence is scheduled once and recomputes the offer). Going back from the fixed
+    /// form to the rotating one restarts it after a uniform 1-8 s silence, as at a boundary. `rotating` is true when the
+    /// rotating form was asked for.
+    private func liveOffer(_ live: LiveController, identity: SigningIdentity) -> (offer: DiscoveryAnnouncement?, rotating: Bool) {
+        let rotatingForm = live.rotatingArm && !rotating.visibleWindowActive
+        let now = RotatingDiscoveryRuntime.elapsedMs
+        if rotatingForm, live.offerWasRotating == false {
+            rotating.streamOffer.restart(elapsedMs: now)
+        }
+        live.offerWasRotating = rotatingForm
+        guard rotatingForm else {
+            return ((try? live.advertisedOffer(prefix: identity.nodeId.prefix, entry: nil)), false)
+        }
+        let vault = rotating.vault, node = identity.nodeId
+        let epoch = rotating.currentEpoch()
+        // AB4F: a revocation (also while the vault cannot be read) advances the revision, so the role-1 entry is rebuilt
+        // at once instead of at the next epoch.
+        let decision = rotating.streamOffer.decide(epoch: epoch, elapsedMs: now, generation: presenceKeyRevision) {
+            vault.entry(nodeId: node, epoch: $0, role: RotatingDiscoveryIds.roleStreamOffer)
+        }
+        switch decision {
+        case .silent(let until):
+            if !sourceSilenceScheduled {
+                sourceSilenceScheduled = true
+                let waitMs = max(0, until - now)
+                AppLog.event("rotating_ids", ["event": "boundary", "role": "stream", "silenceS": String(format: "%.1f", Double(waitMs) / 1000)])
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(waitMs) / 1000 + 0.05) { [weak self] in
+                    self?.sourceSilenceScheduled = false
+                    self?.refreshAdvertising()
+                }
+            }
+            return (nil, true)
+        case .advertise(let entry):
+            do {
+                return (try live.advertisedOffer(prefix: identity.nodeId.prefix, entry: entry), true)
+            } catch {
+                AppLog.event("rotating_ids", ["event": "offer_refused", "role": "stream"])
+                return (nil, true)
+            }
+        }
+    }
 
     /// At each epoch boundary: stop, stay silent a uniform 1-8 s, then advertise the new ID.
     private func checkRotation() {
@@ -325,6 +532,21 @@ final class AppModel: ObservableObject {
         if rotatingIds, radio.reachRotating != nil {
             let epoch = rotating.currentEpoch()
             if epoch != reachTableEpoch { if reachTableEpoch != nil { radio.reachRotating?.clear() }; reachTableEpoch = epoch }
+        }
+        // Phase 1b: a waiting viewer's rotating request follows its own boundary (stop, 1-8 s silence, new role-2
+        // ID); `refreshAdvertising` asks `RotatingViewerRequest` and no call-presence silence is added on top.
+        if rotatingIds, let watch, watch.awaitingSource,
+           RotatingStreamPolicy.viewerRequest(offer: watch.offer, rotatingIds: rotatingIds, privateViewer: rotatingViewer) == .rotating {
+            rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch())
+            refreshAdvertising()
+            return
+        }
+        // AB4: a live source with the rotating arm follows its own boundary (stop, 1-8 s silence, new role-1 ID);
+        // `refreshAdvertising` asks `RotatingStreamOffer` and no call-presence silence is added on top.
+        if rotatingIds, let live, live.running, live.rotatingArm {
+            rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch())
+            refreshAdvertising()
+            return
         }
         #if os(macOS)
         guard rotatingIds, !desktopStopping else { return }
@@ -338,6 +560,9 @@ final class AppModel: ObservableObject {
         // Phase 2: the recognition table follows the epoch.
         rotating.vault.rebuildRecognition(myEpoch: rotating.currentEpoch())
         let silence = Double.random(in: 1...8)
+        // This boundary is handled now. A joined viewer advertises nothing, so refreshAdvertising never
+        // moves the advertised epoch for it; without this the check repeats every tick for the whole watch.
+        advertisedEpoch = rotating.currentEpoch()
         boundarySilenceUntil = Date().addingTimeInterval(silence)
         rotating.pins.offAir(elapsedMs: RotatingDiscoveryRuntime.elapsedMs)
         radio.advertise(nil, name: "")
@@ -359,7 +584,24 @@ final class AppModel: ObservableObject {
     /// Loaded in init, after a resumed wipe and the one-time moves of plain copies.
     @Published var recentCalls: [CallRecord] = []
     /// EXPERIMENTAL (Settings > Advanced): help pass streams and calls to others nearby.
-    @Published var relayForOthers = AppSettings.relayForOthers { didSet { AppSettings.relayForOthers = relayForOthers } }
+    @Published var relayForOthers = StreamSourceGate(sourceRoles: ReleaseGates.sourceRoles).effectiveRelayForOthers(requested: AppSettings.relayForOthers) {
+        didSet {
+            if sourceGate.allowsForwarding { AppSettings.relayForOthers = relayForOthers }
+            else if relayForOthers { relayForOthers = false }
+        }
+    }
+    /// Settings › Manual video: read by each new call and broadcast (a running one keeps what it started with).
+    @Published var videoRequest = AppSettings.videoRequest { didSet { AppSettings.videoRequest = videoRequest } }
+    @Published var manualVideo = AppSettings.manualVideo {
+        didSet {
+            AppSettings.manualVideo = manualVideo
+        }
+    }
+    /// Settings › Video quality (Android defaults: fill on, temperature off, heat limit on, freeze warning off).
+    @Published var videoFill = AppSettings.videoFill { didSet { AppSettings.videoFill = videoFill } }
+    @Published var showTemperature = AppSettings.showTemperature { didSet { AppSettings.showTemperature = showTemperature } }
+    @Published var lowerQualityWhenHot = AppSettings.lowerQualityWhenHot { didSet { AppSettings.lowerQualityWhenHot = lowerQualityWhenHot; refreshHealth() } }
+    @Published var viewerFreezeWarning = AppSettings.viewerFreezeWarning { didSet { AppSettings.viewerFreezeWarning = viewerFreezeWarning } }
     /// EXPERIMENTAL call relay hop (DEBUG launch argument only, like Android's test_private_call_relay).
     @Published var callRelay: CallRelayController?
 
@@ -381,9 +623,39 @@ final class AppModel: ObservableObject {
         callRelay = nil
         refreshAdvertising()
     }
-    /// Shown on call and live screens only when the phone is hot or the battery is at 20 % or less.
+    /// Android videoHealthNotice on call and live screens: too hot (critical), hot with the quality lowered, or a low battery.
     @Published var healthMessage: String?
     private var healthObservers: [NSObjectProtocol] = []
+    /// This device's thermal state (`ProcessInfo.ThermalState` raw value 0-3). DEBUG
+    /// `-NearbyThermalOverride nominal|fair|serious|critical` fixes it for one run (critical cannot be induced on purpose).
+    var thermalState: Int {
+        #if DEBUG
+        switch RootView.debugArgument("-NearbyThermalOverride") {
+        case "nominal": return 0
+        case "fair": return 1
+        case "serious": return 2
+        case "critical": return 3
+        default: break
+        }
+        #endif
+        return ProcessInfo.processInfo.thermalState.rawValue
+    }
+    /// Android critical heat (`ThermalGuardPolicy.shouldBlockStreaming`): no video may run or start; calls are still
+    /// placed and answered, as voice (decision 2026-11-06). Lifts as soon as the state is below critical.
+    @Published private(set) var videoBlockedByHeat = false
+    private var thermalVideo = ThermalVideoState()
+    /// Lower quality when hot for call and broadcast encoders (read once a second while video runs): a hotter state at
+    /// once, a cooler one after 30 s (Android `THERMAL_RECOVERY_DELAY_MS`).
+    func videoHeatPercent() -> Int {
+        thermalVideo.update(thermalState: thermalState, reduction: lowerQualityWhenHot, nowMs: Int(ProcessInfo.processInfo.systemUptime * 1000))
+    }
+    /// Android `status_too_hot` and the automatic stop text (the Mac says Mac).
+    static var tooHotText: String {
+        AppPlatform.isMac ? "Your Mac is too hot. Let it cool down before starting video." : "Your phone is too hot. Let it cool down before starting video."
+    }
+    static var stoppedHotText: String {
+        AppPlatform.isMac ? "Stopped automatically: the Mac reached critical thermal stress." : "Stopped automatically: the phone reached critical thermal stress."
+    }
 
     private func startHealthMonitoring() {
         guard healthObservers.isEmpty else { return }
@@ -403,42 +675,103 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshHealth() {
-        let thermal = ProcessInfo.processInfo.thermalState
+        let thermal = thermalState
         #if os(iOS)
         let level = UIDevice.current.batteryLevel, charging = UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full
         #else
         let level: Float = -1
         let charging = true
         #endif
+        let blocked = ThermalVideoState.blocksVideo(thermalState: thermal, enabled: AppSettings.thermalCriticalStop)
+        if blocked != videoBlockedByHeat {
+            videoBlockedByHeat = blocked
+            AppLog.event("device_thermal", ["blocked": "\(blocked)", "thermal": "\(thermal)"])
+        }
+        // Android videoHealthNotice: too hot at critical; "video quality lowered" while Lower quality when hot acts
+        // (serious or hotter); then a battery at 20 % or less that is not charging.
         var message: String?
-        #if os(macOS)
-        if thermal == .serious || thermal == .critical { message = "Your Mac is hot. Turning off video helps it cool down." }
-        #else
-        if thermal == .serious || thermal == .critical { message = "Your phone is hot. Turning off video helps it cool down." }
-        else if level >= 0, level <= 0.2, !charging { message = "Battery \(Int((level * 100).rounded())) %. Plug in to keep going." }
-        #endif
+        if blocked {
+            message = AppModel.tooHotText
+        } else if lowerQualityWhenHot, ThermalVideoPolicy.percent(thermalState: thermal, reduction: true) < 100 {
+            message = AppPlatform.isMac ? "Mac is hot, video quality lowered" : "Phone is hot, video quality lowered"
+        } else if level >= 0, level <= 0.2, !charging {
+            message = "Battery low, streaming uses extra power"
+        }
         if message != healthMessage {
             healthMessage = message
-            AppLog.event("device_health", ["thermal": "\(thermal.rawValue)", "battery": String(format: "%.2f", level), "charging": "\(charging)", "message": message ?? "none"])
+            AppLog.event("device_health", ["thermal": "\(thermal)", "battery": String(format: "%.2f", level), "charging": "\(charging)", "message": message ?? "none"])
         }
     }
-    @Published var peerLabelsEnabled = AppSettings.peerLabels { didSet { AppSettings.peerLabels = peerLabelsEnabled; radio.titlePages = peerLabelsEnabled } }
+    /// Names and titles: always on since P5 (Android one name). DEBUG automation (`-NearbyLabels 0`) or the control arm
+    /// `-experimentalPeerLabels NO` may turn them off for one run; nothing is stored.
+    @Published var peerLabelsEnabled = AppSettings.peerLabels { didSet { radio.titlePages = peerLabelsEnabled } }
+    /// "Who sees my name" (Settings, shown while a name is set). Read when a call starts.
+    @Published var namesAudience = AppSettings.namesAudience { didSet { AppSettings.namesAudience = namesAudience } }
+    /// Call blocking (Android CallBlocking): the sealed block list in memory; nil while it cannot be read (blocks nobody).
+    @Published private(set) var blockList: BlockList? = nil
+    /// True only when the stored list exists but is damaged; a locked Keychain is `.unavailable`, not damaged.
+    @Published private(set) var blockListDamaged = false
+    /// "Block list can't be read" with Reset, after a Block that could not be saved because the list is damaged (Android
+    /// `showBlockListUnreadable`; decision 2026-11-06). A locked Keychain keeps the plain notice: nothing to reset.
+    @Published var blockListUnreadableAlert = false
+    /// "Block unknown callers" (Settings › Privacy), off by default.
+    @Published var blockUnknownCallers = AppSettings.blockUnknownCallers { didSet { AppSettings.blockUnknownCallers = blockUnknownCallers } }
+    /// "Declined. Block all unknown callers?" after a plain decline of a caller with a one-time ID.
+    @Published var askBlockUnknown = false
+    /// "Blocked and hidden on this phone." with Tell MeshLive, after a report.
+    @Published var reportDone = false
+    /// A stored call history this device cannot open now (Android `RecentCalls.isUnreadable`): Recent says so and offers
+    /// Clear history; nothing writes over it by itself.
+    @Published private(set) var recentUnreadable = false
+    /// Android StrangerCallFollowup: "Add <name> as a contact?" after a call with someone who is not saved (their
+    /// generated name or handle, in memory only; cleared when the next call is placed).
+    @Published var strangerFollowUp: String?
+    /// Routes (logical token + advertised ID) whose source authenticated as a blocked person: hidden for this run only.
+    private var hiddenStreamRoutes: [String] = []
+    /// Radio addresses of routes hidden by "Hide this livestream" whose advertised ID was not proven (AB3): this run only.
+    private var hiddenStreamAddresses: Set<String> = []
+    private var blockedReconciled = false
+    private var blockListHolder = BlockListHolder(save: { BlockedPeopleFile.save($0) })
+    /// The unreadable reason already logged, so every gate check on a locked list does not repeat it.
+    private var loggedBlockListReason: String?
+    private var blockListObservers: [NSObjectProtocol] = []
+    /// The radio callbacks are wired: init's first block-list read must not rebuild the Live list before then.
+    private var radioConfigured = false
     /// Title of the next broadcast (experimental labels).
     @Published var liveTitle = ""
+    /// "Audio broadcast stopped" (Android audio_live_stopped_title) after a stop the user did not ask for.
+    @Published var liveStoppedNotice: String?
+    /// The title of that alert: "Audio broadcast stopped" (Android audio_live_stopped_title) unless heat stopped or
+    /// refused a video live.
+    @Published var liveStoppedTitle = "Audio broadcast stopped"
+    /// Switch to video: the radio ended and a video live with the same title starts when it is gone.
+    private var videoAfterRadio = false
     private var automation: Automation?
 
-    /// Label options for a new call, or nil when the experiment is off.
+    /// Label options for a new call (nil only in a DEBUG run that turned names and titles off). The audience and the
+    /// name-before-answer rule are read when the call starts.
     func callLabelOptions() -> CallLabelOptions? {
         guard peerLabelsEnabled else { return nil }
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return CallLabelOptions(localName: name.isEmpty ? nil : name, subject: nil,
-                                isVerifiedPeer: { [weak self] in self?.book.state(of: $0) == .verified })
+        return CallLabelOptions(localName: name.isEmpty ? nil : name, audience: namesAudience,
+                                nameBeforeAnswer: AppSettings.namesBeforeAnswer,
+                                calleeNameAfterReveal: AppSettings.labSwitch("calleeNameAfterReveal", shipped: true),
+                                isVerifiedPeer: { [weak self] in self?.book.state(of: $0) == .verified },
+                                currentAudience: { AppSettings.namesAudience },
+                                currentName: { [weak self] in
+                                    guard let text = self?.displayName.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+                                    return text
+                                })
     }
     @Published var identityError: String?
 
     private(set) var identity: SigningIdentity!
     let radio = MeshRadio()
     let book = VerifiedContactBook()
+    /// BVMID2 on the Add contact screen: the expiring one-use code, the scanner and the Design QL visit.
+    lazy var meet: MeetController = { let meet = MeetController(); meet.model = self; return meet }()
+    /// The role-0 rotating ID this device advertises right now (the ID a BVMID2 code names), or nil while none is on air.
+    private(set) var meetRdi: Data?
     /// Fingerprints authenticated in this process, by node ID hex (last 1024), for marking contacts verified.
     private(set) var authenticated: [String: IdentityFingerprint] = [:]
     private var authenticatedOrder: [String] = []
@@ -459,6 +792,16 @@ final class AppModel: ObservableObject {
 
     init() {
         AppLog.start()
+        // AB5: the HEVC/H.264 masters (Experimental, off) are fixed before any hello, header or decoder mask exists.
+        HardwareCodecSwitches.apply()
+        #if os(macOS)
+        wifiLocation.delegate = wifiLocationDelegate
+        wifiLocationDelegate.onAuthorization = { [weak self] status in
+            guard let self, status == .denied || status == .restricted, self.wifiDirect else { return }
+            self.wifiDirect = false
+            self.settingsNotice = "MeshLive needs Location to find Wi-Fi Direct networks on a Mac. It never reads your location."
+        }
+        #endif
         let initBegan = ProcessInfo.processInfo.systemUptime
         var steps: [String: String] = ["propertiesMs": AppLog.ms(since: constructionBegan, until: initBegan)]
         var mark = initBegan
@@ -468,6 +811,7 @@ final class AppModel: ObservableObject {
         if EmergencyWipe.pending && !DesktopPreview.enabled { EmergencyWipe.run(userInitiated: false) }
         SealedRecords.migrateLegacy()
         recentCalls = CallHistory.all
+        recentUnreadable = CallHistory.unreadable
         step("wipeMs")
         CrashReports.shared.start()
         step("crashReportsMs")
@@ -481,7 +825,16 @@ final class AppModel: ObservableObject {
         }
         step("identityMs")
         loadContacts()
-        book.policy = AppSettings.mismatchPolicyWarnOnly ? .warn : .refuse
+        _ = DesktopNearbyNames.shared   // loads and installs the generated-name words for the reserved-name rule
+        loadBlockList()
+        #if os(iOS)
+        blockListObservers.append(NotificationCenter.default.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+                                                                         object: nil, queue: .main) { [weak self] _ in
+            MainStall.run("AppModel.protectedData") { self?.reloadBlockListIfNeeded() }
+        })
+        #endif
+        // An identity mismatch is always refused (owner, 2026-11-04; Android has no warn-only choice).
+        book.policy = .refuse
         book.onMismatch = { [weak self] _, _, contact in
             DispatchQueue.main.async {
                 self?.mismatchWarning = "This phone no longer matches the ID saved for \(contact.displayName). End the call and check with them in person before sharing anything private."
@@ -492,10 +845,12 @@ final class AppModel: ObservableObject {
         radio.onReady = { [weak self] in self?.bluetoothProblem = nil; self?.refreshAdvertising() }
         radio.onIncomingLink = { [weak self] link in self?.handleIncoming(link) }
         radio.allowIncomingGatt = { [weak self] in self?.call == nil || self?.watch?.awaitingSource == true }
+        radioConfigured = true
     }
 
     func start() {
         guard !DesktopPreview.enabled, identity != nil else { return }
+        MainStall.start()
         #if os(macOS)
         guard !desktopStopping else { return }
         #endif
@@ -509,6 +864,12 @@ final class AppModel: ObservableObject {
             auto.start()
         }
         radio.titlePages = peerLabelsEnabled
+        // Android copied-ID warning (on) and its DEBUG control arms (test_copied_id_overlap, test_copied_id_pc_pair).
+        radio.copiedIdWarning = AppSettings.labSwitch("copiedIdWarning", shipped: true)
+        // SEC-B2: a stream hop whose end-to-end peer is not its link peer fails; DEBUG builds say so.
+        StreamHopPeerBinding.debugLog = LabSwitch.isDebugBuild ? { AppLog.event("stream_peer_binding", $0) } : nil
+        radio.copiedIds.requireOverlap = AppSettings.labSwitch("copiedIdOverlap", shipped: true)
+        radio.copiedIds.pcPairExempt = AppSettings.labSwitch("copiedIdPcPair", shipped: true)
         updateDiscoveryCompatibility()
         if rotationTimer == nil {
             rotationTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.checkRotation() }
@@ -522,7 +883,7 @@ final class AppModel: ObservableObject {
         #endif
         pruneTimer?.invalidate()
         pruneTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            self?.radio.prune(olderThan: 8); self?.checkBluetoothGuidance()
+            self?.radio.prune(olderThan: 8); self?.checkBluetoothGuidance(); self?.checkCallsAvailability()
         }
         refreshAdvertising()
     }
@@ -532,6 +893,7 @@ final class AppModel: ObservableObject {
     /// bluetooth-central/peripheral keep its link and audio session running), with this phone's video off.
     /// Everything else stops; foregrounding restarts discovery.
     func enterBackground() {
+        MainStall.run("AppModel.enterBackground") {
         // An audio-only stream keeps playing with the screen locked or the app in the background (audio and
         // bluetooth-central background modes); its link stays, discovery pauses.
         if let watch, watch.isRadio, watch.ended == nil, call == nil {
@@ -555,13 +917,16 @@ final class AppModel: ObservableObject {
         } else {
             radio.stopAll()
         }
+        }
     }
 
     func enterForeground() {
-        CallNotifier.shared.clear()
-        configureCallAlerts()
-        call?.enterForeground()
-        start()
+        MainStall.run("AppModel.enterForeground") {
+            CallNotifier.shared.clear()
+            configureCallAlerts()
+            call?.enterForeground()
+            start()
+        }
     }
 
     #if os(macOS)
@@ -584,7 +949,7 @@ final class AppModel: ObservableObject {
     // MARK: Lists
 
     private func rebuildLists() {
-        defer { takeStreamRetry() }
+        defer { takeStreamRetry(); takeViewerRecovery() }
         #if DEBUG
         if debugFixtureActive { return } // keep the simulator fixture rows
         #endif
@@ -606,16 +971,20 @@ final class AppModel: ObservableObject {
         people = callPeers.map { p in
             // Pre-connect the prefix is an unauthenticated hint: a verified contact's local name may label the row,
             // but the row never claims "verified" (Android shows no badge here either).
-            #if os(macOS)
-            let generated = generatedCalls[p.announcement.nodeIdPrefix]
-            #else
-            let generated: String? = nil
-            #endif
+            let generated = generatedCalls[p.announcement.nodeIdPrefix]   // iPhone and Mac (names-v2, with collision suffixes)
             return PersonRow(id: p.id, label: p.announcement.rotating ? rotatingLabel(p.announcement, generatedName: generated)
                         : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex)),
                       prefixHex: p.prefixHex, transport: p.announcement.transport ?? .gatt, relays: Int(p.announcement.routeCost), isIPhone: p.isIPhone)
         }
         people += routedRows(direct: people)
+        // Android copied-ID warning (Design G): the row says so and a call from it asks first.
+        let advertised = radio.peers
+        people = people.map { row in
+            guard let offer = advertised[row.id]?.announcement, offer.rotating, radio.copiedIds.warned(offer.nodeIdPrefix) else { return row }
+            var flagged = row
+            flagged.copiedId = true
+            return flagged
+        }
         resumeContactDialWait()
         // A malformed audio-only marker is never listed (Android StreamOfferKind.MALFORMED; Android lists it as video
         // with its switch off, this app refuses it either way). Audio-only offers are listed only with audio live on.
@@ -625,16 +994,20 @@ final class AppModel: ObservableObject {
                 && ($0.announcement.streamOfferKind == .video || ($0.announcement.streamOfferKind == .audioOnly && audioLive))
                 && !streamRoutePenalties.isPenalized(streamRouteKey($0.id, $0.announcement), now: ConnectionDriver.now)
         }.map { p in
-            #if os(macOS)
+            // iPhone and Mac: a rotating stream source shows its generated name (Android G2), never "Nearby phone".
             let label = p.announcement.rotating ? rotatingLabel(p.announcement, generatedName: generatedStreams[p.announcement.nodeIdPrefix])
                 : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex))
-            #else
-            let label = p.announcement.rotating ? PeerLabel.nearbyPhone(seed: p.announcement.nodeIdPrefix)
-                : PeerLabel(prefix: p.announcement.nodeIdPrefix, contactName: contactName(prefixHex: p.prefixHex))
-            #endif
             return StreamRow(id: p.id, label: label, announcement: p.announcement,
-                             advertisedTitle: peerLabelsEnabled ? radio.titleBoard.title(routeToken: p.announcement.streamToken) : nil)
+                             advertisedTitle: peerLabelsEnabled ? radio.titleBoard.title(routeToken: p.announcement.streamToken) : nil,
+                             playable: StreamPlayability.playable(offer: p.announcement, decodeMask: videoDecodeMask, audioLive: audioLive))
         }
+        // Call blocking (Android hideBlockedStreams): a blocked or reported person's broadcasts are hidden.
+        let hiddenRoutes = hiddenStreamRoutes
+        streams = BlockedStreams.hide(streams, offer: { $0.announcement }, blockedPrefixes: blockList?.hiddenPrefixes ?? [],
+                                      hiddenRoutes: blockList?.reportedRoutes ?? [],
+                                      recognised: { [weak self] offer in self?.recognisedContactPrefix(offer) },
+                                      hiddenRoute: { hiddenRoutes.contains(BlockedStreams.routeKey($0)) },
+                                      hiddenAddresses: hiddenStreamAddresses, address: { $0.id.uuidString })
         live?.viewerRequestsChanged(peers)
         watch?.viewerRequestsChanged(peers)
     }
@@ -661,8 +1034,16 @@ final class AppModel: ObservableObject {
         var desktopCallPresence: DesktopDiscoveryAdvertising.CallPresence?
         #endif
         let prefix = identity.nodeId.prefix
+        radio.redactAdvertisedId = watch?.joinKeys != nil   // D1 (S1): a join-key watch's IDs are never logged
         let gattFlag = { (t: MeshTransport) in t == .gatt ? DiscoveryAnnouncement.flagGattTransport : 0 }
         var announcement: DiscoveryAnnouncement?
+        // BVMID2: the role-0 ID the code names, only while it is really on air.
+        var advertisedRdi: Data?
+        // Phase 1b: this device's own role-2 request is what goes on air now.
+        var viewerRequestOnAir = false
+        // AB4: this device's own role-1 stream offer is what goes on air now.
+        var streamOfferOnAir = false
+        defer { meetRdi = radio.peripheralReady ? advertisedRdi : nil }
         if let relayOffer = callRelay?.parentOffer {
             // Experimental call relay: the callee's offer with route cost + 1 until one parent connects.
             announcement = relayOffer
@@ -670,25 +1051,38 @@ final class AppModel: ObservableObject {
                   RotatingStreamPolicy.mayForward(offer: watch.offer, rotatingIds: rotatingIds) {
             // Experimental forwarding: offer the stream onward until a child connects (one UUID at a time).
             announcement = forward
-        } else if let watch, watch.awaitingSource, RotatingStreamPolicy.joinRefusal(offer: watch.offer, rotatingIds: rotatingIds) == nil {
-            // (A rotating stream's fixed-prefix request is never advertised while rotating IDs are on.)
+        } else if let watch, watch.awaitingSource {
             let offer = watch.offer
-            announcement = DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: DiscoveryAnnouncement.flagAcceptingConnections | gattFlag(watch.transport),
-                                                 capabilitySummary: decodeMask, streamToken: offer.streamToken, routeCost: offer.routeCost,
-                                                 streamBitrateKbps: offer.streamBitrateKbps)
+            switch RotatingStreamPolicy.viewerRequest(offer: offer, rotatingIds: rotatingIds, privateViewer: rotatingViewer) {
+            case .fixedPrefix:
+                if watch.joinKeys != nil { announcement = joinKeyVersionTwoRequest(watch); break }   // D1: nodeId(J)'s prefix
+                announcement = DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: DiscoveryAnnouncement.flagAcceptingConnections | gattFlag(watch.transport),
+                                                     capabilitySummary: VideoCodecMap.compactSummary(helloMask: decodeMask), streamToken: offer.streamToken, routeCost: offer.routeCost,
+                                                     streamBitrateKbps: offer.streamBitrateKbps)
+            case .rotating:
+                // Phase 1b: the request mirrors the rotating offer with this device's role-2 RDI (compact v2). Any
+                // failure advertises nothing: a rotating stream never gets the fixed-prefix request.
+                announcement = rotatingViewerAnnouncement(watch: watch, identity: identity)
+                viewerRequestOnAir = announcement != nil
+            case .refused:
+                break   // (A rotating stream's fixed-prefix request is never advertised while rotating IDs are on.)
+            }
         } else if let live, live.running {
-            announcement = live.offerAnnouncement(prefix: prefix)
-        } else if availableForCalls, call == nil, watch == nil, callRelay == nil, relayDuty == nil {
+            let (offer, rotatingOffer) = liveOffer(live, identity: identity)
+            announcement = offer
+            streamOfferOnAir = rotatingOffer && offer != nil
+        } else if availableForCalls || meet.wantsCallReady, call == nil, watch == nil, callRelay == nil, relayDuty == nil {
             #if os(macOS)
             desktopCallPresence = .fixed
             #endif
             announcement = DiscoveryAnnouncement(nodeIdPrefix: prefix, flags: DiscoveryAnnouncement.flagAcceptingConnections |
                                                  DiscoveryAnnouncement.flagPrivateCallAvailable | gattFlag(transport),
-                                                 capabilitySummary: encodeMask & decodeMask, streamToken: 0, routeCost: 0)
+                                                 capabilitySummary: VideoCodecMap.compactSummary(helloMask: encodeMask & decodeMask), streamToken: 0, routeCost: 0)
             if rotatingIds && !rotating.visibleWindowActive {
                 // Experimental: the role-0 rotating ID instead of the fixed prefix (compact v2).
                 let entry = rotating.callEntry(nodeId: identity.nodeId)
                 announcement?.nodeIdPrefix = entry.rdi; announcement?.rotating = true
+                advertisedRdi = entry.rdi
                 #if os(macOS)
                 desktopCallPresence = .rotating(entry)
                 #else
@@ -701,18 +1095,23 @@ final class AppModel: ObservableObject {
                 announcement = RelayedCalls.offerFor(offer, consentOn: relayedCallsConsent, helperActive: relayHelperActive, rotatingCompat: true)
             }
         }
+        if !viewerRequestOnAir { rotating.viewerRequest.offAir(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) }
+        if !streamOfferOnAir { rotating.streamOffer.offAir(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) }
         #if os(macOS)
         if desktopCallPresence != nil, !desktopWindowOpen,
            DesktopPreview.preferences.bool(forKey: DesktopReachabilitySettings.advertiseOnlyWithWindowKey) {
             // Experimental window-only advertising: no idle call offer while every MeshLive window is closed.
-            announcement = nil; desktopCallPresence = nil
+            announcement = nil; desktopCallPresence = nil; advertisedRdi = nil
         }
         desktopAdvertising.advertise(announcement, callPresence: desktopCallPresence)
         #else
-        if boundarySilenceUntil != nil, announcement?.rotating == true || announcement?.isPrivateCallOffer == true { return }
-        if rotatingIds && announcement?.rotating != true { rotating.pins.offAir(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) }
+        // The call boundary silence holds call offers only (a waiting viewer's request has its own silence).
+        if boundarySilenceUntil != nil, announcement?.isPrivateCallOffer == true { advertisedRdi = nil; return }
+        if rotatingIds && (announcement?.rotating != true || viewerRequestOnAir || streamOfferOnAir) {
+            rotating.pins.offAir(elapsedMs: RotatingDiscoveryRuntime.elapsedMs)
+        }
         desktopAdvertisedName = desktopGeneratedNames ? announcement.flatMap { DesktopNearbyNames.shared?.name(for: $0)?.text } : nil
-        radio.advertise(announcement, name: displayName)
+        radio.advertise(announcement, name: "")   // "Your name" never goes to the radio code (never broadcast)
         #endif
     }
 
@@ -723,7 +1122,9 @@ final class AppModel: ObservableObject {
         if let watch, watch.awaitingSource { watch.attach(link); refreshAdvertising(); return }
         if (call != nil || placingCall || relayDuty != nil || contactDialWait != nil), availableForCalls, let identity,
            AppSettings.labSwitch("callBusyDecline", shipped: true) { declineBusy(link, identity: identity); return }
-        guard call == nil, availableForCalls, let identity else { link.close(); return }
+        // BVMID2: a shown code makes the device call-ready for the screen's lifetime (then only the code is accepted).
+        // A scan in progress holds the radio as a call would.
+        guard call == nil, availableForCalls || meet.wantsCallReady, !meet.scanInProgress, let identity else { link.close(); return }
         let pins = rotating.pins
         let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
                                         identity: identity, transport: link.transport, type: .video, relayHops: 0,
@@ -741,7 +1142,7 @@ final class AppModel: ObservableObject {
     /// the caller is the very person being dialled, their call rings instead and the user's own dial stops; whichever
     /// Invite arrives first while the other is still looking becomes the call. `-dialCollisionRing NO` is the control arm.
     private var busyControllers: [CallController] = []
-    private var dialSuperseded = false
+    var dialSuperseded = false
     private var pendingDialTarget: String?
 
     private func declineBusy(_ link: MeshLink, identity: SigningIdentity) {
@@ -749,7 +1150,7 @@ final class AppModel: ObservableObject {
         let controller = CallController(model: self, role: .callee, peerName: "Incoming call", peerPrefixHex: nil,
                                         identity: identity, transport: link.transport, type: .video, relayHops: 0,
                                         rotating: rotatingIds ? withPresence(RotatingCallOptions(entries: { pins.pinned(elapsedMs: RotatingDiscoveryRuntime.elapsedMs) })) : nil,
-                                        bmh3: bmh3Options(selected: nil),
+                                        bmh3: busyBmh3Options(),
                                         relayed: relayedCalls ? RelayedCallOptions(featureOn: true, acceptRdi: rotatingIds) : nil)
         controller.configureBusy { [weak self, weak controller] caller in
             guard let self, let controller else { return false }
@@ -757,6 +1158,21 @@ final class AppModel: ObservableObject {
         }
         busyControllers.append(controller)
         controller.attach(link)
+    }
+
+    /// Android `call_busy_declined` / `call_busy_declined_while_dialling`: who was told this device is busy while it was
+    /// still dialling (a busy decline during a call says nothing, as Android). Only a verified contact is named; anyone
+    /// else is "Someone nearby".
+    private func noteBusyDeclined(_ controller: CallController) {
+        guard controller.declinedBusy, ownDial().dialling else { return }
+        let caller = controller.verification == .verified ? (controller.label?.title ?? OwnNearbyName.someoneNearby) : OwnNearbyName.someoneNearby
+        let dialling = contactDialWait?.contact.displayName ?? (call?.isConnecting == true ? call?.peerName : nil)
+        if let dialling {
+            callNotice = "\(caller) called while you were calling \(dialling). They were told you are busy; your call goes on."
+        } else {
+            callNotice = "\(caller) called while you were dialling. They were told you are busy."
+        }
+        AppLog.event("call_collision", ["action": "busy_notice"])
     }
 
     /// This device's own dial while it is still looking for its person, and that person's real prefix when known.
@@ -798,9 +1214,12 @@ final class AppModel: ObservableObject {
 
     // MARK: Calls
 
-    private var placingCall = false
+    var placingCall = false
     /// Last call problem, shown on the Call screen after the call screen closes ("Couldn't reach ...").
     @Published var callNotice: String? { didSet { if callNotice != oldValue { callRetry = nil } } }
+    /// B1.3: a placing refusal, shown above Nearby; "Open settings" only when Settings can change it.
+    @Published var callAccessNotice: String?
+    @Published var callAccessNoticeOpensSettings = false
     /// "Call again" on a "Couldn't reach" notice (Android 2026-10-21): the person and call type of the failed call.
     struct CallRetry: Equatable { let personId: UUID; let prefixHex: String?; let video: Bool; let name: String }
     @Published private(set) var callRetry: CallRetry?
@@ -821,19 +1240,23 @@ final class AppModel: ObservableObject {
     func startCall(to person: PersonRow, type: CallType) {
         relayDuty?.preempt()   // the user's own activity ends a relay at once
         guard call == nil, !placingCall, identity != nil else { return }
-        placingCall = true; callNotice = nil
+        // Calls at critical heat (decision 2026-11-06): the call is placed; a video call goes on as voice.
+        let callType = ThermalVideoState.callType(type, videoBlocked: videoBlockedByHeat)
+        #if os(macOS)
+        // Android withWifiCheck: a video call on 2.4 GHz Wi-Fi asks first (never a voice call, nor one that heat turned
+        // into voice: the advice comes after the existing guards).
+        if askWifiAdvice(voice: callType != .video, { [weak self] in self?.startCall(to: person, type: type) }) { return }
+        #endif
+        placingCall = true; callNotice = nil; callAccessNotice = nil; callAccessNoticeOpensSettings = false; strangerFollowUp = nil
+        if callType != type { AppLog.event("call_thermal", ["event": "video_call_placed_as_voice_critical"]); callNotice = AppModel.tooHotText }
         pendingDialTarget = dialTarget(for: person); dialSuperseded = false
         let tappedAt = ProcessInfo.processInfo.systemUptime
-        MediaPermissions.request(video: type == .video, context: "outgoing") { [weak self] _, _ in
-            guard let self else { return }
-            self.placingCall = false
-            // Glare: the person being dialled called first while the permission question was open.
-            if self.dialSuperseded { self.dialSuperseded = false; return }
-            self.placeCall(to: person, type: type, tappedAt: tappedAt)
+        MediaPermissions.request(video: callType == .video, context: "outgoing") { [weak self] _, _ in
+            self?.finishStartCall(to: person, type: callType, tappedAt: tappedAt)
         }
     }
 
-    private func placeCall(to person: PersonRow, type: CallType, tappedAt: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+    func placeCall(to person: PersonRow, type: CallType, tappedAt: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard call == nil, let identity else { return }
         if person.relayRoute != nil { placeRelayedCall(to: person, type: type, tappedAt: tappedAt, identity: identity); return }
         let retry = CallRetry(personId: person.id, prefixHex: person.prefixHex, video: type == .video, name: person.label.title)
@@ -845,7 +1268,7 @@ final class AppModel: ObservableObject {
         }
         #if os(macOS)
         guard !peer.announcement.rotating || desktopCallCompatibility.acceptsRotating else {
-            callNotice = "This device uses changing nearby IDs. Enable Android compatibility in Settings > Experiments to call it."
+            callNotice = "This device uses changing nearby IDs, which this test run has turned off."
             return
         }
         #endif
@@ -984,6 +1407,34 @@ final class AppModel: ObservableObject {
     @Published var relayDuty: RelayDutyController?
     private let relaySetupLimiter = RelaySetupRateLimiter()
 
+    /// Android `relayAutoPaused`: Relay video for others does not forward a join started below 20 % battery while not
+    /// charging, or in Low Power Mode (Android Battery Saver; the Mac reads no battery, so only Low Power Mode). Control
+    /// arm `-relayBatteryPause NO`; DEBUG `-NearbyFixtureRelayPaused 1` forces the pause for screenshots.
+    var relayBatteryPaused: Bool {
+        #if DEBUG
+        if RootView.debugArgument("-NearbyFixtureRelayPaused") == "1" { return true }
+        #endif
+        guard AppSettings.relayBatteryPause else { return false }
+        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+        #if os(iOS)
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let level = UIDevice.current.batteryLevel
+        let charging = UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full
+        return RelayBatteryPause.paused(batteryPercent: level < 0 ? -1 : Int((level * 100).rounded()), charging: charging, lowPowerMode: lowPower)
+        #else
+        return RelayBatteryPause.paused(batteryPercent: -1, charging: true, lowPowerMode: lowPower)
+        #endif
+    }
+
+    /// Android `watch_status_relaying_battery` while this device passes a stream on (the Mac reads no battery).
+    var relaySharingText: String {
+        #if os(iOS)
+        let level = UIDevice.current.batteryLevel
+        if level >= 0 { return "Sharing with phones near you, battery \(Int((level * 100).rounded()))%" }
+        #endif
+        return "Sharing with phones near you"
+    }
+
     /// Why helping is paused (battery, Low Power Mode or heat, as Android RelayHelperPolicy), or nil.
     var relayHelperPause: String? {
         if ProcessInfo.processInfo.isLowPowerModeEnabled { return "low power mode" }
@@ -1035,6 +1486,14 @@ final class AppModel: ObservableObject {
         let now = ConnectionDriver.now
         let nowMs = MeshRadio.reachClockMs
         let parent = CallRelayLink(adopting: engine)
+        // Call blocking (Android security review item 14): this device relays nothing for a blocked person (a real-key
+        // parent; a throwaway parent cannot be matched).
+        if !parent.linkPeerPseudonymous, let parentId = parent.peerLinkNodeId, isBlockedNode(parentId) {
+            AppLog.event("call_blocking", ["event": "relay_refused", "reason": "blocked_person"])
+            link.close()
+            refreshAdvertising()
+            return
+        }
         let edges = AppSettings.relayedPseudonymousEdges
         // Facts first, then one decision (review items 1 and 10).
         var f = RelayHelperGate.Facts()
@@ -1416,15 +1875,27 @@ final class AppModel: ObservableObject {
 
     /// Records the finished call in the local history (outgoing / incoming / missed).
     private func remember(_ controller: CallController) {
-        guard !controller.closedBeforeRinging, let prefix = controller.peerPrefixHex else { return }
+        guard !controller.closedBeforeRinging else { return }
+        // Call blocking: a stranger who turned out to be someone you blocked leaves a blocked call that names nobody.
+        if controller.blockedAfterReveal && controller.role == .callee { recordBlockedCall(); return }
+        guard let prefix = controller.peerPrefixHex else { return }
         let seconds = controller.activeSince.map { Int(Date().timeIntervalSince($0)) } ?? 0
         let direction: CallRecord.Direction = controller.role == .caller ? .outgoing : (controller.activeSince == nil ? .missed : .incoming)
         // Only a verified contact is kept by ID; anyone else by the generated name and the time (Android protocol reference "After the
         // reveal").
         let contact = contactName(prefixHex: prefix) != nil
+        let outcome = RecentCallOutcome.of(answered: controller.activeSince != nil, missed: controller.missedHere,
+                                           declinedHere: controller.declinedHere, cancelledHere: controller.cancelledWhileConnecting,
+                                           reason: controller.endReason)
         CallHistory.add(CallRecord(prefixHex: contact ? prefix : "", direction: direction, video: controller.callType == .video,
-                                   at: Date(), seconds: seconds, name: contact ? nil : Self.generatedName(controller.label)))
-        recentCalls = CallHistory.all
+                                   at: Date(), seconds: seconds, name: contact ? nil : controller.strangerName, outcome: outcome.rawValue))
+        reloadRecentCalls()
+        // Android StrangerCallFollowup: after a call with someone who is not saved, offer Add contact (in memory only).
+        // Never for someone you blocked (a caller can meet a blocked person only after the reveal; Android RecentCall.blocked).
+        let blocked = controller.blockedAfterReveal || controller.fingerprint.map { isBlocked($0) } == true
+        strangerFollowUp = StrangerCallFollowUp.name(enabled: AppSettings.labSwitch("strangerFollowUp", shipped: true), blocked: blocked,
+                                                     isContact: contact, generatedName: controller.strangerName,
+                                                     handle: controller.label?.handle)
     }
 
     /// Same lookup as Android Contacts: a fixed ID, or one unambiguous call-offer recognition.
@@ -1440,9 +1911,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// A generated nearby name (never a handle, a self-chosen name or "Nearby phone"), or nil.
+    /// A generated nearby name (never a handle, a contact, a claimed name or "Someone nearby"), or nil.
     static func generatedName(_ label: PeerLabel?) -> String? {
-        guard let label, label.handle.isEmpty, label.contactName == nil, label.selfName == nil, label.title != "Nearby phone" else { return nil }
+        guard let label, label.isGenerated else { return nil }
         return label.title
     }
 
@@ -1458,7 +1929,7 @@ final class AppModel: ObservableObject {
     }
 
     func callFinished(_ controller: CallController) {
-        if controller.busyMode { busyControllers.removeAll { $0 === controller }; return }
+        if controller.busyMode { busyControllers.removeAll { $0 === controller }; noteBusyDeclined(controller); return }
         // An older call's delayed dismissal must not clear a newer call's ringing alert.
         guard call === controller else { return }
         if relayedOutcome(controller) { return }
@@ -1467,10 +1938,10 @@ final class AppModel: ObservableObject {
         remember(controller)
         if controller.missedHere {
             // Call back and the caller's name only for a verified contact; anyone else is a generated name at most.
-            let contact = controller.peerPrefixHex.flatMap { contactName(prefixHex: $0) } != nil
-            CallNotifier.shared.postMissed(peerName: contact ? controller.label?.title : Self.generatedName(controller.label),
-                                           stranger: controller.label == nil,
-                                           prefixHex: contact ? controller.peerPrefixHex : nil, video: controller.offeredType == .video)
+            let contact = controller.verification == .verified ? controller.peerPrefixHex.flatMap { contactName(prefixHex: $0) } : nil
+            CallNotifier.shared.postMissed(peerName: contact != nil ? controller.label?.title : Self.generatedName(controller.label),
+                                           stranger: contact == nil,
+                                           prefixHex: contact != nil ? controller.peerPrefixHex : nil, video: controller.offeredType == .video)
         }
         if controller.failedEarly, let ended = controller.ended {
             callNotice = ended
@@ -1478,6 +1949,14 @@ final class AppModel: ObservableObject {
         }
         call = nil
         refreshAdvertising()
+        if offerBlockUnknownAfterCall {
+            offerBlockUnknownAfterCall = false
+            // After the cover's closing animation; a call that rang meanwhile keeps its screen and skips the offer.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self, self.call == nil else { return }
+                self.askBlockUnknown = true
+            }
+        }
     }
 
     // MARK: Watching
@@ -1493,8 +1972,12 @@ final class AppModel: ObservableObject {
 
     func startWatching(_ row: StreamRow) {
         guard watch == nil, let identity else { return }
+        // Android ensureThermalReady: no video at critical heat (audio only is not video and still plays).
+        if !row.audioOnly, videoBlockedByHeat {
+            AppLog.event("watch_thermal", ["event": "refused_critical"]); streamNotice = AppModel.tooHotText; return
+        }
         let key = streamRouteKey(row.id, row.announcement)
-        if let refusal = RotatingStreamPolicy.joinRefusal(offer: row.announcement, rotatingIds: rotatingIds) {
+        if let refusal = RotatingStreamPolicy.joinRefusal(offer: row.announcement, rotatingIds: rotatingIds, privateViewer: rotatingViewer) {
             AppLog.event("rotating_ids", ["event": "join_refused", "role": "viewer"])
             streamNotice = refusal
             return
@@ -1503,8 +1986,21 @@ final class AppModel: ObservableObject {
             streamNotice = "That route to the stream is temporarily unavailable. Try another one nearby."
             return
         }
+        #if os(macOS)
+        // Android withWifiCheck before watching; an audio-only stream counts as voice.
+        if askWifiAdvice(voice: row.audioOnly, { [weak self] in self?.startWatching(row) }) { return }
+        #endif
         streamNotice = nil
-        let controller = WatchController(model: self, identity: identity, offer: row.announcement, name: row.label.title, route: row.route, transport: row.announcement.transport ?? .gatt, routeKey: key)
+        let joinKeys = beginJoinKeys()   // D1 (AppModel+Protocol.swift)
+        if joinKeys == nil, RotatingStreamPolicy.showsFixedId(offer: row.announcement, rotatingIds: rotatingIds) {
+            // Android rotid_downgrade: a version 2 source cannot decode a rotating request, so this one shows the fixed
+            // prefix while it waits (stated residual, phase 1b item 2).
+            AppLog.event("rotid_downgrade", ["role": "viewer", "reason": "selected_version_2"])
+            streamNotice = RotatingStreamPolicy.fixedIdNotice
+        }
+        // A new stream: role-2 entries pinned for an earlier join are not opened to this stream's source.
+        rotating.viewerRequest.startJoin(elapsedMs: RotatingDiscoveryRuntime.elapsedMs)
+        let controller = WatchController(model: self, identity: joinKeys?.identity ?? identity, joinKeys: joinKeys, offer: row.announcement, name: row.label.title, route: row.route, transport: row.announcement.transport ?? .gatt, routeKey: key)
         watch = controller
         refreshAdvertising()
     }
@@ -1512,7 +2008,11 @@ final class AppModel: ObservableObject {
     func watchFinished(_ controller: WatchController) {
         guard watch === controller else { return }
         watch = nil
+        dropJoinKeyPins(after: controller)   // D1
+        viewerRecovery.cancel(); viewerRecoveryRetry?.cancel(); viewerRecoveryRetry = nil
         let target = LogicalStreamTarget(controller.offer)
+        streamRetryOffer = controller.offer
+        if controller.searchGaveUp { noteStreamLost(controller); refreshAdvertising(); return }
         if controller.joined {
             streamJoinRetry.onJoined(target)
         } else if !controller.stoppedByUser {
@@ -1529,12 +2029,84 @@ final class AppModel: ObservableObject {
         takeStreamRetry()
     }
 
+    // MARK: Viewer recovery (Android: after an unexpected loss, the same stream on any route)
+
+    /// The routes the recovering viewer may try, with Android's per-route back-off (0, 1, 2, 4, then 8 s).
+    private let viewerRecovery = ViewerRecoveryRoutes<LogicalStreamTarget>()
+    private var viewerRecoveryRetry: DispatchWorkItem?
+
+    /// The watched stream was lost, or a rejoin through a route failed: that route backs off; look for any route of it.
+    func viewerLost(_ controller: WatchController) {
+        guard watch === controller else { return }
+        if controller.noteSearchLoss() { return }
+        let target = LogicalStreamTarget(controller.offer), now = ConnectionDriver.now
+        viewerRecovery.onFailure(target: target, route: controller.recoveryRouteKey, now: now)
+        if controller.routeWithdrawn {
+            // Android onRouteWithdrawn: the parent has no room for this viewer; that route waits 30 s unless its offer
+            // shows a new capacity generation.
+            viewerRecovery.onWithdrawn(target: target, route: controller.recoveryRouteKey,
+                                       generation: controller.offer.sequence & DiscoveryAnnouncement.sequenceGenerationMask, now: now)
+        }
+        refreshAdvertising()
+        takeViewerRecovery()
+    }
+
+    func viewerRecovered(_ controller: WatchController) {
+        guard watch === controller else { return }
+        viewerRecovery.cancel(); viewerRecoveryRetry?.cancel(); viewerRecoveryRetry = nil
+        refreshAdvertising()
+    }
+
+    /// Rejoins through the first listed, joinable route of the same stream whose back-off has passed; otherwise looks
+    /// again when the next waiting route opens (a newly listed route comes through `rebuildLists`).
+    private func takeViewerRecovery() {
+        guard let watch, watch.recovering, !watch.awaitingSource, watch.ended == nil, call == nil, live == nil else { return }
+        let now = ConnectionDriver.now
+        // Recovery never moves a rotating join to a version 2 route (that request would show the fixed prefix untapped).
+        let usable = streams.filter {
+            $0.joinable && RotatingStreamPolicy.joinRefusal(offer: $0.announcement, rotatingIds: rotatingIds, privateViewer: rotatingViewer) == nil
+                && RotatingStreamPolicy.mayRouteAutomatically(from: watch.offer, to: $0.announcement, rotatingIds: rotatingIds)
+        }
+        // Android's reconnection order: fewest relays, the lost route's transport, then the advertised ID. A route that
+        // failed is tried again only after a fresh sighting of its offer (Android drops the failed route's cached offer).
+        let sightings = radio.peers
+        // RV-C: never a route this watch dropped because its forwarder named a blocked source.
+        let allowed = watch.droppedRoutes.usable(usable) { ViewerRecovery.routeKey(self.streamRouteKey($0.id, $0.announcement)) }
+        let ranked = ViewerRecovery.ordered(allowed, offer: { $0.announcement }, preferredTransport: watch.transport)
+        if let row = viewerRecovery.candidate(now: now, listed: ranked, matches: { $0.matches($1.announcement) },
+                                              route: { ViewerRecovery.routeKey(self.streamRouteKey($0.id, $0.announcement)) },
+                                              seenAt: { sightings[$0.id]?.lastSeen },
+                                              generation: { $0.announcement.sequence & DiscoveryAnnouncement.sequenceGenerationMask }) {
+            viewerRecoveryRetry?.cancel(); viewerRecoveryRetry = nil
+            watch.rejoin(offer: row.announcement, route: row.route, routeKey: streamRouteKey(row.id, row.announcement))
+            refreshAdvertising()
+        } else if viewerRecoveryRetry == nil {
+            // An offer that is only seen again raises no list change: while recovering, look again at least every 0.5 s
+            // (a route waiting for a fresh sighting, or whose wait ends sooner).
+            let wait = min(viewerRecovery.nextOpening(now: now) ?? ViewerRecovery.recheckInterval, ViewerRecovery.recheckInterval)
+            let work = DispatchWorkItem { [weak self] in self?.viewerRecoveryRetry = nil; self?.takeViewerRecovery() }
+            viewerRecoveryRetry = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.05, execute: work)
+        }
+    }
+
     /// Failed live joins (StreamJoinRetry; on, control arm `-streamJoinRetry NO`).
     let streamJoinRetry = StreamJoinRetry<LogicalStreamTarget>(enabled: { AppSettings.streamJoinRetry })
+    /// The video codecs this device decodes (`VideoDecoderSupport.decodeMask` probes VideoToolbox; read once).
+    private lazy var videoDecodeMask: UInt8 = VideoDecoderSupport.decodeMask
     /// Try again on "Couldn't join ...".
     @Published private(set) var streamRetryTarget: LogicalStreamTarget?
     /// The watch screen that is open (a retry joins only while it shows, never in the background).
-    var watchScreenOpen = false { didSet { if !watchScreenOpen { streamJoinRetry.cancel(); streamRetryTarget = nil } } }
+    /// DEBUG `-NearbyAutoWatch`/`-NearbyAutoListen`: the stream the Live tab opens its player for, as a tap would (the
+    /// hook used to start the watch with no player on screen: audio under the Live list, device test 2026-11-12).
+    /// Release builds have no automation, so it stays nil there.
+    @Published var debugOpenStream: StreamRow?
+    var watchScreenOpen = false {
+        didSet {
+            if watchScreenOpen { liveNotice = nil }
+            else { streamJoinRetry.cancel(); streamRetryTarget = nil }
+        }
+    }
 
     func streamTryAgain() {
         guard let target = streamRetryTarget else { return }
@@ -1547,7 +2119,11 @@ final class AppModel: ObservableObject {
     /// Joins the pending retry's stream once it is listed (any route to the same logical stream).
     private func takeStreamRetry() {
         guard watchScreenOpen, watch == nil, call == nil, live == nil, streamJoinRetry.pending != nil else { return }
-        guard let row = streamJoinRetry.take(now: ConnectionDriver.now, listed: streams, matches: { $0.matches($1.announcement) }) else { return }
+        // The automatic retry of a rotating join never takes a version 2 route (a tap still can, with the notice).
+        let listed = streamRetryOffer.map { failed in
+            streams.filter { RotatingStreamPolicy.mayRouteAutomatically(from: failed, to: $0.announcement, rotatingIds: rotatingIds) }
+        } ?? streams
+        guard let row = streamJoinRetry.take(now: ConnectionDriver.now, listed: listed, matches: { $0.matches($1.announcement) }) else { return }
         AppLog.event("stream_join", ["event": "retry", "route": row.route])
         streamNotice = nil; streamRetryTarget = nil
         startWatching(row)
@@ -1555,19 +2131,67 @@ final class AppModel: ObservableObject {
 
     // MARK: Going live
 
-    func goLive(audioOnly: Bool = false, preset: UInt8 = AudioLive.presetVoice) {
+    /// `setup`: audio only opens its own screen first (Android screen_audio_broadcast: title, quality, Start); nothing is
+    /// advertised until Start. DEBUG automation starts at once (as Android test_audio_live_autostart).
+    func goLive(audioOnly: Bool = false, preset: UInt8 = AudioLive.presetVoice, setup: Bool = false) {
+        guard sourceGate.allowsGoLive else {
+            AppLog.event("source_gate", ["event": "refused", "action": "go_live"]); return
+        }
         guard live == nil, let identity, !audioOnly || AppSettings.audioLive else { return }
+        // Android ensureThermalReady: no video live at critical heat.
+        if !audioOnly, videoBlockedByHeat {
+            AppLog.event("live_thermal", ["event": "refused_critical"])
+            liveStoppedTitle = "Can't go live"; liveStoppedNotice = AppModel.tooHotText; return
+        }
+        #if os(macOS)
+        // Android withWifiCheck before a video live (audio only never asks).
+        if askWifiAdvice(voice: audioOnly, { [weak self] in self?.goLive(audioOnly: audioOnly, preset: preset, setup: setup) }) { return }
+        #endif
+        AppSettings.audioLiveLastChoice = audioOnly
         live = LiveController(model: self, identity: identity, transport: transport,
                               labels: peerLabelsEnabled, title: liveTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : liveTitle,
                               audioOnly: audioOnly, preset: preset)
-        live?.start()
+        if audioOnly && setup {
+            AppLog.event("radio_setup", ["event": "opened"])
+        } else {
+            if audioOnly { AppLog.event("radio_setup", ["event": "autostart"]) }
+            live?.start()
+        }
         refreshAdvertising()
+    }
+
+    /// Start on the audio-only screen (Android audio_live_start), with the title and quality chosen there.
+    func startRadio(preset: UInt8) {
+        guard let live, live.audioOnly, !live.running else { return }
+        let title = liveTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        live.configure(title: title.isEmpty ? nil : title, preset: preset)
+        live.start()
+        refreshAdvertising()
+    }
+
+    /// Android switchAudioLiveToVideo: the radio ends, then a new video live with the same title starts.
+    func switchRadioToVideo() {
+        guard let live, live.audioOnly, live.running else { return }
+        AppSettings.audioLiveLastChoice = false
+        videoAfterRadio = true
+        AppLog.event("radio_switch_to_video", [:])
+        live.stop()
     }
 
     func liveFinished(_ controller: LiveController) {
         guard live === controller else { return }
         live = nil
         refreshAdvertising()
+        if let notice = controller.stoppedNotice {
+            // After the broadcast screen closed, so the alert is not hidden under it.
+            let title = controller.stoppedTitle
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.liveStoppedTitle = title; self?.liveStoppedNotice = notice }
+        }
+        if videoAfterRadio {
+            videoAfterRadio = false
+            // A new stream, never converted in place; the title is still `liveTitle`.
+            if call == nil, watch == nil { goLive(audioOnly: false) }
+        }
     }
 
     // MARK: Identity verification
@@ -1581,11 +2205,60 @@ final class AppModel: ObservableObject {
 
     func verificationState(of fingerprint: IdentityFingerprint) -> VerificationState { book.state(of: fingerprint) }
 
-    /// QR scan: the scanned full fingerprint must equal one authenticated in this process.
+    /// BVMID1 scan: the scanned full fingerprint must equal one authenticated in this process. A static code has no
+    /// freshness, so with BVMID2 it records only "Checked by code" unless the DEBUG compat arm `-bvmid1Compat YES` is on
+    /// (Android `bvmid1_compat`, off, no Settings switch).
     func markVerified(scanned payload: IdentityQrPayload) throws {
         let authenticatedFp = authenticated[payload.fingerprint.nodeId.hex]
-        try book.markVerified(authenticated: authenticatedFp, confirmed: payload.fingerprint, name: payload.displayName, method: "qr")
+        // A contact already scanned (shield) keeps it: an older code never downgrades a stronger check.
+        let existing = book.contacts.first { $0.fingerprintHex == payload.fingerprint.hex }?.method
+        let method = existing == Bvmid1Policy.scanned ? Bvmid1Policy.scanned
+            : Bvmid1Policy.methodForBvmid1Scan(compat: AppSettings.labSwitch("bvmid1Compat", shipped: false))
+        try book.markVerified(authenticated: authenticatedFp, confirmed: payload.fingerprint, name: payload.displayName, method: method)
         try saveContacts()
+    }
+
+    /// BVMID2: the user confirmed "Is this <name>'s screen?" for a scan whose handshake key equals the code's. Always the
+    /// scanned method (shield); a contact already saved keeps its name.
+    func markScannedVerified(_ fingerprint: IdentityFingerprint, name: String) throws {
+        let saved = book.contacts.first { $0.fingerprintHex == fingerprint.hex }?.displayName
+        try book.markVerified(authenticated: authenticated[fingerprint.nodeId.hex], confirmed: fingerprint, name: saved ?? name,
+                              method: Bvmid1Policy.scanned)
+        try saveContacts()
+    }
+
+    /// Rename and "Save contact as" (Android `SecurityUi.renameContact`): the person-name rules, no name that reads like
+    /// another contact's, then the sealed store. The name is only ever on this device.
+    func renameContact(_ fingerprint: IdentityFingerprint, to input: String) -> ContactRenameOutcome {
+        guard contactsUnreadable == nil else { return .unreadable }
+        let decision = ContactNames.renameDecision(input, fingerprintHex: fingerprint.hex, contacts: book.contacts)
+        guard case .renamed(let name) = decision else { return decision }
+        do {
+            try book.rename(fingerprintHex: fingerprint.hex, to: name)
+            try saveContacts()
+            return decision
+        } catch {
+            return .unreadable
+        }
+    }
+
+    /// Naming v2 (Android `ContactClaims.recordClaim`): a verified contact's verified self-chosen name from a call, kept
+    /// sealed with the contact for its sheet. Never the title, never sent; nothing is kept for anyone else.
+    func recordContactClaim(_ fingerprint: IdentityFingerprint, name: String) {
+        guard book.state(of: fingerprint) == .verified, book.recordClaim(fingerprintHex: fingerprint.hex, name: name) else { return }
+        try? saveContacts()
+    }
+
+    /// The user saw or ignored the latest claim ("Use it as my label" or "Ignore").
+    func acknowledgeClaim(_ contact: VerifiedContact) {
+        guard book.acknowledgeClaim(fingerprintHex: contact.fingerprintHex) else { return }
+        try? saveContacts()
+    }
+
+    /// Both phones scanned each other during one visit of Add contact (kept with the contact, as Android's claims file).
+    func markScannedBothWays(_ fingerprint: IdentityFingerprint) {
+        guard book.markScannedBothWays(fingerprintHex: fingerprint.hex) else { return }
+        try? saveContacts()
     }
 
     func markVerified(sessionPeer fingerprint: IdentityFingerprint, name: String) throws {
@@ -1597,8 +2270,8 @@ final class AppModel: ObservableObject {
     private func nodeId(of contact: VerifiedContact) -> NodeId? {
         Data(hex: String(contact.fingerprintHex.prefix(32))).flatMap { try? NodeId(bytes: $0) }
     }
-    /// "Can see when I'm nearby" (default on, as Android).
-    func canSeeMe(_ contact: VerifiedContact) -> Bool { nodeId(of: contact).map { rotating.vault.canSeeMe($0) } ?? true }
+    /// "Can see when I'm nearby": not yet asked counts as off until the user answers (decision 2026-11-06).
+    func canSeeMe(_ contact: VerifiedContact) -> Bool { nodeId(of: contact).map { rotating.vault.canSeeMe($0) } ?? false }
     func setCanSeeMe(_ contact: VerifiedContact, _ on: Bool) {
         guard let node = nodeId(of: contact) else { return }
         let before = rotating.vault.generation
@@ -1606,21 +2279,58 @@ final class AppModel: ObservableObject {
         objectWillChange.send()
         presenceRevoked(from: before)
     }
+    /// Design QL revision 2: the scan's "Let <name>'s phone recognise yours nearby" answer, written to that person's "Can
+    /// see when I'm nearby" (a no for a contact holding a current lease revokes it, as the switch does). True only when
+    /// the presence store is persistent and the switch now reads as written, so a failed write withholds the lease.
+    func storeRecognitionChoice(_ fingerprint: IdentityFingerprint, recognise: Bool) -> Bool {
+        let node = fingerprint.nodeId
+        let before = rotating.vault.generation
+        rotating.vault.setCanSeeMe(node, recognise, epoch: rotating.currentEpoch())
+        objectWillChange.send()
+        presenceRevoked(from: before)
+        return rotating.vault.persistent && rotating.vault.canSeeMe(node) == recognise
+    }
+    /// A Contacts call to `contact` (the row's call buttons): the nearby person found by prefix or by an unambiguous
+    /// recognition, else the wait for a recognisable contact. False when it cannot be found now.
+    @discardableResult
+    func callContact(_ contact: VerifiedContact, type: CallType) -> Bool {
+        if let person = nearbyPerson(for: contact) { startCall(to: person, type: type); return true }
+        if contactReach(contact) == .recognisable, relayedCalls { waitForContact(contact, type: type); return true }
+        return false
+    }
+    /// Android `contactHint`: whether this device can recognise `contact` nearby and, if not, what the user can do.
+    /// DEBUG fixture: `-NearbyFixtureReach recognisable|ask|again|nearby` forces one hint for the UI tests.
+    func contactReach(_ contact: VerifiedContact) -> ContactReach.Hint {
+        #if DEBUG
+        if debugFixtureActive, let forced = RootView.debugArgument("-NearbyFixtureReach").flatMap(ContactReach.Hint.init(rawValue:)) {
+            return forced
+        }
+        #endif
+        guard let node = nodeId(of: contact) else { return .recognisable }
+        let holds = rotating.vault.leaseKey(of: node.bytes, day: PresenceLeases.dayOf(rotating.currentEpoch())) != nil
+        return ContactReach.hint(recognitionOn: rotatingIds && rotating.vault.persistent, holdsLease: holds,
+                                 scannedBothWays: contact.scannedBothWaysAt != nil, meetAvailable: meet.available)
+    }
     /// After a revocation the advertised rotating ID must come from the new generation at once: until the next
     /// boundary the old one is still a valid ID for the revoked contacts to recognise.
     private func presenceRevoked(from before: UInt32) {
         // A revocation while the vault cannot be read changes no stored generation but drops the in-memory keys.
         guard rotating.vault.generation != before || !rotating.vault.persistent else { return }
         presenceGeneration = rotating.vault.generation
+        presenceKeyRevision &+= 1
         refreshAdvertising()
     }
     /// "Reset presence key": a new generation; contacts recognise this phone again after the next mutual call.
     func resetPresenceKey() {
         rotating.vault.resetKey()
         presenceGeneration = rotating.vault.generation
+        presenceKeyRevision &+= 1
         refreshAdvertising()
     }
     @Published var presenceGeneration: UInt32 = 0
+    /// AB4F: advances on every presence revocation (including while the vault cannot be read and its stored generation
+    /// does not change) and on "Reset presence key"; the live role-1 offer is rebuilt when it changes.
+    private var presenceKeyRevision: Int64 = 0
 
     func forget(_ contact: VerifiedContact) {
         book.forget(contact.fingerprintHex); try? saveContacts()
@@ -1655,8 +2365,335 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Call blocking (Android CallBlocking, PersonPolicy, LocalReporting)
+
+    private func loadBlockList() {
+        let firstLoad = blockList == nil
+        blockListHolder.reloadIfNeeded { BlockedPeopleFile.load() }
+        blockList = blockListHolder.list
+        blockListDamaged = blockListHolder.damaged
+        if blockList != nil {
+            loggedBlockListReason = nil
+            reconcileBlockedPresenceIfNeeded()
+            // P6-A2: a list that became readable later must hide its people from the Live list now.
+            if firstLoad, radioConfigured { rebuildLists() }
+        } else {
+            let reason = blockListDamaged ? "damaged" : "unavailable"
+            if loggedBlockListReason != reason {
+                loggedBlockListReason = reason
+                AppLog.event("call_blocking", ["event": "list_unreadable", "reason": reason])
+            }
+        }
+    }
+
+    /// A locked Keychain blocks nobody until it can be read: retry on activation and at every gate, one file read only
+    /// while the list is nil (P6-A2).
+    func reloadBlockListIfNeeded() {
+        if blockList == nil { loadBlockList() }
+        reconcileBlockedPresenceIfNeeded()
+    }
+
+    /// Android `requestBlockedReconcile` after the first successful load: a blocked person holding this device's current
+    /// presence lease loses it (a new generation). The start-up pass does not fail closed when the vault is unavailable.
+    private func reconcileBlockedPresenceIfNeeded() {
+        guard !blockedReconciled, rotatingIds, rotating.vault.persistent, let list = blockList else { return }
+        blockedReconciled = true
+        let before = rotating.vault.generation
+        for person in list.people {
+            guard let fingerprint = try? IdentityFingerprint(hex: person.fingerprintHex) else { continue }
+            let node = fingerprint.nodeId
+            if rotating.vault.deliveredTo(node) {
+                rotating.vault.setCanSeeMe(node, false, epoch: rotating.currentEpoch())
+            }
+        }
+        presenceRevoked(from: before)
+    }
+
+    /// Blocked right now (fails open: an unreadable list blocks nobody).
+    func isBlocked(_ fingerprint: IdentityFingerprint) -> Bool {
+        reloadBlockListIfNeeded()
+        return blockList?.contains(fingerprint) ?? false
+    }
+    /// Blocked, known by the 128-bit node ID only (a forwarded stream's source, a link peer).
+    func isBlockedNode(_ node: NodeId) -> Bool {
+        reloadBlockListIfNeeded()
+        return blockList?.containsNode(node) ?? false
+    }
+    /// Streams from this person are hidden and left: blocked, or reported (a report keeps hiding after an unblock).
+    func hidesStreams(of node: NodeId) -> Bool {
+        reloadBlockListIfNeeded()
+        return blockList.map { $0.containsNode(node) || $0.reported(node: node) } ?? false
+    }
+
+    /// What block texts call a person: your contact label, else the handle (Android CallBlockingUi.nameFor).
+    func blockName(for fingerprint: IdentityFingerprint) -> String {
+        contactName(prefixHex: fingerprint.nodePrefixHex) ?? IdentityHandle.handle(prefix: fingerprint.nodeId.prefix) ?? "this person"
+    }
+
+    enum BlockOutcome { case blocked, alreadyBlocked, full, unavailable }
+
+    /// Every block goes through here (Recent, a contact, Decline and block, the radio listener, a report), so the
+    /// presence revocation always runs (Android BlockedPeople.block).
+    @discardableResult
+    func block(_ fingerprint: IdentityFingerprint) -> BlockOutcome {
+        reloadBlockListIfNeeded()
+        let result = blockListHolder.block(fingerprint, at: Date())
+        blockList = blockListHolder.list
+        switch result {
+        case .unavailable: return .unavailable
+        case .full: return .full
+        case .blocked, .alreadyBlocked:
+            revokePresence(of: fingerprint)
+            rebuildLists()
+            AppLog.event("call_blocking", ["event": "blocked"])
+            return result == .blocked ? .blocked : .alreadyBlocked
+        }
+    }
+
+    /// Blocks and says what happened on the Calls and Contacts notice (Android's toast).
+    func blockAndSay(_ fingerprint: IdentityFingerprint) {
+        let name = blockName(for: fingerprint)
+        switch block(fingerprint) {
+        case .blocked: callNotice = "\(name) blocked"
+        case .alreadyBlocked: callNotice = "\(name) is already blocked"
+        case .full: callNotice = "The block list is full. Unblock someone first."
+        case .unavailable: sayBlockNotSaved()
+        }
+    }
+
+    /// A Block that could not be saved because the list cannot be read: a damaged list offers Reset (Android); a locked
+    /// one says so and is read again later (nothing to reset).
+    private func sayBlockNotSaved() {
+        if blockListDamaged { blockListUnreadableAlert = true }
+        else { callNotice = "Could not save the block. The block list cannot be read right now." }
+    }
+
+    func unblock(_ person: BlockedPerson) {
+        guard var list = blockList, let fingerprint = try? IdentityFingerprint(hex: person.fingerprintHex), list.remove(fingerprint),
+              BlockedPeopleFile.save(list) else { return }
+        blockList = list
+        blockListHolder.replace(list)
+        rebuildLists()
+    }
+
+    /// Unblock from a contact's sheet (Android `ContactActions.blockOrUnblock`): true when they are no longer blocked.
+    @discardableResult
+    func unblock(_ fingerprint: IdentityFingerprint) -> Bool {
+        guard let person = blockList?.people.first(where: { $0.fingerprintHex == fingerprint.hex }) else { return false }
+        unblock(person)
+        return blockList?.contains(fingerprint) == false
+    }
+
+    /// Forgets every blocked person (the recovery for a damaged list). Logged, like the unreadable list itself (owner
+    /// decision 2026-11-06); the line carries no identity.
+    func resetBlockList() {
+        guard blockListHolder.reset() else { return }
+        BlockedPeopleFile.reset()
+        blockList = blockListHolder.list
+        blockListDamaged = blockListHolder.damaged
+        loggedBlockListReason = nil
+        rebuildLists()
+        AppLog.event("call_blocking", ["event": "list_reset"])
+    }
+
+    /// Android LocalReporting: block and keep hiding the person locally, then offer Tell MeshLive. AB3: `streamRoute` is
+    /// not kept (a route's token and advertised ID are chosen by its sender); the call sites still pass it.
+    func report(_ fingerprint: IdentityFingerprint, streamRoute: String?) {
+        reloadBlockListIfNeeded()
+        guard var list = blockList else {
+            sayBlockNotSaved()
+            return
+        }
+        let result = list.report(fingerprint, at: Date())
+        if result == .full {
+            callNotice = "The block list is full. Unblock someone first."
+            return
+        }
+        guard BlockedPeopleFile.save(list) else {
+            callNotice = "Could not save the block. The block list cannot be read right now."
+            return
+        }
+        blockList = list
+        blockListHolder.replace(list)
+        revokePresence(of: fingerprint)
+        rebuildLists()
+        AppLog.event("call_blocking", ["event": "reported"])
+        reportDone = true
+    }
+
+    /// Blocking a contact who holds this device's current presence lease stops it (a new generation; Android
+    /// PresenceStore.revokeForBlocked). Their "Can see when I'm nearby" switch goes off and stays off. If the vault is
+    /// not persistent, fail closed: a new in-memory generation, so no lease can be delivered (P6-A4).
+    private func revokePresence(of fingerprint: IdentityFingerprint) {
+        guard rotatingIds else { return }
+        let node = fingerprint.nodeId
+        if !rotating.vault.persistent {
+            let before = rotating.vault.generation
+            rotating.vault.newGeneration(epoch: rotating.currentEpoch(), reason: "blocked_unreadable")
+            presenceRevoked(from: before)
+            AppLog.event("rotid_presence", ["event": "revoked", "reason": "blocked_unreadable"])
+            return
+        }
+        guard rotating.vault.deliveredTo(node) else { return }
+        let before = rotating.vault.generation
+        rotating.vault.setCanSeeMe(node, false, epoch: rotating.currentEpoch())
+        presenceRevoked(from: before)
+        AppLog.event("rotid_presence", ["event": "revoked", "reason": "blocked"])
+    }
+
+    /// Android `CallBlocking.gate`: the block list, "Block unknown callers" and the verified contacts. Fails open.
+    func callGateDecision(_ caller: CallGateCaller) -> CallGateDecision {
+        reloadBlockListIfNeeded()
+        let standing: ContactStanding
+        if caller.pseudonymous || caller.fingerprint == nil { standing = .notVerified }
+        else if contactsUnreadable != nil { standing = .unknown }
+        else { standing = book.state(of: caller.fingerprint!) == .verified ? .verified : .notVerified }
+        return blockListHolder.gateDecision(blockUnknown: blockUnknownCallers, caller: caller, standing: standing)
+    }
+
+    /// An incoming call the gate refused never shows here: its controller leaves the screen at once (kept like a busy
+    /// listener until its engine has declined), and an unknown caller leaves a "Blocked call" in Recent.
+    func hideSilentDecline(_ controller: CallController, unknown: Bool) {
+        if unknown { recordBlockedCall() }
+        guard call === controller else { return }
+        call = nil
+        controller.busyMode = true
+        busyControllers.append(controller)
+        refreshAdvertising()
+    }
+
+    private func recordBlockedCall() {
+        CallHistory.add(CallRecord(prefixHex: "", direction: .incoming, video: false, at: Date(), seconds: 0, name: nil, blocked: true))
+        reloadRecentCalls()
+    }
+
+    /// Android "Hide this livestream" (`LocalReporting.hideStream`) for a source that did not authenticate itself. AB3: a
+    /// route whose fixed ID the viewer's hop proved (logical token and advertised ID, never the token alone) stays hidden
+    /// with the block list, sealed on this device and deleted with it; if the list cannot be read or saved, that route is
+    /// hidden for this run only. An unproven or rotating route could be a copy of someone else's, so only that
+    /// advertiser's radio address is hidden, for this run. Nothing is sent and nobody is blocked.
+    func hideLivestream(_ offer: DiscoveryAnnouncement, address: String, hopAuthenticated: Bool) {
+        reloadBlockListIfNeeded()
+        guard let route = BlockedStreams.keptRoute(offer, hopAuthenticated: hopAuthenticated) else {
+            AppLog.event("call_blocking", ["event": "stream_hidden", "kept": "false", "proven": "false"])
+            hiddenStreamAddresses.insert(address)
+            rebuildLists()
+            return
+        }
+        if var list = blockList, list.hideStream(route: route), BlockedPeopleFile.save(list) {
+            blockList = list
+            blockListHolder.replace(list)
+            AppLog.event("call_blocking", ["event": "stream_hidden", "kept": "true", "proven": "true"])
+            rebuildLists()
+        } else {
+            AppLog.event("call_blocking", ["event": "stream_hidden", "kept": "false", "proven": "true"])
+            hideStreamRoute(offer)
+        }
+    }
+
+    /// A stream whose source authenticated as a blocked person: this route stays hidden for this run (never the token
+    /// alone, Android review 2026-10-27 finding 1).
+    func hideStreamRoute(_ offer: DiscoveryAnnouncement) {
+        let key = BlockedStreams.routeKey(offer)
+        hiddenStreamRoutes.removeAll { $0 == key }
+        hiddenStreamRoutes.append(key)
+        if hiddenStreamRoutes.count > 256 { hiddenStreamRoutes.removeFirst(hiddenStreamRoutes.count - 256) }
+        rebuildLists()
+    }
+
+    /// The one contact a rotating offer is recognised as (presence lease), as a 12-hex prefix, or nil.
+    private func recognisedContactPrefix(_ offer: DiscoveryAnnouncement) -> String? {
+        let hits = rotating.vault.recognition.lookup(offer.nodeIdPrefix)
+        guard hits.count == 1 else { return nil }
+        return contacts.first { $0.fingerprintHex.hasPrefix(hits[0].contact.hex) }?.nodePrefixHex
+    }
+
+    /// The full fingerprint behind a Recent row: only a verified contact's row has one (strangers are stored by
+    /// generated name only).
+    func fingerprint(ofRecent record: CallRecord) -> IdentityFingerprint? {
+        guard record.callable, let contact = contacts.first(where: { $0.nodePrefixHex == record.prefixHex }) else { return nil }
+        return try? IdentityFingerprint(hex: contact.fingerprintHex)
+    }
+
+    /// The full fingerprint behind a Nearby row: only a verified contact (a fixed prefix, or a rotating ID recognised
+    /// through its presence lease) has one; anyone else uses a temporary ID that cannot be blocked one by one.
+    func fingerprint(ofNearby person: PersonRow) -> IdentityFingerprint? {
+        guard let contact = contacts.first(where: { nearbyPerson(for: $0)?.id == person.id }) else { return nil }
+        return try? IdentityFingerprint(hex: contact.fingerprintHex)
+    }
+
+    /// Reloads Recent from the sealed history and notes whether a stored history cannot be opened now.
+    private func reloadRecentCalls() {
+        recentCalls = CallHistory.all
+        recentUnreadable = recentCalls.isEmpty && CallHistory.unreadable
+    }
+
+    /// "Clear history" (Android `RecentCalls.clear`): deletes the whole history, also one that cannot be opened.
+    func clearRecentHistory() {
+        #if DEBUG
+        if debugFixtureActive { recentCalls = []; recentUnreadable = false; return }
+        #endif
+        CallHistory.clear()
+        reloadRecentCalls()
+        AppLog.event("recent_calls", ["event": "cleared"])
+    }
+
+    /// Calls › Nearby "Search again" (Android `restartPrivateCallDiscovery`): restarts the scan; the list updates by itself.
+    func searchAgain() {
+        radio.restartScan()
+        AppLog.event("people_search", ["event": "again"])
+    }
+
+    /// Incoming call screen: Decline and block (Android afterDeclineAndBlock; offered only for a real-key caller).
+    func declineAndBlock(_ controller: CallController) {
+        let fingerprint = controller.fingerprint
+        controller.decline()
+        guard let fingerprint else { return }
+        let name = blockName(for: fingerprint)
+        switch block(fingerprint) {
+        case .blocked, .alreadyBlocked: callNotice = "Declined and blocked \(name)"
+        case .full: callNotice = "The block list is full. Unblock someone first."
+        case .unavailable: sayBlockNotSaved()
+        }
+    }
+
+    /// Incoming call screen: Report (decline, then block and hide; offered only for a real-key caller).
+    func declineAndReport(_ controller: CallController) {
+        let fingerprint = controller.fingerprint
+        controller.decline()
+        if let fingerprint { report(fingerprint, streamRoute: nil) }
+    }
+
+    /// Incoming call screen: a plain Decline. A caller with a one-time ID cannot be blocked one by one, so once (until
+    /// "Not now") this offers Block unknown callers (Android offerBlockUnknownAfterDecline).
+    /// A ringing call's screen is a full-screen cover at the root; an alert still showing there would block it. Closes
+    /// the decline offer, the report confirmation and the block list alert (each only informs or offers, and the
+    /// decline offer comes back after the next decline). True when one was showing.
+    func closeAlertsForRingingCall() -> Bool {
+        let showing = askBlockUnknown || reportDone || blockListUnreadableAlert
+        if showing { AppLog.event("call_alerts", ["event": "closed_for_ring"]) }
+        askBlockUnknown = false; reportDone = false; blockListUnreadableAlert = false
+        return showing
+    }
+
+    /// Set by a Decline of a temporary-ID caller; the offer is asked for after that call's screen has closed.
+    private var offerBlockUnknownAfterCall = false
+
+    func declineFromScreen(_ controller: CallController) {
+        let oneTime = controller.fingerprint == nil
+        controller.decline()
+        // Offered once the call screen has gone (`callFinished`). Device test 2026-11-12: asked for while the
+        // full-screen call cover still showed "Call declined", the alert was never shown, and its stuck state then kept
+        // the next call from presenting its screen (testACallRingingOverTheDeclineOfferStillShowsItsScreen).
+        if oneTime, !blockUnknownCallers, !AppSettings.blockUnknownOfferDismissed { offerBlockUnknownAfterCall = true }
+    }
+
     private func saveContacts() throws {
         guard contactsUnreadable == nil else { throw ProtocolError.state("The verified-contact store is unreadable; reset it first") }
+        #if DEBUG
+        // The simulator fixture's contacts live in memory only.
+        if debugFixtureActive { contacts = book.contacts; rebuildLists(); return }
+        #endif
         try VerifiedContactsStore.save(book.contacts)
         contacts = book.contacts
         rebuildLists()
@@ -1664,7 +2701,11 @@ final class AppModel: ObservableObject {
 
     func myQrText() -> String? {
         guard let fingerprint else { return nil }
-        let name = displayName.trimmingCharacters(in: .whitespaces).isEmpty ? (AppPlatform.isMac ? "Mac \(handle.prefix(5))" : "Phone \(handle.prefix(5))") : displayName
+        // The code is shown face to face to add a contact: it carries "Your name" unless "Who sees my name" is Nobody
+        // (Android 2026-11-04, one name); otherwise the neutral "Phone"/"Mac" and the first five ID symbols.
+        let own = displayName.trimmingCharacters(in: .whitespaces)
+        let neutral = AppPlatform.isMac ? "Mac \(handle.prefix(5))" : "Phone \(handle.prefix(5))"
+        let name = own.isEmpty || namesAudience == .nobody ? neutral : displayName
         return try? IdentityQrCodec.encode(IdentityQrPayload(fingerprint: fingerprint, displayName: name))
     }
 
@@ -1692,6 +2733,8 @@ final class AppModel: ObservableObject {
         }
         #endif
         if name == "readme" { applyReadmeFixture(); return }
+        // `empty`: nobody nearby. The fixture is active so a real iPhone's radio does not fill the list with the phones around it.
+        if name == "empty" { debugFixtureActive = true; people = []; streams = []; return }
         guard name == "populated" else { return }
         debugFixtureActive = true
         if RootView.debugArgument("-NearbyBluetoothStuck") == "1" { bluetoothRestartNeeded = true }
@@ -1701,6 +2744,14 @@ final class AppModel: ObservableObject {
             PersonRow(id: UUID(), label: PeerLabel(prefix: ravi), prefixHex: ravi.hex, transport: .l2cap, relays: 2, isIPhone: false),
             PersonRow(id: UUID(), label: PeerLabel.nearbyPhone(seed: stranger), prefixHex: stranger.hex, transport: .gatt, relays: 0, isIPhone: true),
         ]
+        // `-NearbyFixtureCrowd 1`: more than 8 people nearby, so Calls shows Android's search field.
+        if RootView.debugArgument("-NearbyFixtureCrowd") == "1" {
+            for index in 1...7 {
+                let seed = Data([0x20, 0x21, 0x22, 0x23, 0x24, UInt8(index)])
+                people.append(PersonRow(id: UUID(), label: PeerLabel.nearbyPhone(seed: seed), prefixHex: seed.hex, transport: .gatt,
+                                        relays: 0, isIPhone: false))
+            }
+        }
         let streamFlags = DiscoveryAnnouncement.flagStreamAvailable | DiscoveryAnnouncement.flagGattTransport
         streams = [
             StreamRow(id: UUID(), label: PeerLabel(prefix: asha, contactName: "Asha"),
@@ -1716,14 +2767,31 @@ final class AppModel: ObservableObject {
                                                           streamToken: 0x8555_1234, routeCost: 0, sequence: 1, streamBitrateKbps: 25),
                       advertisedTitle: "Neighbourhood radio, ward 12 updates"),
         ]
-        // In memory only: a verified contact for the Verify screen (its presence switch is a real vault entry).
+        // In memory only (saveContacts writes nothing while the fixture runs): Asha, scanned, and Ravi, checked by code, who
+        // now calls themselves "Ravi Kumar". Their presence switches are real vault entries.
+        var raviContact = VerifiedContact(fingerprint: IdentityFingerprint(publicKey: try! SoftwareSigningIdentity(rawScalar: Data(repeating: 9, count: 32)).publicKeyEncoded),
+                                          displayName: "Ravi", method: "safety-code")
+        raviContact.claimedName = "Ravi Kumar"
+        raviContact.acknowledgedClaim = "Ravi"
         contacts = [VerifiedContact(fingerprint: IdentityFingerprint(publicKey: try! SoftwareSigningIdentity(rawScalar: Data(repeating: 7, count: 32)).publicKeyEncoded),
-                                    displayName: "Asha", method: "qr")]
+                                    displayName: "Asha", method: "qr"), raviContact]
+        book.restore(contacts)
         recentCalls = [
             CallRecord(prefixHex: asha.hex, direction: .outgoing, video: true, at: Date().addingTimeInterval(-300), seconds: 125),
             CallRecord(prefixHex: ravi.hex, direction: .missed, video: false, at: Date().addingTimeInterval(-3_600), seconds: 0),
             CallRecord(prefixHex: asha.hex, direction: .incoming, video: false, at: Date().addingTimeInterval(-86_400), seconds: 3_725),
         ]
+        // DEBUG fixtures for Calls and Recent: Ravi's row heard from two phones, a stranger's recent call, the follow-up
+        // offer, and a history that cannot be opened.
+        if RootView.debugArgument("-NearbyFixtureCopiedId") == "1" {
+            people = people.map { row in var flagged = row; flagged.copiedId = row.prefixHex == ravi.hex; return flagged }
+        }
+        if RootView.debugArgument("-NearbyFixtureStranger") == "1" {
+            recentCalls.insert(CallRecord(prefixHex: "", direction: .incoming, video: true, at: Date().addingTimeInterval(-120), seconds: 40,
+                                          name: "gold fox", outcome: RecentCallOutcome.answered.rawValue), at: 0)
+        }
+        if RootView.debugArgument("-NearbyFixtureStrangerFollowUp") == "1" { strangerFollowUp = "Gold Fox" }
+        if RootView.debugArgument("-NearbyFixtureRecentUnreadable") == "1" { recentCalls = []; recentUnreadable = true }
     }
 
     /// README screenshots (`-NearbyFixture readme`): the same invented people and streams as Android's store
@@ -1752,23 +2820,48 @@ final class AppModel: ObservableObject {
     }
 
     /// Screenshot aid only: `-NearbyScreen call` (outgoing, ringing), `call-incoming`, `call-incoming-voice`,
-    /// `call-active`, `call-ended`, `call-mismatch`. Unconnected: no engine runs, nothing is sent.
+    /// `call-active`, `call-active-video` (camera on, no capture), `call-ended`, `call-mismatch`. Unconnected: no engine runs, nothing is sent.
     func showDebugCall(_ variant: String = "call") {
         guard call == nil, let identity else { return }
-        let incoming = variant.hasPrefix("call-incoming")
+        let connectingCallee = variant.hasPrefix("call-connecting-callee")
+        let incoming = variant.hasPrefix("call-incoming") || connectingCallee
         let controller = CallController(model: self, role: incoming ? .callee : .caller, peerName: "Asha", peerPrefixHex: "a1b2c3d4e5f6",
-                                        identity: identity, transport: .gatt, type: variant == "call-incoming" ? .video : .voice, relayHops: 0)
+                                        identity: identity, transport: .gatt, type: variant == "call-incoming" || variant == "call-active-video" ? .video : .voice, relayHops: 0)
         controller.label = PeerLabel(prefix: Data(hex: "a1b2c3d4e5f6")!, selfName: "Asha")
+        if incoming { controller.debugSetClaimedName("asha") }
         switch variant {
+        case "call-connecting-callee", "call-connecting-callee-rings":
+            // A1 fixture: an authenticated callee link that has not carried a ringing Invite yet.
+            controller.phaseText = "Connecting…"
+            if variant == "call-connecting-callee-rings" {
+                // `-NearbyFixtureDeclineOffer 1`: the "Block all unknown callers?" alert of an earlier Decline is up.
+                if RootView.debugArgument("-NearbyFixtureDeclineOffer") == "1" { askBlockUnknown = true }
+                // P6-A1: the Invite arrives after `call = controller`, as it does on a real link.
+                let ringAfter = RootView.debugArgument("-NearbyFixtureRingAfter").flatMap(Double.init) ?? 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + ringAfter) { [weak controller] in
+                    controller?.phase = .incomingRinging
+                    controller?.phaseText = "Incoming call"
+                }
+            }
         case "call-incoming", "call-incoming-voice":
             controller.phase = .incomingRinging; controller.offeredType = variant == "call-incoming" ? .video : .voice
             controller.phaseText = "Incoming call"
+            if variant == "call-incoming" { controller.fingerprint = SoftwareSigningIdentity().fingerprint }   // a real-key caller (Decline and block shows)
             if let seconds = RootView.debugArgument("-NearbyFixtureMissAfter").flatMap(Double.init) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak controller] in
                     if controller?.phase == .incomingRinging { controller?.debugCallerGaveUp() }
                 }
             }
-        case "call-active", "call-mismatch":
+            // `-NearbyFixtureRingAgainAfter N`: N s after launch a second call rings (device test 2026-11-12: Decline a
+            // temporary-ID call, its "Block all unknown callers?" alert shows, and the next call must still show).
+            if let seconds = RootView.debugArgument("-NearbyFixtureRingAgainAfter").flatMap(Double.init) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+                    guard let self, self.call == nil || self.call?.ended != nil else { return }
+                    self.call = nil
+                    self.showDebugCall("call-connecting-callee-rings")
+                }
+            }
+        case "call-active", "call-mismatch", "call-active-video":
             controller.phase = .active; controller.activeSince = Date().addingTimeInterval(-83)
             controller.fingerprint = SoftwareSigningIdentity().fingerprint
             if variant == "call-mismatch" { controller.verification = .mismatch }
@@ -1777,7 +2870,6 @@ final class AppModel: ObservableObject {
         default:
             controller.phase = .outgoingRinging; controller.phaseText = "Ringing…"
         }
-        controller.subject = RootView.debugArgument("-NearbyLegacySubject")
         call = controller
     }
     #endif
@@ -1793,12 +2885,15 @@ final class AppModel: ObservableObject {
         // The call is detached first, so its end never records, notifies or shows anything after the wipe.
         let ending = call; call = nil
         ending?.end(); watch?.stop(); live?.stop()
+        joinSessions.end(.wipe)   // D1
         radio.stopAll()
         streamRoutePenalties.reset(); streamNotice = nil
         audioRelayMemory.reset()
         bmh3Pins.clear()
         _ = EmergencyWipe.run()
-        identity = nil; contacts = []; book.reset(); authenticated = [:]; people = []; streams = []; recentCalls = []
+        blockListHolder.clear()
+        identity = nil; contacts = []; book.reset(); authenticated = [:]; people = []; streams = []; recentCalls = []; blockList = nil;
+        strangerFollowUp = nil; recentUnreadable = false; hiddenStreamRoutes = []; hiddenStreamAddresses = []; blockListDamaged = false
         wiped = true
     }
 }

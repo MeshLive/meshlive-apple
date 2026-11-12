@@ -65,3 +65,102 @@ final class DiscoveryTableTests: XCTestCase {
         XCTAssertNotNil(table.entry(rowId: DiscoveryKey(streamOffer(token: 9)).rowId))
     }
 }
+
+/// Android's copied-ID warning (CopiedIdTracker, Design G): two phones sending one rotating ID at the same time.
+final class CopiedIdTrackerTests: XCTestCase {
+    private let id = Data([0x44, 0xe6, 0x9c, 0x0a, 0x7a, 0x7d])
+    private let pcServices = ["180A", "C8D5A101-0000-1000-8000-00805F9B34FB"]
+
+    private func hear(_ tracker: CopiedIdTracker, _ address: UUID, at ms: Int64, cost: UInt8 = 0,
+                      form: CopiedIdTracker.TwinForm? = nil) {
+        tracker.observe(id: id, address: address, routeCost: cost, nowMs: ms, form: form)
+    }
+
+    /// Two addresses taking turns every 100 ms from `from` until `until`.
+    private func alternate(_ tracker: CopiedIdTracker, _ a: UUID, _ b: UUID, from: Int64 = 0, until: Int64,
+                           costB: UInt8 = 0, formA: CopiedIdTracker.TwinForm? = nil, formB: CopiedIdTracker.TwinForm? = nil) {
+        for t in stride(from: from, to: until, by: 200) {
+            hear(tracker, a, at: t, form: formA)
+            hear(tracker, b, at: t + 100, cost: costB, form: formB)
+        }
+    }
+
+    /// One address after another, each heard for 1 s, 100 ms apart (an advertising restart each time).
+    private func handOver(_ tracker: CopiedIdTracker, addresses: Int) {
+        for index in 0..<addresses {
+            let address = UUID(), start = Int64(index) * 1_100
+            for t in stride(from: start, to: start + 1_000, by: 100) { hear(tracker, address, at: t) }
+        }
+    }
+
+    func testTwoPhonesSendingOneIDAtOnceAreFlaggedOnTheSecondOccasion() {
+        let tracker = CopiedIdTracker(), a = UUID(), b = UUID()
+        alternate(tracker, a, b, until: 1_000)
+        XCTAssertFalse(tracker.warned(id), "one occasion can be a coincidence")
+        alternate(tracker, a, b, from: 1_000, until: 3_000)
+        XCTAssertTrue(tracker.warned(id))
+    }
+
+    func testAPhoneMovingToANewAddressIsNotACopy() {
+        let tracker = CopiedIdTracker()
+        handOver(tracker, addresses: 4)
+        XCTAssertFalse(tracker.warned(id), "each address stops before the next starts: a handover never interleaves")
+    }
+
+    func testTheOverlapControlArmRestoresTheTwoSecondRule() {
+        let tracker = CopiedIdTracker()
+        tracker.requireOverlap = false
+        handOver(tracker, addresses: 4)
+        XCTAssertTrue(tracker.warned(id), "without the overlap rule a quick handover counts")
+    }
+
+    func testARelaysMirrorOneHopFurtherIsNotACopy() {
+        let tracker = CopiedIdTracker()
+        alternate(tracker, UUID(), UUID(), until: 3_000, costB: 1)
+        XCTAssertFalse(tracker.warned(id))
+    }
+
+    func testAPCsTwoAdvertisingSetsAreOneSender() {
+        let form = CopiedIdTracker.twinForm(serviceUUIDs: pcServices)
+        XCTAssertNotNil(form)
+        let tracker = CopiedIdTracker()
+        alternate(tracker, UUID(), UUID(), until: 3_000, formA: form, formB: form)
+        XCTAssertFalse(tracker.warned(id), "identical sets with Device Information are the PC's twin")
+        let control = CopiedIdTracker()
+        control.pcPairExempt = false
+        alternate(control, UUID(), UUID(), until: 3_000, formA: form, formB: form)
+        XCTAssertTrue(control.warned(id), "the control arm warns for the twin too")
+    }
+
+    func testOnlyAnIdenticalPairWithDeviceInformationIsExempt() {
+        XCTAssertNil(CopiedIdTracker.twinForm(serviceUUIDs: ["C8D5A101-0000-1000-8000-00805F9B34FB"]),
+                     "a phone's compact offer carries no 0x180A")
+        let form = CopiedIdTracker.twinForm(serviceUUIDs: pcServices)
+        let different = CopiedIdTracker.twinForm(serviceUUIDs: pcServices + ["FEAA"])
+        let tracker = CopiedIdTracker()
+        alternate(tracker, UUID(), UUID(), until: 3_000, formA: form, formB: different)
+        XCTAssertTrue(tracker.warned(id), "different lists are two senders")
+        let three = CopiedIdTracker()
+        let a = UUID(), b = UUID(), c = UUID()
+        for t in stride(from: Int64(0), to: 3_000, by: 300) {
+            hear(three, a, at: t, form: form); hear(three, b, at: t + 100, form: form); hear(three, c, at: t + 200, form: form)
+        }
+        XCTAssertTrue(three.warned(id), "a third address is never part of a twin")
+    }
+
+    func testAPCRestartingOneSetWithANewAddressStaysOneSender() {
+        let form = CopiedIdTracker.twinForm(serviceUUIDs: pcServices)
+        let tracker = CopiedIdTracker(), a = UUID()
+        alternate(tracker, a, UUID(), until: 3_000, formA: form, formB: form)
+        alternate(tracker, a, UUID(), from: 3_000, until: 6_000, formA: form, formB: form)
+        XCTAssertFalse(tracker.warned(id), "the replaced address is superseded, not a third sender")
+    }
+
+    func testAnIDThatLeftTheAirIsForgotten() {
+        let tracker = CopiedIdTracker()
+        alternate(tracker, UUID(), UUID(), until: 3_000)
+        XCTAssertTrue(tracker.warned(id))
+        tracker.prune(nowMs: 3_000 + CopiedIdTracker.staleMs + 1)
+        XCTAssertFalse(tracker.warned(id))
+    }
+}

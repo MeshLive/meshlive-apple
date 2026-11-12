@@ -89,7 +89,10 @@ public struct DiscoveryAnnouncement: Equatable {
             throw ProtocolError.malformed("Route-recovery discovery metadata and flag must agree")
         }
         var w = BinaryWriter(capacity: Self.encodedBytes)
-        guard !rotating || isPrivateCallOffer || isStreamOffer else { throw ProtocolError.malformed("Only call and stream offers rotate here") }
+        // Phase 1b: call offers, stream offers and (as this phone's own role-2 request) viewer requests rotate.
+        guard !rotating || isPrivateCallOffer || isStreamOffer || flags & Self.flagAcceptingConnections != 0 else {
+            throw ProtocolError.malformed("Only call offers, stream offers and viewer requests rotate")
+        }
         w.byte(rotating ? Self.rotatingVersion : Self.version); w.bytes(nodeIdPrefix); w.byte(flags); w.byte(capabilitySummary); w.u32(streamToken); w.byte(routeCost)
         if let recovery = recoveryFromNodeIdPrefix {
             guard recovery.count == NodeId.prefixBytes else { throw ProtocolError.malformed("Invalid recovery prefix") }
@@ -122,9 +125,13 @@ public struct DiscoveryAnnouncement: Equatable {
             recoveryFromNodeIdPrefix = nil
             sequence = try c.byte(); streamWidth = try c.u16(); streamHeight = try c.u16(); streamFps = try c.byte()
         }
-        // Phase 1b: Android's version 5 stream offers (role-1 RDI, route token = logical XOR mask(RDI)) decode too, so
-        // an iPhone sees default Android streams; version 5 viewer requests answer only version 5 offers (never ours).
-        if rotating && !isPrivateCallOffer && !isStreamOffer { throw ProtocolError.malformed("Only call and stream offers rotate here") }
+        // Phase 1b: Android's version 5 stream offers (role-1 RDI, route token = logical XOR mask(RDI)) and viewer requests
+        // (role-2 RDI, Android's 22-byte scan response, with or without the recovery hint) decode, so an iPhone sees default
+        // Android streams and an Apple source that rotates its own offer (AB4) can answer an Android viewer. Whether a
+        // consumer may act on a rotating request is decided by that consumer (`RotatingSourcePolicy`).
+        if rotating && !isPrivateCallOffer && !isStreamOffer && flags & Self.flagAcceptingConnections == 0 {
+            throw ProtocolError.malformed("Only call offers, stream offers and viewer requests rotate")
+        }
     }
 
     /// Android manufacturer-specific data as Core Bluetooth reports it: little-endian company ID, then the value.
@@ -193,10 +200,12 @@ public enum CompactAnnouncement {
             throw ProtocolError.malformed("An audio-only offer has no video geometry")
         }
         guard audioOnly || a.capabilitySummary & ~allowed == 0 else { throw ProtocolError.malformed("Unsupported capability bits") }
-        // Review R1: encoders keep the H.264 bit (56) at 0 until H.264 is negotiated; decoders carry all three.
-        let codecs = audioOnly ? 0 : a.capabilitySummary & (StreamProtocol.h264Enabled ? 0x7 : 0x3)
-        // Compact v2 (rotating discovery IDs, phase 1): call offers only; version bits 111..110 = 10.
-        if a.rotating, kind != .privateCallOffer { throw ProtocolError.malformed("Only call offers rotate in phase 1") }
+        // The review and Design HC (open question Q-HC2): encoders keep bit 56 at 0, also with the H.264 master on,
+        // and HEVC (summary 0x80) is refused above; decoders carry all three bits.
+        let codecs = audioOnly ? 0 : a.capabilitySummary & VideoCodecMap.compactSummaryCodecBits
+        // Compact v2 (rotating discovery IDs): version bits 111..110 = 10 and bits 107..60 the role's RDI, for every
+        // kind (Android CompactDiscoveryAnnouncement; phase 1 call offers, phase 1b viewer requests and stream offers).
+        // A compact v2 viewer request has no recovery field: the guard above already refuses route recovery.
         var hi: UInt64 = UInt64(magic) << 48 | (a.rotating ? 2 : 1) << 46 | UInt64(kind.rawValue) << 44
         var prefix: UInt64 = 0
         for b in a.nodeIdPrefix { prefix = prefix << 8 | UInt64(b) }
@@ -238,7 +247,8 @@ public enum CompactAnnouncement {
         let lo = b.suffix(8).reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
         let version = (hi >> 46) & 0x3
         guard UInt16(hi >> 48) == magic, version == 1 || (version == 2 && acceptRotating), let kind = Kind(rawValue: UInt8((hi >> 44) & 0x3)) else { return nil }
-        if version == 2 && kind != .privateCallOffer { return nil }
+        // Compact v2 decodes for every kind, as Android: what a consumer may do with a rotating viewer request or
+        // stream offer is decided by that consumer (a source here answers fixed-prefix requests only).
         let prefixValue = (hi & 0xfff_ffff_ffff) << 4 | lo >> 60
         var prefix = Data(); for shift in stride(from: 40, through: 0, by: -8) { prefix.append(UInt8((prefixValue >> UInt64(shift)) & 0xff)) }
         let gatt = lo >> 59 & 1 == 1, relay = lo >> 58 & 1 == 1, paused = lo >> 57 & 1 == 1

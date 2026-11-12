@@ -118,6 +118,14 @@ public struct VerifiedContact: Codable, Equatable, Identifiable {
     public var displayName: String
     public let method: String
     public let verifiedAt: Date
+    /// Both phones scanned each other's BVMID2 code during one visit of Add contact (nil before; older records have none).
+    public var scannedBothWaysAt: Date?
+    /// Naming v2 (Android `ContactClaims`): the last verified name this contact called themselves in a call, and the one
+    /// the user has seen or ignored. Sealed with the contact; never the title, never sent. Older records have none.
+    public var claimedName: String?
+    public var acknowledgedClaim: String?
+    /// A claimed name the user has not seen yet ("<name> now calls themselves <claim>").
+    public var claimPending: Bool { (claimedName ?? "").isEmpty == false && claimedName != acknowledgedClaim }
     public var id: String { fingerprintHex }
     public var nodePrefixHex: String { String(fingerprintHex.prefix(12)) }
     public init(fingerprint: IdentityFingerprint, displayName: String, method: String, verifiedAt: Date = Date()) {
@@ -146,10 +154,47 @@ public final class VerifiedContactBook: PeerIdentityGate {
         guard !contacts.contains(where: { $0.nodePrefixHex == confirmed.nodePrefixHex && $0.fingerprintHex != confirmed.hex }) else {
             throw ProtocolError.state("Forget the existing contact with this prefix first")
         }
+        let previous = contacts.first { $0.fingerprintHex == confirmed.hex }
         contacts.removeAll { $0.fingerprintHex == confirmed.hex }
-        contacts.append(VerifiedContact(fingerprint: confirmed, displayName: name, method: method))
+        var contact = VerifiedContact(fingerprint: confirmed, displayName: name, method: method)
+        contact.scannedBothWaysAt = previous?.scannedBothWaysAt
+        contact.claimedName = previous?.claimedName
+        contact.acknowledgedClaim = previous?.acknowledgedClaim
+        contacts.append(contact)
     }
     public func forget(_ fingerprintHex: String) { contacts.removeAll { $0.fingerprintHex == fingerprintHex } }
+    /// Renames a verified contact (the name only this device shows); throws when it is not a contact.
+    public func rename(fingerprintHex: String, to name: String) throws {
+        guard let index = contacts.firstIndex(where: { $0.fingerprintHex == fingerprintHex }) else { throw ProtocolError.state("Not a contact") }
+        contacts[index].displayName = name
+    }
+    /// Records that both phones scanned each other; true when it changed.
+    @discardableResult
+    public func markScannedBothWays(fingerprintHex: String, at date: Date = Date()) -> Bool {
+        guard let index = contacts.firstIndex(where: { $0.fingerprintHex == fingerprintHex }), contacts[index].scannedBothWaysAt == nil else { return false }
+        contacts[index].scannedBothWaysAt = date
+        return true
+    }
+    /// Android `ContactClaimsStore.recordClaim`: the caller passes a name from a signed label that passed the receiver
+    /// checks, for a peer that is a verified contact. Only canonical person-name text is kept. The first name is
+    /// acknowledged at once; a different later one waits for Use it or Ignore. True when the record changed.
+    @discardableResult
+    public func recordClaim(fingerprintHex: String, name: String) -> Bool {
+        guard LabelText.isCanonical(.personName, name),
+              let index = contacts.firstIndex(where: { $0.fingerprintHex == fingerprintHex }),
+              contacts[index].claimedName != name else { return false }
+        let first = (contacts[index].claimedName ?? "").isEmpty
+        contacts[index].claimedName = name
+        if first { contacts[index].acknowledgedClaim = name }
+        return true
+    }
+    /// The user saw or ignored the latest claim. True when the record changed.
+    @discardableResult
+    public func acknowledgeClaim(fingerprintHex: String) -> Bool {
+        guard let index = contacts.firstIndex(where: { $0.fingerprintHex == fingerprintHex }), contacts[index].claimPending else { return false }
+        contacts[index].acknowledgedClaim = contacts[index].claimedName
+        return true
+    }
     /// Restores a persisted list (already verified when it was saved).
     public func restore(_ list: [VerifiedContact]) { contacts = list }
     public func reset() { contacts.removeAll() }
@@ -165,5 +210,100 @@ public final class VerifiedContactBook: PeerIdentityGate {
         guard let contact = contacts.first(where: { $0.nodePrefixHex == String(source.hex.prefix(12)) }),
               String(contact.fingerprintHex.prefix(32)) != source.hex else { return }
         if policy == .refuse { throw ProtocolError.incompatible("SECURITY IDENTITY MISMATCH: forwarded source is not \(contact.displayName)") }
+    }
+}
+
+/// Android `ContactNameCheck`: a typed contact name.
+public enum ContactNameCheck: Equatable {
+    case blank
+    /// The canonical text that would be saved.
+    case valid(String)
+    case invalid
+}
+
+/// What renaming a contact did (Android `RenameOutcome`), with Android's message.
+public enum ContactRenameOutcome: Equatable {
+    case renamed(String), empty, invalidName, nameTaken, notFound, unreadable
+
+    public var message: String {
+        switch self {
+        case .renamed(let name): return "Saved as \(name)"
+        case .empty: return "Name can't be empty"
+        case .invalidName: return "Use a short name (up to 32 characters) in one alphabet, not an ID."
+        case .nameTaken: return "Another contact already has that name. Choose a different one."
+        case .notFound: return "That contact is no longer saved."
+        case .unreadable: return "Could not save: your list of verified people cannot be read right now."
+        }
+    }
+}
+
+/// Android `ContactNames` and `ContactLabelUniqueness` for Apple's contacts. Apple saves an unnamed contact with its
+/// handle as `displayName`; such a contact counts as unnamed (Android's blank name).
+public enum ContactNames {
+    /// The same text rules as every other person name (`LabelText`, 32 bytes).
+    public static func check(_ input: String) -> ContactNameCheck {
+        if input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .blank }
+        switch LabelText.normalize(.personName, input) {
+        case .success(let name): return .valid(name)
+        case .failure: return .invalid
+        }
+    }
+
+    public static func isUnnamed(_ contact: VerifiedContact) -> Bool {
+        contact.displayName.isEmpty || contact.displayName == IdentityHandle.handle(prefix: Data(hex: contact.nodePrefixHex) ?? Data())
+    }
+
+    /// The rename decision before anything is stored: unknown contact, blank, invalid, a name another contact reads the
+    /// same (case- and look-alike-insensitive, `NameReading.same`), or the canonical name to save.
+    public static func renameDecision(_ input: String, fingerprintHex: String, contacts: [VerifiedContact]) -> ContactRenameOutcome {
+        guard contacts.contains(where: { $0.fingerprintHex == fingerprintHex }) else { return .notFound }
+        switch check(input) {
+        case .blank: return .empty
+        case .invalid: return .invalidName
+        case .valid(let name):
+            let others = contacts.filter { $0.fingerprintHex != fingerprintHex && !isUnnamed($0) }
+            return others.contains { NameReading.same(name, $0.displayName) } ? .nameTaken : .renamed(name)
+        }
+    }
+
+    /// "Save contact as" starts with your name for them, else the name they shared in this session (canonical only),
+    /// else nothing; never a handle.
+    public static func suggestion(saved: VerifiedContact?, shared: String?) -> String {
+        if let saved, !isUnnamed(saved) { return saved.displayName }
+        if let shared, case .valid(let name) = check(shared) { return name }
+        return ""
+    }
+
+    /// Named contacts first (A-Z, ignoring case), then the unnamed ones by handle.
+    public static func sorted(_ contacts: [VerifiedContact]) -> [VerifiedContact] {
+        contacts.sorted { a, b in
+            let unnamedA = isUnnamed(a), unnamedB = isUnnamed(b)
+            if unnamedA != unnamedB { return !unnamedA }
+            let titleA = a.displayName.lowercased(), titleB = b.displayName.lowercased()
+            if titleA != titleB { return titleA < titleB }
+            return a.fingerprintHex < b.fingerprintHex
+        }
+    }
+}
+
+/// Android `ContactReach`: whether Contacts can find a saved contact nearby, and what to tell the user when it cannot.
+/// With rotating IDs a contact is recognised only with the presence lease it gave this device; leases move in an
+/// answered call or when both devices scan each other's expiring code (Design QL).
+public enum ContactReach {
+    public enum Hint: String {
+        /// A lease is held, or recognition is off: "not found nearby yet" while absent.
+        case recognisable
+        /// No lease and not scanned both ways: "Ask <name> to scan your code too".
+        case askToScan = "ask"
+        /// No lease although both scanned: scan again or call once from Nearby.
+        case scanAgain = "again"
+        /// No lease and expiring codes are off: call once from Nearby.
+        case callFromNearby = "nearby"
+    }
+
+    public static func hint(recognitionOn: Bool, holdsLease: Bool, scannedBothWays: Bool, meetAvailable: Bool) -> Hint {
+        if !recognitionOn || holdsLease { return .recognisable }
+        if !meetAvailable { return .callFromNearby }
+        return scannedBothWays ? .scanAgain : .askToScan
     }
 }

@@ -15,17 +15,15 @@ struct DesktopReadingSize: ViewModifier {
     }
 }
 
-struct DesktopReadingSettings: View {
+/// Settings › Desktop › Content size: the menu of the Content size row.
+struct DesktopContentSizePicker: View {
     @AppStorage("desktopContentSize") private var size = 100
     var body: some View {
-        Card {
-            Picker("Content size", selection: $size) {
-                Text("Standard").tag(100)
-                Text("Larger").tag(115)
-                Text("Largest").tag(130)
-            }
-            .pickerStyle(.menu).padding(16).accessibilityIdentifier("desktop-content-size")
+        Picker("Content size", selection: $size) {
+            Text("Standard").tag(100)
+            Text("Larger").tag(115)
+            Text("Largest").tag(130)
         }
-        CardNote("Enlarges text, controls and spacing in MeshLive. Scroll to reach content that no longer fits in the window.")
+        .pickerStyle(.menu).accessibilityIdentifier("desktop-content-size")
     }
 }

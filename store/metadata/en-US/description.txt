@@ -1,0 +1,30 @@
+MeshLive lets you call people near you, and watch live video from nearby phones, directly over Bluetooth. There is no internet, SIM card or account to set up.
+
+CALL PEOPLE NEARBY
+- Voice and video calls between phones that are close to each other, end-to-end encrypted.
+- Hold to talk when you only want your microphone on for a moment.
+- Add people you trust by scanning each other's code. Nothing goes through a server.
+
+WATCH AND LISTEN
+- Watch livestreams from nearby phones.
+- Listen to audio-only livestreams, like a local radio, with the screen off.
+
+YOU DECIDE WHAT PEOPLE SEE
+- Nearby phones normally see a generated name and a temporary ID that changes every 15 minutes.
+- Your real name goes only to the people you allow.
+- Block or report anyone from a call, a livestream or the list of people nearby.
+
+PRIVATE BY DESIGN
+- No account, no ads, no tracking, no analytics. MeshLive collects no data.
+- Calls and streams are encrypted. A nearby Bluetooth scanner can still tell that a MeshLive device is there, and MeshLive does not make you anonymous.
+- Delete everything erases your keys, contacts and settings from the phone.
+
+GOOD TO KNOW
+- Both people need MeshLive and must be within about 20 metres of each other.
+- iOS lets MeshLive be found only while the app is open. Keep it open to receive calls: a closed app cannot ring.
+- Works with MeshLive on other iPhones and on Android phones.
+- You must be 18 or older. MeshLive does not replace calling emergency services.
+- Free and open source, under the GNU General Public License version 3 or later.
+
+Terms of use: https://meshlive.github.io/terms/
+Privacy policy: https://meshlive.github.io/privacy/

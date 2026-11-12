@@ -67,13 +67,21 @@ public struct NodeCapabilities: Equatable {
     public static let endpointDiscoveryExchange: UInt8 = 1 << 3
     public static let codecVP9: UInt8 = 1
     public static let codecAV1: UInt8 = 1 << 1
-    /// Proposed (Interop/ANDROID_DISCOVERY_ADDENDUM.md section B, not yet in Android): H.264.
+    /// Design HC: H.264 (hello bit 2; announcement summary bit 2).
     public static let codecH264: UInt8 = 1 << 2
+    /// Design HC: HEVC (hello bit 3; announcement summary bit 7 through `VideoCodecMap`, never summary bit 3).
+    public static let codecHEVC: UInt8 = 1 << 3
+    /// The codec bits 0-2 of an announcement summary and of a compact UUID (VP9, AV1, H.264). Hellos use
+    /// `helloCodecMask`; summaries are built and read through `VideoCodecMap`.
     public static let codecMask: UInt8 = codecVP9 | codecAV1 | codecH264
+    /// Every hello bit that names a codec (VP9, AV1, H.264, HEVC).
+    public static let helloCodecMask: UInt8 = codecVP9 | codecAV1 | codecH264 | codecHEVC
     /// End-to-end call hello decode mask: prefer VP9 when the peer can encode it.
     public static let decodePrefersVP9: UInt8 = 1 << 7
-    /// Proposed (addendum B): prefer H.264.
-    public static let decodePrefersH264: UInt8 = 1 << 6
+    /// Design HC end-to-end decode-mask bit 4: "my AV1 decoding is software" (call hellos only; not a codec). Apple never
+    /// sets it (its AV1 decoding is hardware or absent); a sender honours it (`CallCodecChoice`). Bit 6 (the pencilled
+    /// "prefer H.264") is not used.
+    public static let decodeAV1Software: UInt8 = 1 << 4
 
     public var transportMask: UInt8
     public var encodeCodecMask: UInt8
@@ -187,13 +195,23 @@ public enum MeshHandshake {
         capabilities: NodeCapabilities,
         purpose: HandshakePurpose = .link,
         ephemeral: P256.KeyAgreement.PrivateKey = .init(),
-        nonce: Data? = nil
+        nonce: Data? = nil,
+        buildTag: BuildTag? = nil
     ) throws -> PendingHandshake {
-        let nonceBytes = nonce ?? randomBytes(SignedHandshakeHello.nonceBytes)
+        var nonceBytes = (nonce ?? randomBytes(SignedHandshakeHello.nonceBytes)).rebased
+        var helloCapabilities = capabilities
+        // AW2 (Android "Build tag in the link hello"): a link hello only, and only while bit 7 is free; the nonce keeps its
+        // 32 bytes with the tag, big-endian, in bytes 0-1.
+        if let buildTag, purpose == .link, capabilities.transportMask & NodeCapabilities.transportBuildTag == 0,
+           nonceBytes.count == SignedHandshakeHello.nonceBytes {
+            nonceBytes[0] = UInt8(buildTag.encoded >> 8)
+            nonceBytes[1] = UInt8(buildTag.encoded & 0xff)
+            helloCapabilities.transportMask |= NodeCapabilities.transportBuildTag
+        }
         var hello = SignedHandshakeHello(
             role: role, nodeId: identity.nodeId, identityPublicKey: identity.publicKeyEncoded,
             ephemeralPublicKey: ephemeral.publicKey.derRepresentation, nonce: nonceBytes,
-            capabilities: capabilities, signature: Data()
+            capabilities: helloCapabilities, signature: Data()
         )
         hello.signature = try identity.sign(purpose.signatureContext + hello.unsignedEncoding)
         return PendingHandshake(hello: hello, ephemeral: ephemeral, purpose: purpose)

@@ -34,6 +34,11 @@ public final class SecureLink {
     public private(set) var peerRelaySeek: UInt8 = 0
     public private(set) var ownPseudonymous = false
     public private(set) var usedBmh3 = false
+    /// AW1: this initiator wrote the WIFI marker in its link msg3 / the link peer did.
+    public private(set) var sentWifiMarker = false
+    public private(set) var peerWifiMarker = false
+    /// BMH3 responder only: msg1's tag matched the live verification code (BVMID2).
+    public private(set) var qrTagMatched = false
     /// BMH3 only: the authenticated peer of the link handshake.
     public private(set) var bmh3Peer: Bmh3Peer?
     /// A stream reader tightens this before the header and raises it only after a verified audio-only header.
@@ -43,6 +48,28 @@ public final class SecureLink {
     public var acceptDiscoveryOpening = false
     /// Experimental relayed calls: hop type 12 parses while true (a helper's first record, a caller's single reply).
     public var acceptRelaySetup = false { didSet { opener?.acceptRelaySetup = acceptRelaySetup } }
+    /// AW1: hop type 16 parses while true (a direct call's Wi-Fi agent opted in).
+    public var acceptWifi = false { didSet { opener?.acceptWifi = acceptWifi } }
+    /// AW2: the build tag this side asks to sign in its BMH2 link hello (Android raises it on stream hops while a Wi-Fi
+    /// switch is on). nil = no tag, every byte as before. Set it before `start` (initiator) or the peer's hello (responder).
+    public var ownBuildTag: BuildTag?
+    /// AW2: the tag this side's BMH2 link hello actually carried.
+    public private(set) var sentBuildTag: BuildTag?
+    /// AW2: the tag of the peer's verified BMH2 link hello (Android BuildTag.readFrom); nil without one.
+    public private(set) var peerBuildTag: BuildTag?
+    /// AW2: derive this BMH2 link's hop key `UW` from its two directional BMS1 keys when they are installed.
+    public var deriveHopWifiKey = false
+    private var hopWifiKey: Data?
+    /// AW2 (Android WifiHopGate.bmh2TagsAllow): both BMH2 link hellos carried a build tag of at least
+    /// `WifiWire.firstRelease`. Never true on a BMH3 link.
+    public var wifiBuildTagGate: Bool {
+        !usedBmh3 && (sentBuildTag?.release ?? 0) >= WifiWire.firstRelease && (peerBuildTag?.release ?? 0) >= WifiWire.firstRelease
+    }
+    /// AW2: the hop key, handed over once (the link keeps no copy afterwards); nil when it was not derived.
+    public func takeHopWifiKey() -> Data? {
+        defer { hopWifiKey = nil }
+        return hopWifiKey
+    }
     public var acceptStoreForward: Bool {
         get { opener?.acceptStoreForward ?? false }
         set { opener?.acceptStoreForward = newValue }
@@ -53,7 +80,34 @@ public final class SecureLink {
         presentedCapabilities = capabilities
     }
 
+    /// EXPERIMENTAL in-call link renewal (Design SR): the renewed hop link of a direct call. No handshake runs on it: the
+    /// renewal opening proved the old link's peer and gave these keys. Each direction starts at sequence 0; the peer's
+    /// authenticated identity and capabilities are the old link's; nothing else of the old link's BMS1 state carries over
+    /// (the AW1 opt-in for hop type 16 is the reader's own and is kept).
+    public init(renewing old: SecureLink, sendKey: Data, receiveKey: Data) {
+        role = old.role; identity = old.identity; capabilities = old.capabilities; bmh3 = old.bmh3
+        presentedCapabilities = old.presentedCapabilities
+        peerHello = old.peerHello; peerNodeId = old.peerNodeId; peerCapabilities = old.peerCapabilities
+        peerPseudonymous = old.peerPseudonymous; peerRelaySeek = old.peerRelaySeek; ownPseudonymous = old.ownPseudonymous
+        usedBmh3 = old.usedBmh3; bmh3Peer = old.bmh3Peer
+        sentBuildTag = old.sentBuildTag; peerBuildTag = old.peerBuildTag
+        maxIncomingCiphertextBytes = old.maxIncomingCiphertextBytes
+        acceptWifi = old.acceptWifi
+        sealer = SecureRecordSealer(key: SymmetricKey(data: sendKey))
+        let opener = SecureRecordOpener(key: SymmetricKey(data: receiveKey))
+        opener.maxCiphertextBytes = maxIncomingCiphertextBytes
+        opener.acceptWifi = acceptWifi
+        self.opener = opener
+    }
+
     static func frame(_ hello: SignedHandshakeHello) throws -> Data { try frame(bytes: try hello.encoded()) }
+
+    /// AW2 (Android BuildTag.readFrom): the tag of a BMH2 link hello (bit 7 set, nonce bytes 0-1); nil without one.
+    static func buildTag(of hello: SignedHandshakeHello) -> BuildTag? {
+        guard hello.capabilities.transportMask & NodeCapabilities.transportBuildTag != 0, hello.nonce.count >= 2 else { return nil }
+        let nonce = hello.nonce.rebased
+        return BuildTag(encoded: UInt16(nonce[0]) << 8 | UInt16(nonce[1]))
+    }
 
     static func frame(bytes: Data) throws -> Data {
         guard (1...maxHelloBytes).contains(bytes.count) else { throw ProtocolError.limit("Handshake message is too large") }
@@ -71,7 +125,8 @@ public final class SecureLink {
             // Without a tag the initiator presents its stranger presentation, never `identity` (rule P).
             let stranger = declared ?? (bmh3.linkIdentityOverride == nil ? bmh3.stranger : nil)
             let config = try Bmh3Config(purpose: .link, identity: linkIdentity, capabilities: capabilities, entropy: bmh3.entropy,
-                                        stranger: try stranger.map { try Bmh3Presentation(identity: $0, capabilities: capabilities, pseudonym: true) })
+                                        stranger: try stranger.map { try Bmh3Presentation(identity: $0, capabilities: capabilities, pseudonym: true) },
+                                        wifiMarker: bmh3.wifiMarker)
             let tag = bmh3.linkTag && bmh3.linkIdentityOverride == nil ? bmh3.contactTag : nil
             let initiator = Bmh3Initiator(config: config, contactTag: tag, checkResponder: { peer in
                 // A recognised contact: the answerer must be that contact (its full node ID), not any key whose RDI matches.
@@ -81,8 +136,10 @@ public final class SecureLink {
             bmh3Initiator = initiator
             return try SecureLink.frame(bytes: try initiator.message1())
         }
-        let p = try MeshHandshake.start(identity: identity, role: .initiator, capabilities: capabilities, purpose: .link, ephemeral: ephemeral)
+        let p = try MeshHandshake.start(identity: identity, role: .initiator, capabilities: capabilities, purpose: .link, ephemeral: ephemeral,
+                                        buildTag: ownBuildTag)
         pending = p
+        sentBuildTag = SecureLink.buildTag(of: p.hello)
         return try SecureLink.frame(p.hello)
     }
 
@@ -120,7 +177,13 @@ public final class SecureLink {
         opener.acceptDiscoveryOpening = acceptDiscoveryOpening && presentedCapabilities.transportMask & NodeCapabilities.transportDiscoveryOpening != 0
         opener.maxCiphertextBytes = maxIncomingCiphertextBytes
         opener.acceptRelaySetup = acceptRelaySetup
+        opener.acceptWifi = acceptWifi
         self.opener = opener
+        // AW2: a BMH2 hop's UW, derived while its two directional keys exist (BMH3 call hops use the call's UW).
+        if deriveHopWifiKey, !usedBmh3 {
+            hopWifiKey = try? WifiKeys.uwHop(keyA: keys.sendKey.withUnsafeBytes { Data($0) },
+                                             keyB: keys.receiveKey.withUnsafeBytes { Data($0) })
+        }
     }
 
     /// One handshake frame; returns the session keys once the handshake is complete.
@@ -129,6 +192,7 @@ public final class SecureLink {
             let message3 = try initiator.onMessage2(frame)
             outputs.append(.send(try SecureLink.frame(bytes: message3)))
             let result = try initiator.finalResult()
+            sentWifiMarker = bmh3?.wifiMarker ?? false
             if !result.peer.pseudonymous { bmh3?.onRealResponder(result.peer) }
             return try finishBmh3(result)
         }
@@ -143,15 +207,14 @@ public final class SecureLink {
             let config = try Bmh3Config(purpose: .link, identity: identity, capabilities: capabilities, entropy: bmh3.entropy,
                                         stranger: try bmh3.stranger.map { try Bmh3Presentation(identity: $0, capabilities: strangerCaps, pseudonym: true) },
                                         relaySeek: bmh3.relaySeek)
-            let budget = bmh3.budget
-            let responder = Bmh3Responder(config: config, tagChecks: bmh3.tagChecks(), opening: bmh3.opening(), replayCache: bmh3.replayCache,
-                                          beforeReply: { _ in try budget?.spend() },
-                                          admitInitiator: { peer, matched in !matched || bmh3.admitTagged(peer.nodeId) })
+            let responder = Bmh3Responder(config: config, tagChecks: bmh3.responderTagChecks(), opening: bmh3.opening(), replayCache: bmh3.replayCache,
+                                          beforeReply: { matched in try bmh3.beforeReply(tagMatched: matched) },
+                                          admitInitiator: { peer, matched in bmh3.admitInitiator(peer.nodeId, tagMatched: matched) })
             bmh3Responder = responder
             outputs.append(.send(try SecureLink.frame(bytes: try responder.onMessage1(frame))))
             return nil
         }
-        if role == .responder, let bmh3, !bmh3.acceptBmh2 { throw Bmh3Failure("bmh2 refused") }
+        if role == .responder, let bmh3, bmh3.refusesBmh2 { throw Bmh3Failure("bmh2 refused") }
         let remote = try SignedHandshakeHello(decoding: frame)
         let keys: MeshSessionKeys
         switch role {
@@ -160,12 +223,15 @@ public final class SecureLink {
             keys = try MeshHandshake.finish(pending, remote: remote)
         case .responder:
             guard remote.role == .initiator else { throw ProtocolError.state("Expected an initiator handshake") }
-            let p = try MeshHandshake.start(identity: identity, role: .responder, capabilities: capabilities, purpose: .link)
+            let p = try MeshHandshake.start(identity: identity, role: .responder, capabilities: capabilities, purpose: .link,
+                                            buildTag: ownBuildTag)
+            sentBuildTag = SecureLink.buildTag(of: p.hello)
             keys = try MeshHandshake.finish(p, remote: remote)
             outputs.append(.send(try SecureLink.frame(p.hello)))
         }
         peerHello = remote
         peerNodeId = remote.nodeId
+        peerBuildTag = SecureLink.buildTag(of: remote)
         var caps = remote.capabilities
         caps.transportMask &= ~NodeCapabilities.transportBuildTag
         peerCapabilities = caps
@@ -181,7 +247,9 @@ public final class SecureLink {
         peerCapabilities = caps
         peerPseudonymous = result.peer.pseudonymous
         peerRelaySeek = result.peer.relaySeek
+        peerWifiMarker = result.peer.extensions.wifiMarker
         ownPseudonymous = result.ownPseudonymous
+        qrTagMatched = result.qrTagMatched
         if result.ownPseudonymous && role == .responder { presentedCapabilities.transportMask &= ~NodeCapabilities.transportDiscoveryOpening }
         return MeshSessionKeys(peerNodeId: result.peer.nodeId, sendKey: SymmetricKey(data: result.sendKey), receiveKey: SymmetricKey(data: result.receiveKey))
     }

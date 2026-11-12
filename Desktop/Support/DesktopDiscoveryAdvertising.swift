@@ -1,8 +1,9 @@
 import Foundation
 import NearbyCore
 
-/// Mac scheduling for the existing rotating-ID experiment. Only this Mac's idle call presence
-/// rotates in phase 1; streams, viewer requests and mirrored offers retain their existing behavior.
+/// Mac scheduling for the existing rotating-ID experiment: this Mac's idle call presence (role 0). A waiting viewer's
+/// rotating request (role 2) is scheduled by `RotatingViewerRequest` and arrives here as a media role; stream and
+/// mirrored offers keep their existing behavior.
 final class DesktopDiscoveryAdvertising {
     enum CallPresence: Equatable {
         case rotating(OpeningEntry)

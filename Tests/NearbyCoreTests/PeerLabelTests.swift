@@ -305,8 +305,8 @@ final class AndroidLabelVectorTests: XCTestCase {
         XCTAssertEqual(direct.sequence, 7)
         XCTAssertEqual(try SignedLabelCodec.verify(direct, expectedSigner: signer, expectedBinding: .directStream), .streamTitle)
         let inbox = LabelInbox()
-        XCTAssertEqual(inbox.accept(try hex("container"), expectedSigner: signer, expectedBinding: .call(callId)), [.personName, .callSubject])
-        XCTAssertEqual(inbox.text(.callSubject), "Water at the school")
+        XCTAssertEqual(inbox.accept(try hex("container"), expectedSigner: signer, expectedBinding: .call(callId)), [.personName])
+        XCTAssertNil(inbox.text(.callSubject), "a received call subject is decoded and dropped silently")
         let board = TitleBoard { 5 }
         var assembled: String?
         for page in try XCTUnwrap(json["pages"] as? [String]) { assembled = board.add(try TitlePageCodec.decode(try XCTUnwrap(Data(hex: page)))) ?? assembled }

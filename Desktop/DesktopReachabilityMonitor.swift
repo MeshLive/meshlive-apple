@@ -71,7 +71,7 @@ final class DesktopReachabilityMonitor: ObservableObject {
             AppLog.event("desktop_activity", ["options": "\(activity.current?.options.rawValue ?? 0)", "reason": activity.current?.reason ?? "none"])
         }
         if DesktopReachabilityPolicy.showsRingWindow(presence, settings), let call = model.call {
-            ringPanel.show(call: call) { [weak self] in self?.openMain(); NSApp.activate() }
+            ringPanel.show(call: call, model: model) { [weak self] in self?.openMain(); NSApp.activate() }
         } else {
             ringPanel.close()
         }
@@ -93,9 +93,11 @@ final class DesktopReachabilityMonitor: ObservableObject {
     static func presence(of model: AppModel) -> DesktopPresence {
         var p = DesktopPresence()
         // The hardware-free preview has no radio; treat it as ready so the menu and settings can be exercised.
-        p.radioReady = DesktopPreview.enabled || (model.radio.central?.state == .poweredOn && model.bluetoothProblem == nil)
+        // A call service that was never hosted (Calls unavailable) is not reachable either.
+        p.radioReady = (DesktopPreview.enabled || (model.radio.central?.state == .poweredOn && model.bluetoothProblem == nil))
+            && model.callsUnavailable == nil
         p.allowCalls = model.availableForCalls
-        if let call = model.call, call.ended == nil, let phase = call.phase, phase != .ended {
+        if let call = model.call, call.presentable, call.ended == nil, let phase = call.phase, phase != .ended {
             p.call = phase == .incomingRinging ? .incomingRinging : .other
             p.callVideo = call.callType == .video || call.cameraOn
         }
@@ -110,7 +112,7 @@ final class DesktopReachabilityMonitor: ObservableObject {
         switch state {
         case .live:
             if let live = model.live, live.running { return live.audioOnly ? "You are live (audio only)" : "You are live" }
-            return model.watch?.isRadio == true ? "Listening to a live stream" : "Watching a live stream"
+            return model.watch?.isRadio == true ? "Listening to a live broadcast" : "Watching a live stream"
         case .inCall:
             let name = model.call?.label?.title ?? model.call?.peerName ?? "someone"
             return p.call == .incomingRinging ? "Incoming call from \(name)" : "Call with \(name)"
@@ -118,6 +120,7 @@ final class DesktopReachabilityMonitor: ObservableObject {
             return "Nearby phones and Macs can call this Mac"
         case .notReachable:
             if !p.allowCalls { return "Allow calls is off" }
+            if model.callsUnavailable != nil { return "Calls unavailable" }
             return model.bluetoothProblem ?? "Bluetooth is off or not ready"
         }
     }
@@ -172,48 +175,33 @@ struct DesktopMenuBarMenu: View {
 
 // MARK: Settings
 
-/// Settings › Desktop rows for staying reachable behind other apps. Every switch except the menu bar item is off by
-/// default (README: Experimental, alternative and optional behaviour).
+/// Settings › Desktop rows for staying reachable (inside the top page's Desktop card): Show in menu bar (on), Start at
+/// login and Keep Mac awake while reachable (off).
 struct DesktopReachabilitySettingsRows: View {
     @AppStorage(DesktopReachabilitySettings.menuBarKey) private var menuBar = true
-    @AppStorage(DesktopReachabilitySettings.ringWindowKey) private var ringWindow = false
-    @AppStorage(DesktopReachabilitySettings.activityDuringMediaKey) private var activityDuringMedia = false
-    @AppStorage(DesktopReachabilitySettings.noAppNapWhileReachableKey) private var noAppNap = false
     @AppStorage(DesktopReachabilitySettings.keepAwakeWhileReachableKey) private var keepAwake = false
-    @AppStorage(DesktopReachabilitySettings.advertiseOnlyWithWindowKey) private var advertiseOnlyWithWindow = false
     @ObservedObject private var login = DesktopLoginItems.shared
 
     var body: some View {
-        Card {
-            SettingsToggleRow(icon: "menubar.rectangle", title: "Show in menu bar",
-                              info: "On by default. The menu bar shows whether this Mac is reachable, in a call or live, with Open MeshLive, a Reachable for calls switch and Quit.",
-                              identifier: "desktop-menu-bar", isOn: $menuBar)
-            CardDivider()
-            SettingsToggleRow(icon: "power", title: "Start at login",
-                              info: "Off by default. Opens MeshLive when you log in to this Mac. macOS may ask you to allow it in System Settings › General › Login Items.",
-                              identifier: "desktop-start-at-login",
-                              isOn: Binding(get: { login.item.state.on }, set: { login.item.set($0) }))
-            CardDivider()
-            SettingsToggleRow(icon: "bell.badge", title: "Ring window in the background (experimental)",
-                              info: "Off by default. When a call rings while another app is in front, a small window with Accept and Decline appears above other windows. The notification and ring sound are unchanged.",
-                              identifier: "desktop-ring-window-setting", isOn: $ringWindow)
-            CardDivider()
-            SettingsToggleRow(icon: "waveform", title: "Stay active during calls and live (experimental)",
-                              info: "Off by default. During a call, a live stream or live audio, MeshLive asks macOS not to nap the app or idle-sleep this Mac; while video is on screen the display stays on too. It ends when the call or stream stops.",
-                              identifier: "desktop-activity-media", isOn: $activityDuringMedia)
-            CardDivider()
-            SettingsToggleRow(icon: "timer", title: "Avoid App Nap while reachable (experimental)",
-                              info: "Off by default. While reachable for calls, keeps MeshLive's Bluetooth timers at full rate when other apps are in front. The Mac can still sleep, which stops Bluetooth.",
-                              identifier: "desktop-no-app-nap", isOn: $noAppNap)
-            CardDivider()
-            SettingsToggleRow(icon: "sun.max", title: "Keep Mac awake while reachable",
-                              info: "Off by default. Prevents idle sleep while MeshLive is reachable for calls, so nearby phones can still reach this Mac. Uses more battery. Closing the lid still puts the Mac to sleep.",
-                              identifier: "desktop-keep-awake", isOn: $keepAwake)
-            CardDivider()
-            SettingsToggleRow(icon: "macwindow", title: "Reachable only while the window is open (experimental)",
-                              info: "Off by default. This Mac announces that it can take calls only while a MeshLive window is open, not when it is closed, minimised or hidden. macOS always uses this Mac's fixed Bluetooth address, so shorter announcing makes it harder to recognise over time. Calls and live streams already running are not affected.",
-                              identifier: "desktop-advertise-with-window", isOn: $advertiseOnlyWithWindow)
-        }
+        SettingsToggleRow(icon: "menubar.rectangle", title: "Show in menu bar",
+                          info: "On by default. The menu bar shows whether this Mac is reachable, in a call or live, with Open MeshLive, a Reachable for calls switch and Quit.",
+                          identifier: "desktop-menu-bar", isOn: $menuBar)
+        CardDivider()
+        SettingsToggleRow(icon: "power", title: "Start at login",
+                          info: "Off by default. Opens MeshLive when you log in to this Mac. macOS may ask you to allow it in System Settings › General › Login Items.",
+                          identifier: "desktop-start-at-login",
+                          isOn: Binding(get: { login.item.state.on }, set: { login.item.set($0) }))
+        CardDivider()
+        SettingsToggleRow(icon: "sun.max", title: "Keep Mac awake while reachable",
+                          info: "Off by default. Prevents idle sleep while MeshLive is reachable for calls, so nearby phones can still reach this Mac. Uses more battery. Closing the lid still puts the Mac to sleep.",
+                          identifier: "desktop-keep-awake", isOn: $keepAwake)
+    }
+}
+
+/// Start at login waiting for approval, or failing: the notes under the Desktop card.
+struct DesktopLoginItemNotes: View {
+    @ObservedObject private var login = DesktopLoginItems.shared
+    var body: some View {
         if login.item.state.needsApproval {
             CardNote("Start at login is waiting for your approval in System Settings › General › Login Items.")
             Button("Open Login Items") { login.openSystemSettings() }
@@ -221,6 +209,32 @@ struct DesktopReachabilitySettingsRows: View {
                 .accessibilityIdentifier("desktop-open-login-items")
         }
         if let problem = login.item.state.problem { CardNote(problem) }
+    }
+}
+
+/// Settings › Experiments (Mac): the experimental reachability rows, all off by default (switch register).
+struct DesktopExperimentalReachabilityRows: View {
+    @AppStorage(DesktopReachabilitySettings.ringWindowKey) private var ringWindow = false
+    @AppStorage(DesktopReachabilitySettings.activityDuringMediaKey) private var activityDuringMedia = false
+    @AppStorage(DesktopReachabilitySettings.noAppNapWhileReachableKey) private var noAppNap = false
+    @AppStorage(DesktopReachabilitySettings.advertiseOnlyWithWindowKey) private var advertiseOnlyWithWindow = false
+
+    var body: some View {
+        SettingsToggleRow(icon: "bell.badge", title: "Ring window in the background",
+                          info: "Experimental. Off by default. When a call rings while another app is in front, a small window with Accept and Decline appears above other windows. The notification and ring sound are unchanged.",
+                          identifier: "desktop-ring-window-setting", isOn: $ringWindow)
+        CardDivider()
+        SettingsToggleRow(icon: "waveform", title: "Stay active during calls and live",
+                          info: "Experimental. Off by default. During a call, a live stream or live audio, MeshLive asks macOS not to nap the app or idle-sleep this Mac; while video is on screen the display stays on too. It ends when the call or stream stops.",
+                          identifier: "desktop-activity-media", isOn: $activityDuringMedia)
+        CardDivider()
+        SettingsToggleRow(icon: "timer", title: "Avoid App Nap while reachable",
+                          info: "Experimental. Off by default. While reachable for calls, keeps MeshLive's Bluetooth timers at full rate when other apps are in front. The Mac can still sleep, which stops Bluetooth.",
+                          identifier: "desktop-no-app-nap", isOn: $noAppNap)
+        CardDivider()
+        SettingsToggleRow(icon: "macwindow", title: "Reachable only while the window is open",
+                          info: "Experimental. Off by default. This Mac announces that it can take calls only while a MeshLive window is open, not when it is closed, minimised or hidden. macOS always uses this Mac's fixed Bluetooth address, so shorter announcing makes it harder to recognise over time. Calls and live streams already running are not affected.",
+                          identifier: "desktop-advertise-with-window", isOn: $advertiseOnlyWithWindow)
     }
 }
 

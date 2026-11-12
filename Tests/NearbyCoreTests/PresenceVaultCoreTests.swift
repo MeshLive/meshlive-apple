@@ -130,6 +130,33 @@ final class PresenceVaultCoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(guardStore.record?.revokedThrough ?? 0, old.generation)
     }
 
+    /// P6-A4: blocking while the vault cannot be read requests a revocation in the guard; the generation loaded next
+    /// is replaced and the blocked node gets no lease.
+    func testBlockingWhileTheVaultIsUnreadableLeavesARevocationThatProtectsTheBlockedNode() throws {
+        let stored = Storage(), guardStore = GuardStore()
+        let first = vault(stored, guardStore)
+        let blocked = try node(1), other = try node(2)
+        XCTAssertNotNil(first.deliverLease(to: blocked, epoch: epoch, verified: true))
+        let old = try XCTUnwrap(stored.state)
+
+        stored.readFails = true
+        let clock = Clock()
+        let locked = vault(stored, guardStore, clock: clock)
+        XCTAssertFalse(locked.persistent)
+        XCTAssertTrue(locked.newGeneration(reason: "blocked_unreadable"), "blocking fails closed")
+        XCTAssertEqual(guardStore.record?.revokePending, true)
+
+        stored.readFails = false
+        clock.now += PresenceVaultCore.retryInterval
+        XCTAssertNotNil(locked.dayKey(idEpoch: epoch, currentEpoch: epoch))
+        XCTAssertTrue(locked.persistent)
+        let now = try XCTUnwrap(stored.state)
+        XCTAssertGreaterThan(now.generation, old.generation)
+        XCTAssertEqual(guardStore.record?.revokePending, false)
+        XCTAssertNil(locked.deliverLease(to: blocked, epoch: epoch, verified: false), "the blocked node gets no lease")
+        XCTAssertNotNil(locked.deliverLease(to: other, epoch: epoch, verified: true))
+    }
+
     func testWhenNeitherTheGuardNorTheVaultCanBeWrittenTheRevokedVaultIsDeleted() throws {
         let stored = Storage(), guardStore = GuardStore()
         let mine = vault(stored, guardStore)
@@ -377,6 +404,22 @@ final class PresenceVaultCoreTests: XCTestCase {
                                      epoch: { self.epoch })
         XCTAssertFalse(mine.persistent)
         XCTAssertNil(mine.deliverLease(to: try node(1), epoch: epoch, verified: true))
+    }
+
+    /// Decision 2026-11-06: "Can see when I'm nearby" starts as not yet asked, which counts as off: a contact the
+    /// user never answered for cannot see this phone, a no is kept as an answer, and a yes makes the contact able to.
+    func testANotYetAskedContactCountsAsOffUntilTheUserAnswers() throws {
+        let mine = vault(Storage())
+        let asked = try node(3), never = try node(4)
+        XCTAssertFalse(mine.canSeeMe(never), "not yet asked counts as off")
+        XCTAssertNil(mine.answer(never))
+        XCTAssertFalse(mine.setCanSeeMe(asked, false))
+        XCTAssertEqual(mine.answer(asked), false, "a no is kept as an answer")
+        XCTAssertFalse(mine.canSeeMe(asked))
+        XCTAssertFalse(mine.setCanSeeMe(asked, true))
+        XCTAssertTrue(mine.canSeeMe(asked))
+        XCTAssertEqual(mine.answer(asked), true)
+        XCTAssertNil(mine.answer(never), "an answer for one contact answers nothing for another")
     }
 
     func testAFreshInstallDropsContactsOnceTheVaultCanBeRead() throws {

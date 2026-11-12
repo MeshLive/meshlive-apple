@@ -151,10 +151,46 @@ public final class Bmh3CallSettings {
     public var declareLinkOverride = false
     /// Responder (route search, Experimental): the `RELAY_SEEK` bits this call listener signs while it would admit a search; nil none.
     public var relaySeek: UInt8?
+    /// AW1: this initiator writes the WIFI marker; set only for a direct call with the Wi-Fi gate on.
+    public var wifiMarker = false
     /// Responder (phase 2): `K_tag` checks of this phone's own day keys against the adverts it has on air or just left.
     public var tagChecks: () -> [Bmh3ContactTag] = { [] }
     /// Responder: a matched tag must come from a contact this phone delivered its current lease to (else a lease leaked).
     public var admitTagged: (NodeId) -> Bool = { _ in false }
+    /// BVMID2 (responder): the displayed verification code and this connection's gate on it, shared by its link and
+    /// end-to-end handshakes (one reservation). Nil without a code on screen when the connection arrived.
+    public var qrDisplay: QrCodeDisplay?
+    public var qrGate: QrConnectionGate?
+    /// BVMID2 (responder): the device is call-ready only because the Add contact screen shows a code. A BMH2 hello is then
+    /// refused and an untagged msg1 is closed before this device draws a key or signs anything.
+    public var screenOnlyReachable: () -> Bool = { false }
+
+    /// Responder: every tag check for one msg1, the lease keys' and the live verification code's.
+    func responderTagChecks() -> [Bmh3ContactTag] {
+        var checks = tagChecks()
+        if let qrDisplay, let qrGate, let check = qrDisplay.tagCheck(qrGate) { checks.append(check) }
+        return checks
+    }
+
+    /// Responder, every R_FIRST msg1 before a key is drawn: the Meet screen accepts nothing but its code; an untagged msg1
+    /// spends the signing budget (a code's attempt spent the Meet screen's own budget at its reservation).
+    func beforeReply(tagMatched: Bool) throws {
+        if screenOnlyReachable() && qrGate?.linkReserved != true { throw Bmh3Failure("qr screen only") }
+        if !tagMatched { try budget?.spend() }
+    }
+
+    /// Responder, after the initiator's block verified: a lease tag must come from a lease recipient; a code tag is not a
+    /// lease (the code's reservation already bounds it). While only the Meet screen made the device reachable, nothing but
+    /// the code is admitted.
+    func admitInitiator(_ peer: NodeId, tagMatched: Bool) -> Bool {
+        let qrAttempt = qrGate?.linkReserved == true
+        if screenOnlyReachable() && !qrAttempt { return false }
+        if !qrAttempt && tagMatched && !admitTagged(peer) { return false }
+        return true
+    }
+
+    /// Responder: a BMH2 hello is refused (pseudonym mode, or only the Meet screen made the device reachable).
+    var refusesBmh2: Bool { !acceptBmh2 || screenOnlyReachable() }
 
     public init(speak: Bool, acceptBmh2: Bool = true, stranger: SigningIdentity? = nil, linkIdentityOverride: SigningIdentity? = nil,
                 opening: @escaping () -> Data? = { nil }, checkResponder: @escaping (Bmh3Peer, Bmh3Purpose) throws -> Void = { _, _ in },

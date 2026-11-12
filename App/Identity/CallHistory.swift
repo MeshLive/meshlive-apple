@@ -18,6 +18,12 @@ struct CallRecord: Codable, Identifiable, Equatable {
     let seconds: Int
     /// For a non-contact: the generated name shown during the call (nil: "Someone nearby").
     var name: String? = nil
+    /// A call declined without ringing because "Block unknown callers" is on, or by someone a stranger's reveal showed as
+    /// blocked: nobody is named and it cannot be called back (Android RecentCall.blocked). nil in older records.
+    var blocked: Bool? = nil
+    /// How the call ended (`RecentCallOutcome.rawValue`, Android `CallResult`); nil in older records.
+    var outcome: String? = nil
+    var isBlocked: Bool { blocked == true }
     var callable: Bool { prefixHex.count == 12 }
 }
 
@@ -31,6 +37,13 @@ enum CallHistory {
         guard case .value(let data) = SealedRecords.files.read(fileName, purpose: purpose),
               let list = try? JSONDecoder().decode([CallRecord].self, from: data) else { return [] }
         return list
+    }
+
+    /// A stored history this run cannot open (Android `RecentCalls.isUnreadable`): Recent offers Clear history, and
+    /// `add` never writes over it.
+    static var unreadable: Bool {
+        if case .unreadable = SealedRecords.files.read(fileName, purpose: purpose) { return true }
+        return false
     }
 
     static func add(_ record: CallRecord) {

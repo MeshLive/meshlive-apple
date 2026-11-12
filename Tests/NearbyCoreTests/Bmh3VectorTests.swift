@@ -21,6 +21,11 @@ final class Bmh3VectorTests: XCTestCase {
         func randomTag() -> Data { tag }
     }
 
+    private final class RecordingQrGate: QrTagGate {
+        var calls: [(purpose: Bmh3Purpose, ephemeral: Data)] = []
+        func onTagMatch(purpose: Bmh3Purpose, msg1Ephemeral: Data) throws { calls.append((purpose, msg1Ephemeral)) }
+    }
+
     /// Checks the exact signing input and returns the vector's RFC 6979 signature as DER (a phone signs with a random k).
     private final class VectorIdentity: SigningIdentity {
         let publicKeyEncoded: Data
@@ -72,9 +77,12 @@ final class Bmh3VectorTests: XCTestCase {
             let initiator = Bmh3Initiator(config: configI, mayRevealFirst: inputs["may_reveal_first_I"] == "true",
                                           contactTag: tagKey.isEmpty ? nil : try Bmh3ContactTag(key: bytes(tagKey), binding: bytes(inputs["tag_binding_I"]!)),
                                           intent: extI.intent)
+            // BVMID2: the check whose key is the code's K_tag carries a verification-code gate (it reserves at msg1).
+            let qrGate = RecordingQrGate()
             let checks = try inputs["tag_checks_R"]!.split(separator: ",").map { pair -> Bmh3ContactTag in
                 let parts = pair.split(separator: ":")
-                return try Bmh3ContactTag(key: bytes(String(parts[0])), binding: bytes(String(parts[1])))
+                let key = String(parts[0])
+                return try Bmh3ContactTag(key: bytes(key), binding: bytes(String(parts[1])), qrGate: key == Bmh3Vectors.K_TAG_QR ? qrGate : nil)
             }
             let responder = Bmh3Responder(config: configR, mode: inputs["mode_R"] == "CONTACTS_ONLY" ? .contactsOnly : .everyone,
                                           tagChecks: checks, opening: extR.opening)
@@ -100,6 +108,12 @@ final class Bmh3VectorTests: XCTestCase {
             XCTAssertEqual(res.peer.nodeId.hex, inputs["node_id_I"], vector.name)
             XCTAssertEqual(identityI.signed, 1); XCTAssertEqual(identityR.signed, 1)
             XCTAssertEqual(responder.contactTagMatched, !checks.isEmpty && !tagKey.isEmpty, vector.name)
+            let codeTag = tagKey == Bmh3Vectors.K_TAG_QR
+            XCTAssertEqual(vector.name == "link_qr_tag", codeTag, "only the BVMID2 vector tags with the code's K_tag")
+            XCTAssertEqual(responder.qrTagMatched, codeTag, vector.name)
+            XCTAssertEqual(res.qrTagMatched, codeTag, vector.name)
+            XCTAssertEqual(qrGate.calls.map(\.purpose), codeTag ? [purpose] : [], "the code is reserved once, at msg1 (\(vector.name))")
+            if codeTag { XCTAssertEqual(qrGate.calls.first?.ephemeral, m1.subdata(in: 9..<74)) }
             XCTAssertEqual(ini.peer.buildTag, extR.buildTag, vector.name)
             XCTAssertEqual(res.peer.buildTag, extI.buildTag, vector.name)
             XCTAssertEqual(res.peer.pseudonymous, extI.pseudonym, vector.name)
@@ -148,12 +162,14 @@ final class Bmh3VectorTests: XCTestCase {
         XCTAssertTrue(callerSession.peerRevealRequired)
         let calleeRecord = try calleeSession.sendOwn(real: realCallee, entries: [entry])
         guard case .identityReveal(let calleeReveal) = try DiscoveryExchange.decode(calleeRecord) else { return XCTFail() }
-        XCTAssertEqual(try callerSession.onPeerReveal(calleeReveal).nodeId, realCallee.nodeId)
+        XCTAssertEqual(try callerSession.onPeerReveal(calleeReveal)?.nodeId, realCallee.nodeId)
         XCTAssertTrue(callerSession.callerMayReveal)
         let callerRecord = try callerSession.sendOwn(real: realCaller, entries: [])
         guard case .identityReveal(let callerReveal) = try DiscoveryExchange.decode(callerRecord) else { return XCTFail() }
-        XCTAssertEqual(try calleeSession.onPeerReveal(callerReveal).nodeId, realCaller.nodeId)
-        XCTAssertThrowsError(try calleeSession.onPeerReveal(callerReveal), "second reveal")
+        XCTAssertEqual(try calleeSession.onPeerReveal(callerReveal)?.nodeId, realCaller.nodeId)
+        // A byte-identical repeat (a writer re-sent it after a link renewal) is ignored; any other second reveal ends it.
+        XCTAssertNil(try calleeSession.onPeerReveal(callerReveal), "an identical repeat is ignored")
+        XCTAssertThrowsError(try calleeSession.onPeerReveal(calleeReveal), "a different second reveal")
     }
 
     func testTheContactTagKeyAndTheDomainsMatchTheReference() throws {
@@ -201,5 +217,30 @@ final class Bmh3VectorTests: XCTestCase {
         let identity = SoftwareSigningIdentity()
         XCTAssertNoThrow(try Bmh3Responder(config: try Bmh3Config(purpose: .link, identity: identity, capabilities: caps), replayCache: cache).onMessage1(m1))
         XCTAssertThrowsError(try Bmh3Responder(config: try Bmh3Config(purpose: .link, identity: identity, capabilities: caps), replayCache: cache).onMessage1(m1))
+    }
+
+    func testTheWifiMarkerOnlyRidesInTheLinkInitiatorBlock() throws {
+        let area = try Bmh3Extensions(wifiMarker: true).encodeArea()
+        XCTAssertTrue(try Bmh3Extensions.parse(area).wifiMarker)
+        var version2 = area
+        version2[version2.count - 1] = 2
+        XCTAssertFalse(try Bmh3Extensions.parse(version2).wifiMarker, "another version is treated as absent")
+        func areaWith(_ tail: [UInt8]) -> Data {
+            let pad = Bmh3Wire.extensionBytes - 3 - tail.count
+            return Data([0, UInt8(pad >> 8), UInt8(pad & 0xff)]) + Data(count: pad) + Data(tail)
+        }
+        XCTAssertThrowsError(try Bmh3Extensions.parse(areaWith([8, 0, 2, 1, 0])), "a two-byte WIFI value")
+
+        let caps = NodeCapabilities(transportMask: 4, encodeCodecMask: 1, decodeCodecMask: 1, maxBitrateKbps: 1100, maxChildren: 0)
+        let initiator = Bmh3Initiator(config: try Bmh3Config(purpose: .link, identity: SoftwareSigningIdentity(), capabilities: caps,
+                                                             wifiMarker: true))
+        let responder = Bmh3Responder(config: try Bmh3Config(purpose: .link, identity: SoftwareSigningIdentity(), capabilities: caps,
+                                                             wifiMarker: true))
+        let m1 = try initiator.message1()
+        let m2 = try responder.onMessage1(m1)
+        let m3 = try initiator.onMessage2(m2)
+        _ = try responder.onMessage3(m3)
+        XCTAssertTrue(try responder.finalResult().peer.extensions.wifiMarker)
+        XCTAssertFalse(try initiator.finalResult().peer.extensions.wifiMarker, "a responder block never carries the marker")
     }
 }

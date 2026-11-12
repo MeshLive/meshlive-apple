@@ -1,0 +1,45 @@
+MeshLive connects nearby iPhones, Macs and Android phones directly over Bluetooth for voice and video calls and for
+watching livestreams. There is no account, no sign-in, no server and no internet use, so there is no demo account.
+
+HOW TO TRY IT
+Full function needs a second device running MeshLive within about 20 metres. A screen recording of two devices in a call
+and watching a livestream is linked in the "Notes" video field: <the owner adds the link in App Store Connect>.
+1. First launch: the Terms page asks for "Agree and continue", then one "Continue" shows the Bluetooth, microphone and
+   notification prompts one after another. The camera is asked for the first time a video call starts.
+2. Open MeshLive on both devices. On one, open Calls, then tap the other device's generated name (for example "artsy cascade").
+3. On the other device tap Accept. Every call must be accepted by the person called; nothing is received without it.
+4. Livestreams from nearby devices appear on the Live tab; tap one to watch it. This version watches and listens; it does
+   not broadcast.
+
+USER-GENERATED CONTENT (guideline 1.2)
+- Terms with "zero tolerance for abuse" are shown at first launch and must be accepted ("Agree and continue"). The app is
+  rated 18+.
+- Block and Report are offered on an incoming call from a caller who showed a real key (Decline and block, Report), on a
+  livestream whose source authenticated itself (Block this person, Report), on Recent rows, on a contact and on the list of
+  nearby people. Block hides the person on the device. Report also blocks them and opens a prepared email to the team
+  (meshlive.dev@gmail.com) that the user reviews and sends. Settings > About > Contact us is a second route. A livestream
+  whose source did not authenticate offers Hide this livestream instead.
+- MeshLive has no servers, so the team cannot see or remove content; blocking and hiding on the device is how a user stops
+  contact, and reports are read by the team and used to improve these controls.
+
+BACKGROUND MODES
+- audio: keeps the sound of a call that is in progress going when the screen locks or the user switches app.
+- bluetooth-central and bluetooth-peripheral: keep the Bluetooth link of a call or of a stream being watched alive in the
+  background. When the app is in the background and no call or stream is active, it stops all Bluetooth scanning and
+  advertising. The app does not use CallKit or push notifications.
+
+ENCRYPTION
+The app uses only Apple's CryptoKit for cryptography (key agreement, signatures and authenticated encryption of calls and
+streams). Opus and libvpx are audio and video codecs and do no encryption. ITSAppUsesNonExemptEncryption is set to NO.
+
+PERMISSIONS
+Bluetooth (find and connect to nearby devices), microphone (calls), camera (video calls and scanning a contact's code),
+notifications (so the device rings for a call). No location, contacts, photos or tracking.
+
+PRIVACY
+The app collects no data. It has no analytics or advertising. Everything stays on the device except what the user sends to
+the other person in a call or stream. The privacy policy is at https://meshlive.github.io/privacy/.
+
+OPEN SOURCE
+MeshLive is open source (GNU GPL v3 or later); the licences of Opus and libvpx are shown in Settings > About > Open-source
+licences. The mention of Android is a factual statement that the app interoperates with MeshLive for Android.

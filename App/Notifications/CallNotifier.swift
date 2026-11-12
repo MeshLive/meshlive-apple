@@ -17,6 +17,12 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
     private(set) var authorization: CallAlertPolicy.Authorization = .notDetermined
     var onAuthorizationChange: ((CallAlertPolicy.Authorization) -> Void)?
     private var posted = false
+    /// The user's notification preview setting is "Always" (text shows on a locked device). Read with the authorization.
+    private var previewsAlways = false
+    /// Names may go into call and missed-call notifications (Show names on lock screen).
+    private var namesAllowed: Bool {
+        CallAlertPolicy.namesAllowed(showNamesOnLockScreen: AppSettings.lockScreenNames, previewsAlways: previewsAlways)
+    }
 
     func configure(model: AppModel) {
         guard !DesktopPreview.enabled else { return }
@@ -33,7 +39,11 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
                                             hiddenPreviewsBodyPlaceholder: MissedCallAlert.lockedPlaceholder, options: [])
         let missedPlain = UNNotificationCategory(identifier: MissedCallAlert.plainCategoryIdentifier, actions: [], intentIdentifiers: [],
                                                  hiddenPreviewsBodyPlaceholder: MissedCallAlert.lockedPlaceholder, options: [])
-        center.setNotificationCategories([category, missed, missedPlain])
+        // Android audio_live_reminder: "Still broadcasting" with Stop; a locked device shows only "Broadcasting audio".
+        let stopRadio = UNNotificationAction(identifier: AudioLiveReminderPolicy.stopAction, title: "Stop", options: [])
+        let radioReminder = UNNotificationCategory(identifier: AudioLiveReminderPolicy.categoryIdentifier, actions: [stopRadio], intentIdentifiers: [],
+                                                   hiddenPreviewsBodyPlaceholder: AudioLiveReminderPolicy.lockedPlaceholder, options: [])
+        center.setNotificationCategories([category, missed, missedPlain, radioReminder])
         refreshAuthorization()
     }
 
@@ -45,7 +55,8 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
             case .denied: value = .denied
             default: value = .notDetermined
             }
-            DispatchQueue.main.async { self.authorization = value; self.onAuthorizationChange?(value) }
+            let always = settings.showPreviewsSetting == .always
+            DispatchQueue.main.async { self.previewsAlways = always; self.authorization = value; self.onAuthorizationChange?(value) }
         }
     }
 
@@ -71,7 +82,9 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
             return
         }
         guard !posted else { return }
-        let text = CallAlertPolicy.content(voice: call.offeredType == .voice, peerName: call.label?.title, stranger: call.label == nil)
+        // Only a verified contact's own label may appear on the lock screen; never a claimed name or a stranger's handle.
+        let contact = call.verification == .verified && namesAllowed ? call.label?.contactName : nil
+        let text = CallAlertPolicy.content(voice: call.offeredType == .voice, peerName: contact, stranger: contact == nil)
         let content = UNMutableNotificationContent()
         content.title = text.title
         content.body = text.body
@@ -98,7 +111,7 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
             let previous = delivered.first { $0.request.identifier == identifier }?.request.content.userInfo[MissedCallAlert.countKey] as? Int
             let count = MissedCallAlert.nextCount(stillShowing: previous != nil, previous: previous ?? 0)
             let content = UNMutableNotificationContent()
-            content.title = MissedCallAlert.title(peerName: peerName, stranger: stranger, count: count)
+            content.title = MissedCallAlert.title(peerName: self.namesAllowed ? peerName : nil, stranger: stranger, count: count)
             // Call back only when there is a verified contact to call.
             content.categoryIdentifier = prefixHex != nil && !stranger ? MissedCallAlert.categoryIdentifier : MissedCallAlert.plainCategoryIdentifier
             content.threadIdentifier = "missed-calls"
@@ -109,6 +122,25 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
             self.center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
             AppLog.event("missed_call", ["posted": "true", "count": "\(count)", "named": "\(!stranger && peerName != nil)"])
         }
+    }
+
+    private static let radioReminderIdentifier = "audio-live-reminder"
+
+    /// Android's audio-only reminder notification. Needs the call-alert permission; never asks for it. No name or title.
+    func postRadioReminder() {
+        guard !DesktopPreview.enabled, !EmergencyWipe.happened, authorization == .authorized else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Still broadcasting"
+        content.body = "Your audio broadcast is still on. Tap to open it, or stop it."
+        content.categoryIdentifier = AudioLiveReminderPolicy.categoryIdentifier
+        content.sound = .default
+        center.add(UNNotificationRequest(identifier: Self.radioReminderIdentifier, content: content, trigger: nil))
+    }
+
+    func clearRadioReminder() {
+        guard !DesktopPreview.enabled else { return }
+        center.removeDeliveredNotifications(withIdentifiers: [Self.radioReminderIdentifier])
+        center.removePendingNotificationRequests(withIdentifiers: [Self.radioReminderIdentifier])
     }
 
     /// The emergency wipe: every delivered and pending notification of this app goes (missed calls name peers).
@@ -143,6 +175,14 @@ final class CallNotifier: NSObject, UNUserNotificationCenterDelegate {
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let action = response.actionIdentifier
         let content = response.notification.request.content
+        if content.categoryIdentifier == AudioLiveReminderPolicy.categoryIdentifier {
+            DispatchQueue.main.async {
+                AppLog.event("radio_reminder", ["event": "action", "action": action])
+                if action == AudioLiveReminderPolicy.stopAction { self.model?.live?.stop() } else { self.model?.live?.userPresent() }
+                completionHandler()
+            }
+            return
+        }
         if MissedCallAlert.isMissedCategory(content.categoryIdentifier) {
             let prefix = content.userInfo[MissedCallAlert.prefixKey] as? String
             let video = content.userInfo[MissedCallAlert.videoKey] as? Bool ?? false

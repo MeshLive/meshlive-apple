@@ -1,9 +1,10 @@
 import Foundation
 import CryptoKit
 
-// Experimental peer labels (naming phase 1, Android `test_peer_labels`): signed names, call subjects and
-// stream titles (BNL1 in a BLB1 container, BME1 content type 10, end-to-end hello bit 5), the label text
-// rules, and public title pages. Mirrors Android LabelText.kt / SignedLabel.kt / TitlePage.kt exactly.
+// Experimental peer labels (naming phase 1, Android `test_peer_labels`): signed names and stream titles (BNL1 in a
+// BLB1 container, BME1 content type 10, end-to-end hello bit 5), the label text rules, and public title pages. A call
+// subject (kind 3) is never sent and a received one is decoded and dropped. Mirrors Android LabelText.kt / SignedLabel.kt /
+// TitlePage.kt exactly, except the decision of 2026-11-05 to remove the call subject.
 // Off by default: with the switch off no hello bit, no type 10, nothing on the wire changes.
 
 public enum PeerLabelFeature {
@@ -70,6 +71,9 @@ public enum LabelText {
         }
         guard scriptsAllowed(normalized) else { return .failure(LabelRejected("mixed scripts")) }
         guard !looksLikeHandle(normalized) else { return .failure(LabelRejected("looks like a handle")) }
+        // Naming v2 (Android NameTextRules): a person name may not use the claim mark, the app's separators or a
+        // generated name's form. Senders refuse it; receivers drop the label like any other rule (it fails safe).
+        if kind == .personName, let reserved = NameTextRules.reason(normalized) { return .failure(LabelRejected(reserved)) }
         return .success(normalized)
     }
 
@@ -266,6 +270,9 @@ public final class LabelInbox {
             let kind: LabelKind
             do { kind = try SignedLabelCodec.verify(label, expectedSigner: expectedSigner, expectedBinding: expectedBinding) }
             catch { onRejected?(label.kind, "\(error)"); continue }
+            // Decision 2026-11-05: a received call subject is decoded and dropped silently; only names and stream
+            // titles are ever shown.
+            if kind == .callSubject { continue }
             if let previous = accepted[kind], label.sequence <= previous.sequence { continue }
             accepted[kind] = label; changed.insert(kind)
         }

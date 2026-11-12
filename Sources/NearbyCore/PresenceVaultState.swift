@@ -2,7 +2,8 @@ import Foundation
 
 /// The pure state of the phase 2 presence vault (Android PresenceVault rules), persisted by the app as one Keychain
 /// item: this phone's generation and day-key window, and per contact (by node ID hex) its lease, the generation
-/// delivered to it and the switch "Can see when I'm nearby" (default on, as Android). Every revocation draws a whole
+/// delivered to it and the switch "Can see when I'm nearby" (not yet asked until the user answers, which counts as off;
+/// decision 2026-11-06, replacing Android's default on). Every revocation draws a whole
 /// new window under a higher generation, so contacts recognise nothing from the old keys.
 public struct PresenceVaultState: Codable, Equatable {
     public struct ContactRecord: Codable, Equatable {
@@ -11,7 +12,9 @@ public struct PresenceVaultState: Codable, Equatable {
         public var leaseReceivedAt: TimeInterval = 0
         public var leases: [Int64: Data] = [:]
         public var deliveredGeneration: UInt32 = 0
-        public var canSeeMe = true
+        /// "Can see when I'm nearby": nil until the user answered (not yet asked, which counts as off; product decision
+        /// 2026-11-06), then the answer. A value stored by an older build reads as that answer.
+        public var canSeeMe: Bool?
         public init() {}
     }
     public var generation: UInt32 = 1
@@ -25,7 +28,11 @@ public struct PresenceVaultState: Codable, Equatable {
         return record.deliveredGeneration > 0 && record.deliveredGeneration == generation
     }
 
-    public func canSeeMe(_ peer: String) -> Bool { contacts[peer]?.canSeeMe ?? true }
+    /// On only after the user answered yes; not yet asked counts as off.
+    public func canSeeMe(_ peer: String) -> Bool { contacts[peer]?.canSeeMe == true }
+
+    /// The user's answer for `peer`, or nil while not yet asked.
+    public func answer(_ peer: String) -> Bool? { contacts[peer]?.canSeeMe }
 
     /// A new generation: a whole new window of fresh keys (Reset presence key, revocation, forward-jump recovery).
     public mutating func newGeneration(epoch: Int64, newKey: () -> Data = { randomBytes(32) }) {

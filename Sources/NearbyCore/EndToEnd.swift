@@ -13,6 +13,9 @@ public enum EndToEndContentType: UInt8 {
     case labels = 10
     /// Experimental rotating IDs / BMH3 pseudonyms (BDX1 container): calls only, after both endpoint hellos carried bit 3.
     case discoveryExchange = 11
+    /// EXPERIMENTAL in-call link renewal (Design SR): one `RENEW` record (OFFER, ARMED, REFUSED, BIND); accepted only
+    /// by a call endpoint that signed end-to-end hello bit 4 when the peer signed it too (`CallRenewalWire`).
+    case renew = 12
 }
 
 public enum StreamLifecycleState: UInt8 {
@@ -67,13 +70,13 @@ public enum EndToEndContentProtocol {
 
     /// Validates the clear header exactly as Android's `inspect` (relays can call this without keys).
     public static func inspect(_ encoded: Data, acceptVideoFragments: Bool = false, acceptLabels: Bool = false,
-                               acceptDiscoveryExchange: Bool = false) throws -> Metadata {
+                               acceptDiscoveryExchange: Bool = false, acceptRenewal: Bool = false) throws -> Metadata {
         guard encoded.count >= headerBytes else { throw ProtocolError.malformed("Truncated end-to-end content") }
         var r = BinaryReader(encoded.prefix(headerBytes).rebased)
         guard try r.bytes(4) == magic else { throw ProtocolError.malformed("Invalid end-to-end content magic") }
         let typeValue = try r.byte()
         guard let type = EndToEndContentType(rawValue: typeValue), type != .videoFragment || acceptVideoFragments, type != .labels || acceptLabels,
-              type != .discoveryExchange || acceptDiscoveryExchange else {
+              type != .discoveryExchange || acceptDiscoveryExchange, type != .renew || acceptRenewal else {
             throw ProtocolError.malformed("Unknown end-to-end content type \(typeValue)")
         }
         let sequence = try r.u64()
@@ -111,18 +114,27 @@ public final class EndToEndContentOpener {
     public var acceptVideoFragments = false
     public var acceptLabels = false
     public var acceptDiscoveryExchange = false
+    /// Design SR: type 12 parses only on a call endpoint whose hello and the peer's both signed bit 4.
+    public var acceptRenewal = false
     public init(key: SymmetricKey) { self.key = key }
     /// Copy of the key for a forwarded-stream grant (viewer-forwarder only).
     public var keyBytes: Data { key.withUnsafeBytes { Data($0) } }
     public func open(_ encoded: Data) throws -> EndToEndContentRecord {
         let data = encoded.rebased
         let meta = try EndToEndContentProtocol.inspect(data, acceptVideoFragments: acceptVideoFragments, acceptLabels: acceptLabels,
-                                                       acceptDiscoveryExchange: acceptDiscoveryExchange)
+                                                       acceptDiscoveryExchange: acceptDiscoveryExchange, acceptRenewal: acceptRenewal)
         guard meta.sequence >= nextSequence else { throw ProtocolError.replay }
         let header = data.prefix(EndToEndContentProtocol.headerBytes)
         let plaintext = try MeshAead.decrypt(key: key, sequence: meta.sequence, ciphertext: data.dropFirst(EndToEndContentProtocol.headerBytes), associatedData: header)
         nextSequence = meta.sequence + 1
         return EndToEndContentRecord(type: meta.type, sequence: meta.sequence, flags: meta.flags, payload: plaintext)
+    }
+
+    /// AW1: the sequence of an encoded record from its cleartext header, checked as `open` checks it, without opening it
+    /// (the call cutover decides which carrier's copy is delivered).
+    public func peekSequence(_ encoded: Data) throws -> UInt64 {
+        try EndToEndContentProtocol.inspect(encoded.rebased, acceptVideoFragments: acceptVideoFragments, acceptLabels: acceptLabels,
+                                            acceptDiscoveryExchange: acceptDiscoveryExchange, acceptRenewal: acceptRenewal).sequence
     }
 }
 

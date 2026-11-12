@@ -166,6 +166,8 @@ public final class Bmh3RevealSession {
     private var failed = false
     /// SHA-256 of the callee's reveal record: the caller's reveal binds it.
     private var calleeRecordHash: Data?
+    /// SHA-256 of the peer's verified reveal record (a byte-identical repeat is ignored).
+    private var peerRevealHash: Data?
 
     public init(localRole: UInt8, exporter: Data, ownPseudonymSpki: Data, peerPseudonymSpki: Data,
                 ownPseudonymous: Bool, peerPseudonymous: Bool, ownSpkis: [Data]? = nil) {
@@ -208,8 +210,12 @@ public final class Bmh3RevealSession {
     }
 
     /// Processes the peer's reveal record; throws (the call ends) for a reveal from a peer that did not declare a pseudonym,
-    /// a second one, a wrong role or signature, or a caller reveal before this callee sent its own.
-    public func onPeerReveal(_ record: DiscoveryExchange.IdentityReveal) throws -> Bmh3Reveal.Verified {
+    /// a second different one, a wrong role or signature, or a caller reveal before this callee sent its own. A
+    /// byte-identical repeat of the reveal already verified (a writer re-sends one an in-call link renewal cut off) is
+    /// ignored: nil.
+    public func onPeerReveal(_ record: DiscoveryExchange.IdentityReveal) throws -> Bmh3Reveal.Verified? {
+        let hash = try? Bmh3Crypto.sha256(DiscoveryExchange.encode(.identityReveal(record)))
+        if revealed != nil, !failed, let hash, let seen = peerRevealHash, constantTimeEqual(hash, seen) { return nil }
         do {
             guard peerPseudonymous else { throw Bmh3Failure("reveal from a peer that did not declare a pseudonym") }
             guard revealed == nil else { throw Bmh3Failure("second reveal") }
@@ -218,6 +224,7 @@ public final class Bmh3RevealSession {
             let verified = try Bmh3Reveal.verify(record, expectedRole: peerRole, exporter: exporter, peerPseudonymSpki: peerPseudonymSpki,
                                                  ownPseudonymSpki: ownPseudonymSpki, ownSpkis: ownSpkis, prior: prior)
             if isCaller { calleeRecordHash = Bmh3Crypto.sha256(try DiscoveryExchange.encode(.identityReveal(record))) }
+            peerRevealHash = hash
             revealed = verified
             return verified
         } catch {

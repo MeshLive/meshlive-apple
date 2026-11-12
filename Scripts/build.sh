@@ -8,4 +8,4 @@ if [[ ! -d Vendor/Opus.xcframework ]] && grep -q 'Opus.xcframework' MeshLive.xco
     echo 'Run bash Scripts/prepare-opus.sh first. For the explicitly labeled PCM diagnostic only, regenerate with python3 Scripts/project.py.' >&2
     exit 1
 fi
-xcodebuild -project MeshLive.xcodeproj -scheme MeshLive-iOS -configuration Debug -sdk "$sdk" -destination "generic/platform=$([[ "$sdk" == iphoneos ]] && echo iOS || echo 'iOS Simulator')" -derivedDataPath "${DERIVED:-.build/xcode}" $([[ "$sdk" == iphonesimulator ]] && echo "CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES" || echo "CODE_SIGNING_ALLOWED=NO") build
+xcodebuild -project MeshLive.xcodeproj -scheme MeshLive-iOS -configuration Debug -sdk "$sdk" -destination "generic/platform=$([[ "$sdk" == iphoneos ]] && echo iOS || echo 'iOS Simulator')" -derivedDataPath "${DERIVED:-.build/xcode}" $([[ "$sdk" == iphonesimulator ]] && echo "CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES" || echo "CODE_SIGNING_ALLOWED=NO") MESHLIVE_SOURCE_COMMIT="$(git rev-parse --short=7 HEAD 2>/dev/null || true)" build

@@ -9,15 +9,25 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.3.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>3</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>MeshLiveSourceCommit</key>
+	<string>$(MESHLIVE_SOURCE_COMMIT)</string>
+	<key>MeshLiveDistribution</key>
+	<string>$(MESHLIVE_DISTRIBUTION)</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Find people nearby and connect to them directly over Bluetooth for calls and live video, without the internet.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Send your video in calls and live streams, and scan a contact's verification code.</string>
+	<string>Send your video in video calls, and scan a contact's verification code.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Talk in calls, push-to-talk and live streams.</string>
+	<string>Talk in voice and video calls.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>Find the other phone's Wi-Fi Direct network during a call. MeshLive never reads your location.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Find the other phone's Wi-Fi Direct network during a call. MeshLive never reads your location.</string>
 	<key>CFBundleName</key>
 	<string>MeshLive</string>
 	<key>CFBundleDisplayName</key>

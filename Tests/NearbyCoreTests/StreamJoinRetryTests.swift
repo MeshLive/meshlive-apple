@@ -57,4 +57,56 @@ final class StreamJoinRetryTests: XCTestCase {
         XCTAssertFalse(StreamJoinWait.keepWaiting(enabled: false, hopAuthenticated: false, joined: false, stoppedByUser: false, ended: false, secondsLeft: 3),
                        "control arm")
     }
+
+    // MARK: The 60 s end of a lost-stream search (C1.2)
+
+    func testASearchWithNoSightingEndsAtTheBoundAndNotBefore() {
+        var search = StreamSearchBound()
+        search.begin(now: 0)
+        let before = try! XCTUnwrap(search.remaining(now: StreamSearchBound.defaultBound - 0.001))
+        XCTAssertEqual(before, 0.001, accuracy: 0.0001, "1 ms left")
+        XCTAssertFalse(search.expired(now: StreamSearchBound.defaultBound - 0.001))
+        XCTAssertEqual(search.remaining(now: StreamSearchBound.defaultBound), 0)
+        XCTAssertTrue(search.expired(now: StreamSearchBound.defaultBound), "expired at the bound")
+    }
+
+    func testFailedAttemptsInsideTheSearchDoNotRestartItsClock() {
+        var search = StreamSearchBound()
+        search.begin(now: 0)
+        search.begin(now: 20)
+        search.begin(now: 45)
+        XCTAssertFalse(search.expired(now: StreamSearchBound.defaultBound - 0.001))
+        XCTAssertTrue(search.expired(now: StreamSearchBound.defaultBound), "the first loss starts the clock")
+    }
+
+    func testAReconnectThatCameBackEndsTheSearchAndTheNextLossGetsAFullBound() {
+        var search = StreamSearchBound()
+        search.begin(now: 0)
+        XCTAssertNotNil(search.remaining(now: 30))
+        search.end()
+        XCTAssertNil(search.remaining(now: 30), "the stream is back")
+        search.begin(now: 100)
+        XCTAssertFalse(search.expired(now: 159.999))
+        XCTAssertTrue(search.expired(now: 160), "the next loss gets a full bound")
+    }
+
+    func testTheControlArmNeverExpires() {
+        var search = StreamSearchBound(enabled: { false })
+        search.begin(now: 0)
+        XCTAssertNil(search.remaining(now: 10 * StreamSearchBound.defaultBound))
+        XCTAssertFalse(search.expired(now: 10 * StreamSearchBound.defaultBound), "control arm")
+    }
+
+    func testNoSearchMeansNothingToExpire() {
+        let search = StreamSearchBound()
+        XCTAssertNil(search.remaining(now: 10))
+        XCTAssertFalse(search.expired(now: 10))
+    }
+
+    func testALostStreamIsNotAFailedJoinSoNoRetryIsQueued() {
+        let retry = StreamJoinRetry<String>()
+        retry.onJoined("a")
+        XCTAssertNil(retry.pending, "a stream that played has no failed join")
+        XCTAssertNil(retry.take(now: 1, listed: ["a"], matches: ==), "the lost-stream end queues no rejoin")
+    }
 }

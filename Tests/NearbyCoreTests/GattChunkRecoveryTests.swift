@@ -94,6 +94,38 @@ final class GattChunkRecoveryTests: XCTestCase {
         XCTAssertNil(Gr1.decode(Data([2, 1, 2, 3])), "another type-2 value is not GR1")
         XCTAssertEqual(Gr1.nackRangesFitting(valueLimit: 20), 3)
     }
+
+    /// The sender keeps at most 1,024 values, 256 KiB and 2 s of history (Android ResendHistory); older values answer GONE.
+    func testTheResendHistoryKeepsWithinItsBounds() {
+        let values = Gr1History()
+        for sequence in UInt32(0)..<1_030 { values.record(sequence, Data([1]), now: 0) }
+        XCTAssertNil(values.find(5, now: 0), "only the newest 1,024 values are kept")
+        XCTAssertNotNil(values.find(6, now: 0))
+        XCTAssertNotNil(values.find(1_029, now: 0))
+        let bytes = Gr1History()
+        bytes.record(0, Data(repeating: 1, count: 200_000), now: 0)
+        bytes.record(1, Data(repeating: 1, count: 100_000), now: 0)
+        XCTAssertNil(bytes.find(0, now: 0), "over 256 KiB the oldest value goes")
+        XCTAssertNotNil(bytes.find(1, now: 0))
+        let time = Gr1History()
+        time.record(0, Data([1]), now: 0)
+        XCTAssertNotNil(time.find(0, now: 2))
+        XCTAssertNil(time.find(0, now: 2.01), "older than 2 s")
+    }
+
+    /// Resends stay within 25 % of the data bytes sent in the last second (Android RESEND_BUDGET_PERCENT); a NACK for more
+    /// gets the rest later, never at once.
+    func testResendsStayWithinAQuarterOfTheBytesSentInTheLastSecond() {
+        let a = GattChunkRecovery { _ in }
+        var reader = GattChunkReader(recovery: nil)
+        a.start(valueLimit: 512, now: 0)
+        while a.nextPriorityValue(now: 0) != nil {}                         // the HELLO
+        for sequence in UInt32(0)..<10 { a.onDataSent(sequence: sequence, value: Data(repeating: 1, count: 1_000), now: 0.5) }
+        a.onControl(Gr1.nack([Gr1.SeqRange(first: 0, run: 10)]), now: 0.6, reader: &reader)
+        var resent = 0
+        while let value = a.nextPriorityValue(now: 0.6) { if value.first != Gr1.type { resent += 1 } }
+        XCTAssertEqual(resent, 2, "25 % of 10,000 bytes is 2,500: two 1,000-byte values")
+    }
 }
 
 enum Gr1Fixture {

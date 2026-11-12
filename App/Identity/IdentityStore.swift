@@ -228,6 +228,30 @@ final class Bmh3PinFile: Bmh3PinStorage {
     func write(_ value: String) { SealedRecords.files.write(Data(value.utf8), name: Self.fileName, purpose: Self.purpose) }
 }
 
+/// The block list (Android `BlockedPeopleStore`, `blocked-people.bin`): full fingerprints only, sealed at rest with the
+/// records key (`SealedRecords`, next to the verified contacts, excluded from backup), deleted by the emergency wipe.
+/// A list that cannot be opened or decoded blocks nobody (fail open, as Android) and is never overwritten; Blocked
+/// people offers a reset only when it is damaged.
+enum BlockedPeopleFile {
+    static let fileName = "blocked-people.bin"
+    static let purpose = "MeshLive/BlockedPeople/1"
+
+    static func load() -> BlockListLoad {
+        if DesktopPreview.enabled { return .loaded(BlockList()) }
+        return BlockListLoad.classify(SealedRecords.files.read(fileName, purpose: purpose))
+    }
+
+    /// False when nothing was written (a wipe started, a preview, or a storage failure).
+    static func save(_ list: BlockList) -> Bool {
+        guard !DesktopPreview.enabled, !EmergencyWipe.happened, let data = try? list.encoded() else { return false }
+        var directory = SealedRecords.files.directory
+        BackupExclusion.apply(&directory)
+        return SealedRecords.files.write(data, name: fileName, purpose: purpose)
+    }
+
+    static func reset() { SealedRecords.files.delete(fileName) }
+}
+
 /// Emergency wipe (Android EmergencyWipe semantics, adapted to iOS): marker first, keys first, then
 /// data, a second sweep, and the marker last. A remaining marker resumes the wipe on the next launch.
 enum EmergencyWipe {
@@ -290,22 +314,19 @@ struct AppSettings {
         get { d.bool(forKey: "experimentalDesktopPauseCallDiscovery") }
         set { d.set(newValue, forKey: "experimentalDesktopPauseCallDiscovery") }
     }
-    /// Experimental scanner/call compatibility; independent of this Mac's advertised identity settings.
-    static var desktopAndroidCompatibility: Bool {
-        get { d.bool(forKey: "experimentalDesktopAndroidCompatibility") }
-        set { d.set(newValue, forKey: "experimentalDesktopAndroidCompatibility") }
-    }
+    /// Mac "Android compatibility": no Settings row since 2026-11-04 (with rotating IDs, hidden identities and
+    /// pseudonyms always on it adds nothing); a stored choice is ignored. Control arm: DEBUG launch argument
+    /// `-experimentalDesktopAndroidCompatibility YES`, for runs that turn the trio off.
+    static var desktopAndroidCompatibility: Bool { LabSwitch.promoted("experimentalDesktopAndroidCompatibility", shipped: false) }
     static var desktopCallDeliveryFeedback: Bool {
         get { d.bool(forKey: "experimentalDesktopCallDeliveryFeedback") }
         set { d.set(newValue, forKey: "experimentalDesktopCallDeliveryFeedback") }
     }
     #endif
-    /// Generated nearby names (Android names-v2), iPhone and Mac, on by default as on Android
-    /// (2026-10-27); the switch in Settings › Privacy turns it off (the key keeps its Mac name).
-    static var desktopGeneratedNames: Bool {
-        get { flag("experimentalDesktopGeneratedNames", default: true) }
-        set { d.set(newValue, forKey: "experimentalDesktopGeneratedNames") }
-    }
+    /// Generated nearby names (Android names-v2), iPhone and Mac: always on since 2026-11-04, as Android ("Friendly
+    /// names are always shown"); no Settings switch, a stored "off" is ignored. Control arm: DEBUG launch argument
+    /// `-experimentalDesktopGeneratedNames NO` (the key keeps its Mac name).
+    static var desktopGeneratedNames: Bool { LabSwitch.promoted("experimentalDesktopGeneratedNames", shipped: true) }
     static var displayName: String {
         get { d.string(forKey: "displayName") ?? "" }
         set { d.set(newValue, forKey: "displayName") }
@@ -318,29 +339,48 @@ struct AppSettings {
         get { flag("availableForCalls", default: true) }
         set { d.set(newValue, forKey: "availableForCalls") }
     }
-    static var mismatchPolicyWarnOnly: Bool {
-        get { d.bool(forKey: "mismatchWarnOnly") }
-        set { d.set(newValue, forKey: "mismatchWarnOnly") }
+    /// Names and titles (Android PeerLabelFeature, a constant on since 2026-10-17): always on for iPhone and Mac since P5
+    /// (owner, 2026-11-04, "one name"); no Settings switch, a stored "off" is ignored. Control arm: DEBUG launch argument
+    /// `-experimentalPeerLabels NO` (or automation `-NearbyLabels 0` for one run).
+    static var peerLabels: Bool { LabSwitch.promoted("experimentalPeerLabels", shipped: true) }
+    /// "Who sees my name" (Android NamingSettings.PREF_AUDIENCE, the same stored values): People I call or who call me
+    /// (default), Only my contacts, Nobody.
+    static var namesAudience: NamesAudience {
+        get { NamesAudience.stored(d.string(forKey: "namesAudience")) }
+        set { d.set(newValue.rawValue, forKey: "namesAudience") }
     }
-    /// Experimental names and titles (naming phase 1), off by default like Android's test_peer_labels.
-    static var peerLabels: Bool {
-        get { d.bool(forKey: "experimentalPeerLabels") }
-        set { d.set(newValue, forKey: "experimentalPeerLabels") }
+    /// Experimental "Show my name before they answer" (Android NAMES_BEFORE_ANSWER): off for every launch since the owner
+    /// decision of 2026-11-06 ("A caller's name waits for the reveal"); no Settings row, a stored value is ignored. Only
+    /// the DEBUG launch argument `-namesBeforeAnswer YES` turns the comparison arm on (never a release build). On, a
+    /// person this device blocked who answers from a fresh throwaway key would receive the name.
+    static var namesBeforeAnswer: Bool { LabSwitch.promoted("namesBeforeAnswer", shipped: false) }
+    /// "Block unknown callers" (Android CallBlocking.PREF_BLOCK_UNKNOWN), off by default; wiped with the settings.
+    static var blockUnknownCallers: Bool {
+        get { flag("blockUnknownCallers", default: false) }
+        set { d.set(newValue, forKey: "blockUnknownCallers") }
     }
-    /// Experimental BMH3 "Hidden identities" for calls (Android `bmh3`; Android ships it ON since 0.2.0-beta, the
-    /// iPhone keeps it off until phone tests pass and it is reviewed).
-    static var hiddenIdentities: Bool {
-        get { d.bool(forKey: "experimentalBmh3") }
-        set { d.set(newValue, forKey: "experimentalBmh3") }
+    /// "Not now" on "Declined. Block all unknown callers?" (Android block_unknown_offer_dismissed): never asked again.
+    static var blockUnknownOfferDismissed: Bool {
+        get { d.bool(forKey: "blockUnknownOfferDismissed") }
+        set { d.set(newValue, forKey: "blockUnknownOfferDismissed") }
     }
-    /// Experimental "Pseudonymous toward strangers" (Android `bmh3_pseudonyms`, a child of Hidden identities that also
-    /// needs rotating discovery IDs). In this mode the phone neither speaks nor accepts BMH2 for calls.
-    static var bmh3Pseudonyms: Bool {
-        get { d.bool(forKey: "experimentalBmh3Pseudonyms") }
-        set { d.set(newValue, forKey: "experimentalBmh3Pseudonyms") }
+    /// Android "Show names on lock screen" (`lock_screen_peer_names`), off by default; wiped with the settings.
+    static var lockScreenNames: Bool {
+        get { flag("lockScreenNames", default: false) }
+        set { d.set(newValue, forKey: "lockScreenNames") }
     }
+    /// BMH3 "Hidden identities" for calls (Android `bmh3`, on since 0.2.0-beta): always on for iPhone and Mac since
+    /// 2026-11-04 (decision after the Mac <-> Android test); no Settings switch, a stored "off" is ignored.
+    /// Control arm: DEBUG launch argument `-experimentalBmh3 NO`.
+    static var hiddenIdentities: Bool { LabSwitch.promoted("experimentalBmh3", shipped: true) }
+    /// "Pseudonymous toward strangers" (Android `bmh3_pseudonyms`; needs hidden identities and rotating discovery
+    /// IDs): always on since 2026-11-04, no Settings switch. In this mode the phone neither speaks nor accepts BMH2
+    /// for calls. Control arm: DEBUG launch argument `-experimentalBmh3Pseudonyms NO`.
+    static var bmh3Pseudonyms: Bool { LabSwitch.promoted("experimentalBmh3Pseudonyms", shipped: true) }
     /// Experimental "Relayed calls" (Android `test_relayed_calls`, off): a call that reaches this phone through another
     /// phone rings only with this on; otherwise it is declined before it rings (the relayed-call target rule).
+    /// Since 2026-11-06 (product decision, Android `RelayedCallsFeature` without `advancedOnly`) the stored choice counts with
+    /// or without Manual video settings.
     static var relayedCalls: Bool {
         get { d.bool(forKey: "experimentalRelayedCalls") }
         set { d.set(newValue, forKey: "experimentalRelayedCalls") }
@@ -348,9 +388,62 @@ struct AppSettings {
     /// `LabSwitch.flag` and `LabSwitch.read` in this app's preferences (isolated under the Mac preview).
     static func flag(_ key: String, default value: Bool, in store: UserDefaults = d) -> Bool { LabSwitch.flag(key, default: value, in: store) }
     static func labSwitch(_ key: String, shipped: Bool) -> Bool { LabSwitch.read(key, shipped: shipped, in: d) }
+    /// Android "Calls unavailable" status (`test_calls_unavailable_status`, on since 2026-11-05): with Allow calls on and
+    /// Bluetooth ready, a call service not hosted within 5 s shows "Calls unavailable" instead of Ready. Control arm for
+    /// tests only: launch argument `-callsUnavailableStatus NO`.
+    static var callsUnavailableStatus: Bool { labSwitch("callsUnavailableStatus", shipped: true) }
     /// Relayed calls from unverified strangers ring (Android `test_relayed_stranger_calls`, on). Control arm for tests
     /// only: launch argument `-relayedStrangerCalls NO` (relayed calls from contacts only); no Settings switch.
     static var relayedStrangerCalls: Bool { labSwitch("relayedStrangerCalls", shipped: true) }
+    /// Android "Video stops if the phone gets too hot" (critical thermal state; Android has no switch). Control arm for
+    /// tests only: launch argument `-thermalCriticalStop NO`.
+    static var thermalCriticalStop: Bool { labSwitch("thermalCriticalStop", shipped: true) }
+    /// Android `privateCallVideoSettings` call budget with Manual video on (GATT 180, L2CAP 200 kbps). Control arm
+    /// `-callTransportCap NO`.
+    static var callTransportCap: Bool { labSwitch("callTransportCap", shipped: true) }
+    /// Android `RemoteVideoFit` (on): a strongly different call video shape is shown whole; a double-tap flips it.
+    /// Control arm `-remoteVideoFit NO` (Fill screen with video alone decides).
+    static var remoteVideoFit: Bool { labSwitch("remoteVideoFit", shipped: true) }
+    /// Android viewer recovery after an unexpected loss (on, no switch on Android). Control arm `-viewerRecovery NO`: the
+    /// viewer ends on a lost link, as before.
+    static var viewerRecovery: Bool { labSwitch("viewerRecovery", shipped: true) }
+    /// Android relayed-child parent-link watch (`test_relay_parent_watch`, on) and its trickle close
+    /// (`test_relay_parent_trickle`, on). Control arms `-relayParentWatch NO`, `-relayParentTrickle NO`.
+    static var relayParentWatch: Bool { labSwitch("relayParentWatch", shipped: true) }
+    static var relayParentTrickle: Bool { labSwitch("relayParentTrickle", shipped: true) }
+    /// Android `PreAuthAdmissionGate` (`test_viewer_admission_bounds`, on). Control arm `-viewerAdmissionBounds NO`.
+    static var viewerAdmissionBounds: Bool { labSwitch("viewerAdmissionBounds", shipped: true) }
+    /// Android `relayAutoPaused` for Relay video for others (on, no switch on Android). Control arm `-relayBatteryPause NO`.
+    static var relayBatteryPause: Bool { labSwitch("relayBatteryPause", shipped: true) }
+    /// Android's End live confirmation while someone watches (on, no switch on Android). Control arm `-liveEndConfirm NO`.
+    static var liveEndConfirm: Bool { labSwitch("liveEndConfirm", shipped: true) }
+    /// AW1 build gate (Experimental): DEBUG launch argument `-wifiWire YES`; release builds never. Off: no WIFI marker,
+    /// no CAPS, hop type 16 rejected, the Settings Wi-Fi section hidden (every byte as before).
+    static var wifiWire: Bool { labSwitch("wifiWire", shipped: false) }
+    /// AW1 user switch (Experimental, off): "Use Wi-Fi for faster connections".
+    static var wifiCarrier: Bool {
+        get { d.bool(forKey: "wifiCarrier") }
+        set { d.set(newValue, forKey: "wifiCarrier") }
+    }
+    /// AW1 user switch (Experimental, off): "Join Wi-Fi Direct groups".
+    static var wifiDirect: Bool {
+        get { d.bool(forKey: "wifiDirect") }
+        set { d.set(newValue, forKey: "wifiDirect") }
+    }
+    /// Android call readiness permissions (`test_call_readiness_permissions`, on): onboarding asks for Bluetooth, the
+    /// microphone and notifications; the camera is asked at the first video use. Control arm `-callReadinessPermissions NO`.
+    static var callReadinessPermissions: Bool { labSwitch("callReadinessPermissions", shipped: true) }
+    /// Mac only: radio Pause turns the microphone off, as Android ("Paused. The microphone is off"). Control arm
+    /// `-radioPauseMicOff NO` (the microphone stays on while paused, as on the iPhone).
+    static var radioPauseMicOff: Bool { labSwitch("radioPauseMicOff", shipped: true) }
+    /// Mac only: the 2.4 GHz Wi-Fi advice before video (Android `WifiAdvicePolicy`, no switch there). Control arm
+    /// `-wifiAdvice NO`.
+    static var wifiAdvice: Bool { labSwitch("wifiAdvice", shipped: true) }
+    /// When the Wi-Fi advice was last answered (seconds since 1970; 0 = never). Local only.
+    static var wifiAdviceAnsweredAt: Double {
+        get { d.double(forKey: "wifiAdviceAnsweredAt") }
+        set { d.set(newValue, forKey: "wifiAdviceAnsweredAt") }
+    }
     /// Relayed calls sub-switch "Let phones nearby relay calls to me" (Android `relayed_calls_consent`, on within the
     /// experiment): the consent bit on this device's call offer, and whether a relayed call may ring here.
     static var relayedCallsConsent: Bool {
@@ -391,7 +484,8 @@ struct AppSettings {
     /// live offers no audio-only stream, audio-only offers are not listed and a `BTL1` header is refused as unsupported.
     /// Control arm for tests only: launch argument `-audioLive NO`.
     static var audioLive: Bool { labSwitch("audioLive", shipped: true) }
-    /// Advanced "Relay: slow viewers skip to keyframes" (Android relay_child_media_age, default ON).
+    /// Experiments "Relay: slow viewers skip to keyframes" (Android relay_child_media_age, default ON). Since 2026-11-06
+    /// (product decision, as Android) the stored choice counts with or without Manual video settings.
     static var relayChildMediaAge: Bool {
         get { flag("relayChildMediaAge", default: true) }
         set { d.set(newValue, forKey: "relayChildMediaAge") }
@@ -412,20 +506,82 @@ struct AppSettings {
         get { d.bool(forKey: "holdMuteHintShown") }
         set { d.set(newValue, forKey: "holdMuteHintShown") }
     }
+    /// Android `audio_live_disclosed`: the first-time "Going live" warning for audio only was confirmed.
+    static var audioLiveDisclosed: Bool {
+        get { d.bool(forKey: "audioLiveDisclosed") }
+        set { d.set(newValue, forKey: "audioLiveDisclosed") }
+    }
+    /// Android `audio_live_last_choice`: true when Audio only was the last Go live choice (drawn white next time).
+    static var audioLiveLastChoice: Bool {
+        get { d.bool(forKey: "audioLiveLastChoice") }
+        set { d.set(newValue, forKey: "audioLiveLastChoice") }
+    }
     /// Call resolution ladder (default on for user calls, like Android).
     static var resolutionLadder: Bool {
         get { flag("resolutionLadder", default: true) }
         set { d.set(newValue, forKey: "resolutionLadder") }
     }
-    /// EXPERIMENTAL call audio FEC (off; Android test_call_native_opus): in-band FEC + recovery.
-    static var callAudioFec: Bool {
-        get { d.bool(forKey: "experimentalCallAudioFec") }
-        set { d.set(newValue, forKey: "experimentalCallAudioFec") }
+    /// EXPERIMENTAL call audio FEC (Android `test_call_native_opus`, "Call audio with loss recovery"): in-band FEC +
+    /// recovery, off. No Settings switch since 2026-11-04 (the Android decision "Fewer switches (2026-11-04)"): a choice
+    /// stored by the old "Call audio error correction" row (`experimentalCallAudioFec`) is ignored. DEBUG builds: launch
+    /// argument `-callAudioFec YES`, or `-NearbyCallAudioFec 1` (Automation), runs the FEC arm; release builds never do.
+    static var callAudioFec: Bool { callAudioFecThisRun ?? labSwitch("callAudioFec", shipped: false) }
+    /// Set only by DEBUG automation (`-NearbyCallAudioFec 1|0`) for the current run; never stored.
+    static var callAudioFecThisRun: Bool?
+    /// Rotating discovery IDs (Android `RotatingDiscoveryFeature`, on since 0.2.0-beta): call-ready presence uses a
+    /// 15-minute rotating ID. Always on for iPhone and Mac since 2026-11-04; no Settings switch, a stored "off" is
+    /// ignored. Control arm: DEBUG launch argument `-experimentalRotatingIds NO`.
+    static var rotatingIds: Bool { LabSwitch.promoted("experimentalRotatingIds", shipped: true) }
+    /// Rotating discovery IDs phase 1b, viewer side (Android Phase 1b, on there by default): a rotating (version 5)
+    /// stream is joined with a compact v2 request carrying this device's role-2 RDI, its role-2 entries go in the
+    /// stream hop's BDO1, and the request rotates at each boundary. Control arm for tests only: launch argument
+    /// `-rotatingViewer NO` refuses such a stream as before (never a fixed-prefix request instead).
+    static var rotatingViewer: Bool { labSwitch("rotatingViewer", shipped: true) }
+    /// AB4, EXPERIMENTAL: rotating discovery IDs phase 1b, source side (Android Phase 1b items 1-7, on there by default).
+    /// On: this device's live offer is a compact v2 stream offer with its role-1 RDI (route token logical XOR mask(RDI),
+    /// rotated at each boundary with a 1-8 s silence, own role-1 pins in the stream hop's BDO1), and it answers version 5
+    /// and compact v2 viewer requests through the 60 s route-token window after checking the viewer's role-2 opening.
+    /// Off (the default until the Mac <-> Android device check passes): the fixed-prefix offer exactly as before. DEBUG
+    /// launch argument `-rotatingSource YES`; release builds always off.
+    static var rotatingSource: Bool { labSwitch("rotatingSource", shipped: false) }
+    /// Settings › Manual video (Android `VideoSettings`): what calls and broadcasts ask to send. A stored value that is not
+    /// one of Android's choices reads as the standard request; nothing is rewritten. DEBUG launch arguments
+    /// `-videoLines 360 -videoFps 15 -videoKbps 300` set it for one run.
+    static var videoRequest: VideoRequest {
+        get {
+            let lines = d.object(forKey: "videoLines") == nil ? 240 : d.integer(forKey: "videoLines")
+            let fps = d.object(forKey: "videoFps") == nil ? 15 : d.integer(forKey: "videoFps")
+            let kbps = d.object(forKey: "videoKbps") == nil ? 200 : d.integer(forKey: "videoKbps")
+            return VideoRequest(lines: lines, fps: fps, kbps: kbps) ?? .standard
+        }
+        set {
+            d.set(newValue.lines, forKey: "videoLines"); d.set(newValue.fps, forKey: "videoFps"); d.set(newValue.kbps, forKey: "videoKbps")
+        }
     }
-    /// EXPERIMENTAL rotating discovery IDs (off): call-ready presence uses a 15-minute rotating ID.
-    static var rotatingIds: Bool {
-        get { d.bool(forKey: "experimentalRotatingIds") }
-        set { d.set(newValue, forKey: "experimentalRotatingIds") }
+    /// Android "Manual video settings" (`PREF_ADVANCED_SETTINGS`, off): on, nothing adapts to the link.
+    static var manualVideo: Bool {
+        get { flag("manualVideo", default: false) }
+        set { d.set(newValue, forKey: "manualVideo") }
+    }
+    /// Android "Fill screen with video" (`VideoScaleMode.FILL`, the default): remote video fills the view, edges cropped.
+    static var videoFill: Bool {
+        get { flag("videoFill", default: true) }
+        set { d.set(newValue, forKey: "videoFill") }
+    }
+    /// Android "Show temperature" (`PREF_SHOW_DEVICE_HEALTH`, off): the heat and battery line on call and live screens.
+    static var showTemperature: Bool {
+        get { flag("showTemperature", default: false) }
+        set { d.set(newValue, forKey: "showTemperature") }
+    }
+    /// Android "Lower quality when hot" (`PREF_AUTOMATIC_THERMAL_REDUCTION`, on): `ThermalVideoPolicy`.
+    static var lowerQualityWhenHot: Bool {
+        get { flag("lowerQualityWhenHot", default: true) }
+        set { d.set(newValue, forKey: "lowerQualityWhenHot") }
+    }
+    /// EXPERIMENTAL Android "Warn when video freezes" (`viewer_frame_age`, off): `ViewerFreeze`.
+    static var viewerFreezeWarning: Bool {
+        get { flag("viewerFreezeWarning", default: false) }
+        set { d.set(newValue, forKey: "viewerFreezeWarning") }
     }
     /// EXPERIMENTAL, off by default: pass streams (and calls) on to other phones nearby.
     static var relayForOthers: Bool {

@@ -40,6 +40,8 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     private var servicesAdded = 0
     private var wantScan = false
     private var wantedAdvertisement: (uuid: String, name: String)?
+    /// D1 (S1): the advertised UUID carries a watch's join-key ID, so the `advertise` lines omit it.
+    var redactAdvertisedId = false
     private(set) var advertisingUUID: String?
     /// Discovery rows keyed by node prefix + kind + route token (Android rotates its advertising address).
     let table = DiscoveryTable(window: 8)
@@ -53,6 +55,10 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     private var clientLinks: [UUID: GattClientLink] = [:]
     private var serverLinks: [UUID: GattServerLink] = [:]
     private var knownPeripherals: [UUID: CBPeripheral] = [:]
+    /// Android copied-ID warning (Design G): rotating call offers heard from two radio addresses at once. Main queue.
+    let copiedIds = CopiedIdTracker()
+    /// Off: no offer is observed (DEBUG control arm `-copiedIdWarning NO`, set by the app at start).
+    var copiedIdWarning = true
 
     /// EXPERIMENTAL relayed calls : reach tables fed from this phone's own scans (call offers and reach
     /// pages), one per population (fixed prefixes; role-0 RDIs with rotating IDs). Nil while the switch is off, so
@@ -144,12 +150,15 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
 
     private var advertisingWatchdog: Timer?
     private func checkAdvertising() {
+        if renewalAdvertUUID != nil, peripheralReady, !peripheralManager.isAdvertising { applyAdvertisement(); return }
+        if renewalAdvertHold { return }
         guard let wanted = wantedAdvertisement, peripheralReady, !peripheralManager.isAdvertising else { return }
-        AppLog.event("advertise_restart", ["uuid": wanted.uuid])
+        AppLog.event("advertise_restart", ["uuid": redactAdvertisedId ? "hidden" : wanted.uuid])
         applyAdvertisement()
     }
 
     func stopAll() {
+        renewalScan = nil; renewalAdvertUUID = nil; renewalAdvertHold = false; renewalSubscriber = nil
         wantScan = false; wantedAdvertisement = nil
         if centralReady { central.stopScan() }
         peripheralManager?.stopAdvertising(); advertisingUUID = nil
@@ -174,7 +183,8 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         let changed = wantScan != on
         #endif
         wantScan = on
-        guard centralReady else { return }
+        // A renewal scan (at most 6 s) owns the central's one scan; the discovery scan comes back after it.
+        guard centralReady, renewalScan == nil else { return }
         #if os(macOS)
         guard changed || central.isScanning != on else { return }
         #endif
@@ -198,12 +208,19 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
 
     /// Restarts the scan (flushes Core Bluetooth's duplicate filter so a re-advertising peer is reported promptly).
     func restartScan() {
-        guard wantScan, centralReady else { return }
+        guard wantScan, centralReady, renewalScan == nil else { return }
         central.stopScan()
         central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        MainStall.enter("MeshRadio.didDiscover"); defer { MainStall.exit() }
+        if let scan = renewalScan {
+            // Design SR: the armed phone's renewal advert carries only its derived service UUID.
+            let services = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? [])
+                + (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? [])
+            if services.contains(scan.uuid) { knownPeripherals[peripheral.identifier] = peripheral; scan.onFound(peripheral); return }
+        }
         var announcement: DiscoveryAnnouncement?
         var iPhone = false
         if let mfr = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
@@ -233,11 +250,24 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         }
         guard let announcement else { return }
         knownPeripherals[peripheral.identifier] = peripheral
+        if copiedIdWarning, announcement.rotating, announcement.isPrivateCallOffer {
+            let services = ((advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? [])
+                + (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? [])).map(\.uuidString)
+            let before = copiedIds.warned(announcement.nodeIdPrefix)
+            copiedIds.observe(id: announcement.nodeIdPrefix, address: peripheral.identifier, routeCost: announcement.routeCost,
+                              nowMs: Int64(ProcessInfo.processInfo.systemUptime * 1000), form: CopiedIdTracker.twinForm(serviceUUIDs: services))
+            if !before, copiedIds.warned(announcement.nodeIdPrefix) {
+                AppLog.event("copied_id", ["event": "warned", "prefix": announcement.prefixHex, "routeCost": "\(announcement.routeCost)"])
+                onPeersChanged?()
+            }
+        }
         let change = table.observe(handle: peripheral.identifier, announcement: announcement, rssi: RSSI.intValue, isIPhone: iPhone,
                                    now: ProcessInfo.processInfo.systemUptime)
         if change.isNew || change.announcementChanged || change.handleReplaced {
             let kind = announcement.isStreamOffer ? "stream_offer" : announcement.isPrivateCallOffer ? "call_offer" : "viewer_request"
-            AppLog.event("discovery_peer", ["prefix": announcement.prefixHex, "handle": IdentityHandle.handle(prefix: announcement.nodeIdPrefix) ?? "?",
+            // D1 (S2): a viewer request's or a forwarder offer's ID may be a join key: never logged.
+            AppLog.event("discovery_peer", ["prefix": announcement.loggablePrefix(debugBuild: LabSwitch.isDebugBuild),
+                                            "handle": announcement.loggableHandle(debugBuild: LabSwitch.isDebugBuild),
                                             "kind": kind, "transport": announcement.transport?.rawValue ?? "classic", "iphone": "\(iPhone)",
                                             "routeCost": "\(announcement.routeCost)", "rssi": "\(RSSI.intValue)", "new": "\(change.isNew)",
                                             "addressChanged": "\(change.handleReplaced)", "rows": "\(table.entries.count)"])
@@ -257,7 +287,9 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     func advertise(_ announcement: DiscoveryAnnouncement?, name: String) {
         guard let announcement, let uuid = try? CompactAnnouncement.encode(announcement) else {
             if advertisingUUID != nil { AppLog.event("advertise", ["kind": "none"]) }
-            wantedAdvertisement = nil; peripheralManager?.stopAdvertising(); advertisingUUID = nil; return
+            wantedAdvertisement = nil
+            if !renewalAdvertHold { peripheralManager?.stopAdvertising() }
+            advertisingUUID = nil; return
         }
         let short = MeshRadio.shortName(name)
         if wantedAdvertisement?.uuid == uuid && wantedAdvertisement?.name == short && advertisingUUID == uuid { return }
@@ -274,12 +306,19 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     private func applyAdvertisement() {
         guard peripheralReady else { return }
         peripheralManager.stopAdvertising(); advertisingUUID = nil
+        if let renewal = renewalAdvertUUID {
+            // Design SR: while armed only the renewal UUID is on air (no announcement, no name, no other data).
+            peripheralManager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [renewal]])
+            return
+        }
+        // Design SR: after the 7 s advert window nothing is on air until the attempt ends (its routing is still active).
+        if renewalAdvertHold { return }
         guard let wanted = wantedAdvertisement else { return }
         var data: [String: Any] = [CBAdvertisementDataServiceUUIDsKey: [CBUUID(string: wanted.uuid)]]
         peripheralManager.startAdvertising(data)
         advertisingUUID = wanted.uuid
         let kind = CompactAnnouncement.decode(wanted.uuid, acceptRotating: true).map { $0.isStreamOffer ? "stream_offer" : $0.isPrivateCallOffer ? "call_offer" : "viewer_request" } ?? "?"
-        AppLog.event("advertise", ["uuid": wanted.uuid, "kind": kind, "localName": wanted.name.isEmpty ? "none" : "set"])
+        AppLog.event("advertise", ["uuid": redactAdvertisedId ? "hidden" : wanted.uuid, "kind": kind, "localName": wanted.name.isEmpty ? "none" : "set"])
     }
 
     // MARK: Central state
@@ -299,6 +338,10 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         if central.state != .poweredOn {
             for attempt in attempts.values { attempt.fail("Bluetooth unavailable") }
             attempts.removeAll()
+            // CoreBluetooth drops every connection without a didDisconnect callback when it powers off: end the client
+            // links now, as the server side does, instead of a call waiting for its silence check ("stopped responding").
+            for link in clientLinks.values { link.fail("Bluetooth unavailable") }
+            clientLinks.removeAll()
         }
     }
 
@@ -314,6 +357,9 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         }
         guard servicesAdded == 0 else { return }
         hostingFailed = false
+        // DEBUG `-NearbyHostingHang YES` (the Calls unavailable check; Android `test_call_listen_inject=hang`): the call
+        // service is never added, as when the stack stops answering. Release builds always add it.
+        if LabSwitch.read("NearbyHostingHang", shipped: false) { AppLog.event("calls_inject", ["mode": "hang"]); return }
         peripheral.removeAllServices()
         let psmCharacteristic = CBMutableCharacteristic(type: CBUUID(string: MeshUUIDs.psmCharacteristic), properties: [.read], value: nil, permissions: [.readable])
         let control = CBMutableService(type: CBUUID(string: MeshUUIDs.controlService), primary: true)
@@ -342,6 +388,10 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+        if renewalAdvertUUID != nil, let report = onRenewalAdvertStarted {
+            onRenewalAdvertStarted = nil
+            report(error == nil)
+        }
         if let error {
             advertisingUUID = nil
             AppLog.event("advertise_error", ["error": error.localizedDescription])
@@ -367,21 +417,35 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         guard characteristic.uuid == CBUUID(string: MeshUUIDs.gattNotify), let notify = notifyCharacteristic else { return }
+        if let subscriber = renewalSubscriber, !(serverLinks[central.identifier]?.isOpen ?? false) {
+            // Design SR, armed: every new subscription is a renewal connection (it gets a challenge at once), except a
+            // central that still holds a live server link (it is never routed away from that link).
+            let link = GattServerLink(central: central, manager: peripheral, notify: notify, label: "LE GATT (renewal)")
+            link.isRenewal = true
+            let id = central.identifier
+            link.onRelease = { [weak self, weak link] in if let self, self.serverLinks[id] === link { self.serverLinks[id] = nil } }
+            serverLinks[id] = link
+            subscriber(link)
+            return
+        }
         // One central at a time, admitted on its subscription (as Android's GATT server).
         guard serverLinks.isEmpty, allowIncomingGatt?() ?? true else { return }
         let link = GattServerLink(central: central, manager: peripheral, notify: notify, label: "LE GATT (incoming)")
         AppLog.event("incoming_link", ["transport": "gatt", "maxUpdate": "\(central.maximumUpdateValueLength)"])
         let id = central.identifier
-        link.onRelease = { [weak self] in self?.serverLinks[id] = nil }
+        // A renewal link of the same central may have replaced this entry: release only this link's own.
+        link.onRelease = { [weak self, weak link] in if let self, self.serverLinks[id] === link { self.serverLinks[id] = nil } }
         serverLinks[id] = link
         onIncomingLink?(link)
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
+        MainStall.enter("MeshRadio.didUnsubscribe"); defer { MainStall.exit() }
         serverLinks[central.identifier]?.fail("The peer unsubscribed")
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        MainStall.enter("MeshRadio.didReceiveWrite"); defer { MainStall.exit() }
         #if os(macOS)
         desktopWriteBatches += 1; desktopRawWrites += requests.count
         if !requests.isEmpty { desktopLastRawWriteAt = ProcessInfo.processInfo.systemUptime }
@@ -402,12 +466,29 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
             #if os(macOS)
             desktopAcceptedWrites += 1
             #endif
+            if let subscriber = renewalSubscriber, let notify = notifyCharacteristic,
+               MeshRadio.startsRenewalStream(linkIsRenewal: link.isRenewal, peerHelloSeen: link.peerHelloSeen, value: value) {
+                // Design SR, armed: the offerer re-used this LE connection (an Apple device keeps its address, so its
+                // new connection is the old one) and started a new GATT stream: its CCCD was already on, so no
+                // subscription was reported. The new stream is a renewal connection; the old link ends here.
+                let id = request.central.identifier
+                let renewal = GattServerLink(central: request.central, manager: peripheral, notify: notify, label: "LE GATT (renewal, same connection)")
+                renewal.isRenewal = true
+                renewal.onRelease = { [weak self, weak renewal] in if let self, self.serverLinks[id] === renewal { self.serverLinks[id] = nil } }
+                serverLinks[id] = renewal
+                AppLog.event("call_renewal", ["role": "armed", "phase": "same_connection_stream"])
+                link.fail("The peer started a new GATT stream on this connection")
+                subscriber(renewal)
+                renewal.received(value)
+                continue
+            }
             link.received(value)
         }
         if let first = requests.first { peripheral.respond(to: first, withResult: ok ? .success : .requestNotSupported) }
     }
 
     func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+        MainStall.enter("MeshRadio.readyToUpdate"); defer { MainStall.exit() }
         for link in serverLinks.values { link.pump() }
     }
 
@@ -438,7 +519,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         }
         let key = peripheral.identifier
         attempts[key]?.fail("Replaced", stage: "stopped")
-        AppLog.event("connect", ["stage": "start", "transport": transport.rawValue, "prefix": entry.announcement.prefixHex,
+        AppLog.event("connect", ["stage": "start", "transport": transport.rawValue, "prefix": entry.announcement.loggablePrefix(debugBuild: LabSwitch.isDebugBuild),
                                  "ageMs": "\(Int((ProcessInfo.processInfo.systemUptime - entry.lastSeen) * 1000))", "retried": "\(retried)"])
         let attempt = OutgoingAttempt(peripheral: peripheral, transport: transport, handle: handle, retried: retried) { [weak self] result in
             guard let self else { return }
@@ -520,6 +601,17 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
                                          "cachedServices": "\(peripheral.services?.count ?? 0)"].merging(attempt.timing()) { a, _ in a })
         #endif
         peripheral.discoverServices([CBUUID(string: service)])
+        if attempt.renewal {
+            // Design SR: a renewal connect whose discovery stalls is cut after 3 s, so the renewal can try again (a new
+            // sighting or the existing connection) inside its 11 s budget.
+            let key = peripheral.identifier
+            attempt.stallTimer?.invalidate()
+            // Common run-loop modes (CallRenewalRadio.deadline): the cut also fires while a scroll or a held control tracks.
+            attempt.stallTimer = CallRenewalRadio.deadline(after: MeshRadio.renewalServicesStall) { [weak self] in
+                guard let self, let pending = self.attempts[key], pending === attempt, pending.stage != "subscribed" else { return }
+                self.failAttempt(key, "Service discovery stalled", stage: "services_stall")
+            }
+        }
         // Experimental: a first attempt still discovering after `servicesStallSeconds` is cut and goes straight to the
         // existing rediscover-and-retry.
         let stall = MeshRadio.servicesStallSeconds
@@ -549,6 +641,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        MainStall.enter("MeshRadio.didDisconnect"); defer { MainStall.exit() }
         AppLog.event("disconnect", ["error": error?.localizedDescription ?? "none", "hadClientLink": "\(clientLinks[peripheral.identifier] != nil)"])
         failAttempt(peripheral.identifier, "Disconnected during setup")
         if let link = clientLinks.removeValue(forKey: peripheral.identifier) { link.fail("Bluetooth link lost") }
@@ -562,7 +655,15 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
         #endif
         guard let attempt = attempts[peripheral.identifier] else { return }
         let serviceId = CBUUID(string: attempt.transport == .l2cap ? MeshUUIDs.controlService : MeshUUIDs.gattDataService)
-        guard error == nil, let service = peripheral.services?.first(where: { $0.uuid == serviceId }) else {
+        // Design SR: the armed phone's renewal server is another instance of the data service (Android adds it for the
+        // attempt, next to the old call's); the old link's instance is never taken. A renewal attempt, over the existing
+        // connection or to a fresh sighting, takes the most recently added instance.
+        let excluded = attempt.excludeService
+        let instances = (peripheral.services ?? []).filter { service in service.uuid == serviceId && !(excluded.map { $0 === service } ?? false) }
+        if attempt.renewal {
+            AppLog.event("call_renewal", ["role": "offerer", "phase": "instances", "count": "\(instances.count)"])
+        }
+        guard error == nil, let service = MeshRadio.dataServiceInstance(instances, renewal: attempt.renewal) else {
             failAttempt(peripheral.identifier, "The peer does not offer the \(attempt.transport.label) service"); return
         }
         attempt.stage = "characteristics"
@@ -591,6 +692,7 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
                 failAttempt(peripheral.identifier, "The peer's GATT data service is incomplete"); return
             }
             attempt.write = write
+            attempt.notify = notify
             attempt.stage = "subscribe"
             peripheral.setNotifyValue(true, for: notify)
         }
@@ -602,22 +704,30 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
                                          "notifying": "\(characteristic.isNotifying)", "error": error?.localizedDescription ?? "none"]
                             .merging(attempts[peripheral.identifier]?.timing() ?? [:]) { a, _ in a })
         #endif
-        guard let attempt = attempts[peripheral.identifier], characteristic.uuid == CBUUID(string: MeshUUIDs.gattNotify) else { return }
+        // Only the characteristic this attempt subscribed to (an old link on the same peripheral may unsubscribe now).
+        guard let attempt = attempts[peripheral.identifier], characteristic.uuid == CBUUID(string: MeshUUIDs.gattNotify),
+              MeshRadio.subscriptionCallbackBelongs(attemptNotify: attempt.notify, characteristic: characteristic, stage: attempt.stage) else { return }
         guard error == nil, characteristic.isNotifying, let write = attempt.write else {
             failAttempt(peripheral.identifier, "GATT subscription failed: \(error?.localizedDescription ?? "not notifying")"); return
         }
-        let link = GattClientLink(peripheral: peripheral, write: write, label: "LE GATT")
+        let link = GattClientLink(peripheral: peripheral, write: write, label: attempt.renewal ? "LE GATT (renewal)" : "LE GATT")
+        link.notifyCharacteristic = characteristic
+        attempt.stage = "subscribed"
         let id = peripheral.identifier
-        link.onRelease = { [weak self] in
-            guard let self else { return }
+        link.onRelease = { [weak self, weak link] in
+            guard let self, let link, self.clientLinks[id] === link else { return }
             self.clientLinks[id] = nil
-            if self.centralReady { self.central.cancelPeripheralConnection(peripheral) }
+            if self.centralReady, !link.keepConnectionOnClose { self.central.cancelPeripheralConnection(peripheral) }
         }
         clientLinks[id] = link
         succeed(id, link: link)
+        // Design SR: the armed phone writes its challenge as soon as the subscription is accepted; a value that
+        // arrived before this callback is handed over now.
+        for value in attempt.early { link.received(value) }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        MainStall.enter("MeshRadio.didUpdateValue"); defer { MainStall.exit() }
         if characteristic.uuid == CBUUID(string: MeshUUIDs.gattNotify) {
             #if os(macOS)
             desktopRawNotifications += 1; desktopLastRawNotificationAt = ProcessInfo.processInfo.systemUptime
@@ -628,7 +738,21 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
             if clientLinks[peripheral.identifier] == nil { desktopUnknownNotifier += 1 }
             if characteristic.value == nil { desktopMissingNotificationValue += 1 }
             #endif
-            if let value = characteristic.value { clientLinks[peripheral.identifier]?.received(value) }
+            if let value = characteristic.value {
+                if let link = clientLinks[peripheral.identifier] {
+                    // Notifications of another instance on the same peripheral (an old link kept for a renewal) are not this link's.
+                    if link.notifyCharacteristic.map({ $0 === characteristic }) ?? true { link.received(value) }
+                    else { logNotificationDrop("link_other_instance", peripheral, characteristic, expected: link.notifyCharacteristic, bytes: value.count, failed: error != nil) }
+                }
+                else if let attempt = attempts[peripheral.identifier],
+                        MeshRadio.buffersEarlyNotification(renewal: attempt.renewal, attemptNotify: attempt.notify,
+                                                           characteristic: characteristic, failed: error != nil) {
+                    attempt.early.append(value)
+                }
+                else if let attempt = attempts[peripheral.identifier], attempt.renewal {
+                    logNotificationDrop("early_not_kept", peripheral, characteristic, expected: attempt.notify, bytes: value.count, failed: error != nil)
+                }
+            }
             return
         }
         guard characteristic.uuid == CBUUID(string: MeshUUIDs.psmCharacteristic), attempts[peripheral.identifier] != nil else { return }
@@ -654,7 +778,209 @@ final class MeshRadio: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDe
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        MainStall.enter("MeshRadio.readyToWrite"); defer { MainStall.exit() }
         clientLinks[peripheral.identifier]?.pump()
+    }
+
+    // MARK: EXPERIMENTAL in-call link renewal (Design SR)
+
+    /// Armed: every new GATT subscription is handed here (a renewal connection) instead of the one-central rule.
+    var renewalSubscriber: ((MeshLink) -> Void)?
+    /// Armed: while set, the only advertised service UUID.
+    private(set) var renewalAdvertUUID: CBUUID?
+    /// Armed: from the renewal advert until the attempt ends, the discovery advert stays off.
+    private var renewalAdvertHold = false
+    private var onRenewalAdvertStarted: ((Bool) -> Void)?
+    private var renewalScan: (uuid: CBUUID, onFound: (CBPeripheral) -> Void)?
+
+    /// Puts the renewal advert on air instead of the discovery advert; `started` reports whether it started.
+    func setRenewalAdvert(_ uuid: UUID, started: @escaping (Bool) -> Void) {
+        renewalAdvertUUID = CBUUID(nsuuid: uuid)
+        renewalAdvertHold = true
+        onRenewalAdvertStarted = started
+        guard peripheralReady else { onRenewalAdvertStarted = nil; started(false); return }
+        applyAdvertisement()
+    }
+
+    /// The renewal advert's window ended: nothing is on air until `endRenewalAdvert`.
+    func pauseRenewalAdvert() {
+        guard renewalAdvertUUID != nil else { return }
+        renewalAdvertUUID = nil; onRenewalAdvertStarted = nil
+        if peripheralReady { peripheralManager.stopAdvertising(); advertisingUUID = nil }
+    }
+
+    /// The attempt ended: the discovery advert (if any is wanted) comes back.
+    func endRenewalAdvert() {
+        guard renewalAdvertHold || renewalAdvertUUID != nil else { return }
+        renewalAdvertUUID = nil; renewalAdvertHold = false; onRenewalAdvertStarted = nil
+        guard peripheralReady else { return }
+        if wantedAdvertisement == nil { peripheralManager.stopAdvertising(); advertisingUUID = nil; return }
+        applyAdvertisement()
+    }
+
+    /// Scans for an advert carrying `uuid` (nil stops). For the at most 6 s of a renewal scan the scan is filtered on
+    /// that UUID (it then also reports in the background); the discovery scan, if wanted, comes back afterwards.
+    func setRenewalScan(_ uuid: UUID?, onFound: ((CBPeripheral) -> Void)? = nil) {
+        let wasScanning = renewalScan != nil
+        if let uuid, let onFound { renewalScan = (CBUUID(nsuuid: uuid), onFound) } else { renewalScan = nil }
+        guard centralReady else { return }
+        if let scan = renewalScan {
+            central.stopScan()
+            central.scanForPeripherals(withServices: [scan.uuid], options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+        } else if wasScanning {
+            central.stopScan()
+            if wantScan { central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]) }
+        }
+    }
+
+    /// Connects as central to a renewal advertiser's GATT data service (no rediscover, no retry: the renewal's
+    /// own budget and sightings decide). An Apple armed device keeps its address, so the advertiser can be the very
+    /// peripheral of the link just broken: the connect then waits (until `until`) for that connection's disconnect,
+    /// so a late disconnect callback never fails the new attempt. Logs whether such a connection existed.
+    @discardableResult
+    func connectRenewal(_ peripheral: CBPeripheral, until: TimeInterval, completion: @escaping (Result<MeshLink, Error>) -> Void) -> ConnectHandle {
+        let handle = ConnectHandle()
+        let key = peripheral.identifier
+        handle.onCancel = { [weak self, weak handle] in
+            guard let self, let handle, self.attempts[key]?.handle === handle else { return }
+            self.failAttempt(key, "Cancelled", stage: "stopped")
+        }
+        guard centralReady else {
+            completion(.failure(RadioError.connect(stage: "not_ready", reason: "Bluetooth unavailable"))); return handle
+        }
+        let existing = peripheral.state != .disconnected || clientLinks[key] != nil
+        AppLog.event("call_renewal", ["role": "offerer", "phase": "connect_start", "existing": "\(existing)"])
+        guard existing else { startRenewalConnect(peripheral, handle: handle, completion: completion); return handle }
+        let started = ProcessInfo.processInfo.systemUptime
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self, weak handle] timer in
+            guard let self, let handle, !handle.cancelled else { timer.invalidate(); return }
+            let now = ProcessInfo.processInfo.systemUptime
+            let gone = peripheral.state == .disconnected && self.clientLinks[key] == nil
+            guard gone || now >= until else { return }
+            timer.invalidate()
+            AppLog.event("call_renewal", ["role": "offerer", "phase": "connect_waited", "disconnected": "\(gone)",
+                                          "waitMs": "\(Int(((now - started) * 1000).rounded()))"])
+            self.startRenewalConnect(peripheral, handle: handle, completion: completion)
+        }
+        return handle
+    }
+
+    /// Design SR, armed: a write on an existing (non-renewal) server link that starts a new GATT stream on the same
+    /// connection: a GR1 HELLO after the link's own HELLO exchange was done.
+    static func startsRenewalStream(linkIsRenewal: Bool, peerHelloSeen: Bool, value: Data) -> Bool {
+        guard !linkIsRenewal, peerHelloSeen, value.first == Gr1.type, case .hello? = Gr1.decode(value) else { return false }
+        return true
+    }
+
+    /// The data-service instance an attempt takes: a renewal attempt the newest (the armed phone adds its renewal server
+    /// as another instance; the old link's instance is already filtered out), any other attempt the first.
+    static func dataServiceInstance<Service>(_ instances: [Service], renewal: Bool) -> Service? {
+        renewal ? instances.last : instances.first
+    }
+
+    /// A subscription callback belongs to the attempt only for the notify characteristic it subscribed to, while it is
+    /// in its subscribe stage: an old link's unsubscribe on the same peripheral, or a callback before the attempt chose
+    /// its characteristic, is not the attempt's.
+    static func subscriptionCallbackBelongs(attemptNotify: AnyObject?, characteristic: AnyObject, stage: String) -> Bool {
+        guard let attemptNotify else { return false }
+        return attemptNotify === characteristic && stage == "subscribe"
+    }
+
+    /// A renewal attempt keeps a notification that arrives before its subscription callback only from the
+    /// characteristic it selected (never the old link's instance on the same peripheral) and only without an error.
+    static func buffersEarlyNotification(renewal: Bool, attemptNotify: AnyObject?, characteristic: AnyObject, failed: Bool) -> Bool {
+        guard renewal, !failed, let attemptNotify else { return false }
+        return attemptNotify === characteristic
+    }
+
+    /// Diagnosis (DEBUG only): a notify-characteristic notification that reached no link or renewal attempt: whether
+    /// it came from the expected characteristic object, and which data-service instance (index among the peripheral's
+    /// services) it and the expected one belong to. The first 40 per run, then every 200th.
+    private static var notificationDrops = 0
+    private func logNotificationDrop(_ kind: String, _ peripheral: CBPeripheral, _ characteristic: CBCharacteristic,
+                                     expected: CBCharacteristic?, bytes: Int, failed: Bool) {
+        #if DEBUG
+        MeshRadio.notificationDrops += 1
+        let n = MeshRadio.notificationDrops
+        guard n <= 40 || n % 200 == 0 else { return }
+        let services = peripheral.services ?? []
+        func index(_ c: CBCharacteristic?) -> String {
+            guard let service = c?.service else { return "none" }
+            return services.firstIndex(where: { $0 === service }).map { "\($0)" } ?? "unlisted"
+        }
+        AppLog.event("renewal_notify_drop", ["kind": kind, "n": "\(n)", "sameObject": "\(expected.map { $0 === characteristic } ?? false)",
+                                              "expectedSet": "\(expected != nil)", "serviceIndex": index(characteristic),
+                                              "expectedServiceIndex": index(expected), "services": "\(services.count)",
+                                              "bytes": "\(bytes)", "failed": "\(failed)"])
+        #endif
+    }
+
+    /// A renewal connect's service discovery is cut after this long (it then tries again within its budget).
+    static let renewalServicesStall: TimeInterval = 3
+
+    /// Design SR, offerer: the renewal stream over the LE connection that already exists to the armed device (the old
+    /// link's), to the armed phone's own instance of the data service. Apple cannot open a second connection to a
+    /// device it is connected to from another address of the same device (it keeps one address), so the existing
+    /// connection carries the new link, as an Android offerer already does toward an Apple device. Nil: no usable
+    /// existing connection (the sighting is connected instead).
+    func connectRenewalOverExisting(_ oldLink: MeshLink, completion: @escaping (Result<MeshLink, Error>) -> Void) -> ConnectHandle? {
+        guard centralReady else { return nil }
+        let peripheral: CBPeripheral
+        var exclude: CBService?
+        if let client = oldLink as? GattClientLink {
+            guard client.peripheral.state == .connected else { return nil }
+            peripheral = client.peripheral; exclude = client.service
+        } else if let server = oldLink as? GattServerLink,
+                  let found = central.retrievePeripherals(withIdentifiers: [server.central.identifier]).first {
+            peripheral = found
+        } else { return nil }
+        let handle = ConnectHandle()
+        let key = peripheral.identifier
+        handle.onCancel = { [weak self, weak handle] in
+            guard let self, let handle, self.attempts[key]?.handle === handle else { return }
+            self.failAttempt(key, "Cancelled", stage: "stopped")
+        }
+        attempts[key]?.fail("Replaced", stage: "stopped")
+        let attempt = OutgoingAttempt(peripheral: peripheral, transport: .gatt, handle: handle, retried: true, completion: completion)
+        attempt.renewal = true
+        attempt.excludeService = exclude ?? Self.sentinelService
+        attempts[key] = attempt
+        knownPeripherals[key] = peripheral
+        peripheral.delegate = self
+        AppLog.event("call_renewal", ["role": "offerer", "phase": "connect_start", "via": "existing_connection",
+                                      "oldLink": oldLink is GattClientLink ? "client" : "server", "state": "\(peripheral.state.rawValue)"])
+        attempt.timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+            self?.failAttempt(key, "Connection timed out", stage: "timeout")
+        }
+        if peripheral.state == .connected { centralManager(central, didConnect: peripheral) } else { central.connect(peripheral, options: nil) }
+        return handle
+    }
+
+    /// Design SR: an old link kept for a renewal over the existing connection is let go (a later attempt connects the
+    /// sighting instead, which must not find the old connection still up).
+    func releaseRenewalExisting(_ oldLink: MeshLink) {
+        guard let client = oldLink as? GattClientLink, client.keepConnectionOnClose, centralReady else { return }
+        client.keepConnectionOnClose = false
+        if clientLinks[client.peripheral.identifier] == nil { central.cancelPeripheralConnection(client.peripheral) }
+    }
+
+    /// Marks an existing-connection attempt whose old link was a server link (nothing to exclude).
+    private static let sentinelService = CBMutableService(type: CBUUID(string: "00000000-0000-1000-8000-00805F9B34FB"), primary: false)
+
+    private func startRenewalConnect(_ peripheral: CBPeripheral, handle: ConnectHandle, completion: @escaping (Result<MeshLink, Error>) -> Void) {
+        let key = peripheral.identifier
+        guard centralReady else {
+            completion(.failure(RadioError.connect(stage: "not_ready", reason: "Bluetooth unavailable"))); return
+        }
+        attempts[key]?.fail("Replaced", stage: "stopped")
+        let attempt = OutgoingAttempt(peripheral: peripheral, transport: .gatt, handle: handle, retried: true, completion: completion)
+        attempt.renewal = true
+        attempts[key] = attempt
+        peripheral.delegate = self
+        attempt.timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+            self?.failAttempt(key, "Connection timed out", stage: "timeout")
+        }
+        central.connect(peripheral, options: nil)
     }
 }
 
@@ -679,6 +1005,13 @@ final class OutgoingAttempt {
     var stallTimer: Timer?
     /// A second attempt after a rediscover (no stall cut: it keeps the full timeout).
     let retried: Bool
+    /// Design SR: a renewal connect; notifications before the subscription callback are kept in `early`.
+    var renewal = false
+    var early: [Data] = []
+    /// Design SR over the existing connection: the old link's service instance, never taken (set for that path only).
+    var excludeService: CBService?
+    /// The notify characteristic this attempt subscribed to.
+    var notify: CBCharacteristic?
     /// Where the attempt is: connect, services, characteristics, psm_read, l2cap_open, subscribe.
     var stage = "connect" { didSet { handle?.onStage?(stage) } }
     private let startedAt = ProcessInfo.processInfo.systemUptime

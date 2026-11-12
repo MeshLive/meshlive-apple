@@ -36,15 +36,26 @@ final class Bmh3CallTests: XCTestCase {
     /// A rotating call between two iPhones: `callerBmh3`/`calleeBmh3` nil = BMH2 only.
     private func rotatingCall(callerId: SigningIdentity = SoftwareSigningIdentity(), calleeId: SigningIdentity = SoftwareSigningIdentity(),
                               advertisedBy: SigningIdentity? = nil, callerPseudonyms: Bool?, calleePseudonyms: Bool?,
-                              labels: Bool = false) -> (CallEngine, CallEngine, Box) {
+                              labels: Bool = false, nameBeforeAnswer: Bool? = nil, calleeAudience: NamesAudience = .everyone,
+                              calleeAudienceNow: (() -> NamesAudience)? = nil,
+                              calleeVerifies: ((IdentityFingerprint) -> Bool)? = nil,
+                              callerAudience: (() -> NamesAudience)? = nil) -> (CallEngine, CallEngine, Box) {
         let e = entry(for: advertisedBy ?? calleeId)
         let selected = callOffer(e.rdi, rotating: true)
+        // nameBeforeAnswer nil builds the caller's options exactly as the app's default does; true or false picks the arm.
+        var callerLabels: CallLabelOptions?
+        if labels {
+            callerLabels = CallLabelOptions(localName: "Asha", currentAudience: callerAudience)
+            if let nameBeforeAnswer { callerLabels?.nameBeforeAnswer = nameBeforeAnswer }
+        }
         let caller = CallEngine(role: .caller, transport: .l2cap, identity: callerId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                expectedPeerPrefix: e.rdi, labels: labels ? CallLabelOptions(localName: "Asha", subject: "Hello") : nil,
+                                expectedPeerPrefix: e.rdi, labels: callerLabels,
                                 rotating: RotatingCallOptions(selected: selected, wallEpoch: { 1_990_656 }),
                                 bmh3: callerPseudonyms.map { Bmh3CallOptions(pseudonyms: $0, selected: selected, wallEpoch: { 1_990_656 }) })
         let callee = CallEngine(role: .callee, transport: .l2cap, identity: calleeId, requestedType: .voice, encodeMask: vp9, decodeMask: vp9,
-                                labels: labels ? CallLabelOptions(localName: "Ravi", subject: nil) : nil,
+                                labels: labels ? CallLabelOptions(localName: "Ravi", audience: calleeAudience,
+                                                                  isVerifiedPeer: calleeVerifies ?? { _ in false },
+                                                                  currentAudience: calleeAudienceNow) : nil,
                                 rotating: RotatingCallOptions(entries: { [e] }),
                                 bmh3: calleePseudonyms.map { Bmh3CallOptions(pseudonyms: $0, budget: budget) })
         let box = Box()
@@ -93,6 +104,68 @@ final class Bmh3CallTests: XCTestCase {
         XCTAssertEqual(authenticated(box.callee), [callerId.nodeId])
         XCTAssertEqual(callee.labelInbox.text(.personName), "Asha")
         XCTAssertFalse(caller.peerIsStranger || callee.peerIsStranger)
+    }
+
+    /// The Experimental arm ("Show my name before they answer", off by default since the decision of 2026-11-06):
+    /// a stranger caller's name, signed by its pseudonym, reaches the ringing callee; no real identity is known while it
+    /// rings. A call subject is never sent.
+    func testAStrangerCallersNameRingsBeforeTheAnswerAndNoSubjectIsSent() throws {
+        let (caller, callee, box) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true, labels: true, nameBeforeAnswer: true)
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "") / \(callee.closeReason ?? "")")
+        XCTAssertTrue(callee.peerIsStranger)
+        XCTAssertEqual(callee.labelInbox.text(.personName), "Asha", "the name arrives while it rings")
+        XCTAssertNil(callee.labelInbox.text(.callSubject), "no subject is ever sent")
+        XCTAssertEqual(authenticated(box.callee), [], "the name did not reveal who called")
+        Thread.sleep(forTimeInterval: 2.1)   // the receiver ignores a second LABELS container within 2 s (rate rule)
+        try callee.accept(as: .voice); pump(caller, callee)
+        XCTAssertEqual(caller.state?.phase, .active, "\(caller.closeReason ?? "")")
+        XCTAssertNil(callee.labelInbox.text(.callSubject), "no subject follows the reveal either")
+    }
+
+    /// "Only my contacts" on a callee that answered as a pseudonym: its name goes after the caller's verified reveal, and
+    /// only when that reveal is a verified contact.
+    func testOnlyMyContactsCalleeNameFollowsAVerifiedRevealOnly() throws {
+        for verified in [true, false] {
+            let callerId = SoftwareSigningIdentity()
+            let callerFingerprint = callerId.fingerprint
+            let (caller, callee, _) = rotatingCall(callerId: callerId, callerPseudonyms: true, calleePseudonyms: true, labels: true,
+                                                   calleeAudience: .verified, calleeVerifies: { verified && $0 == callerFingerprint })
+            try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+            XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "")")
+            XCTAssertNil(caller.labelInbox.text(.personName), "nothing while it rings")
+            try callee.accept(as: .voice); pump(caller, callee)
+            XCTAssertEqual(caller.state?.phase, .active, "\(caller.closeReason ?? "")")
+            XCTAssertEqual(caller.labelInbox.text(.personName), verified ? "Ravi" : nil, "verified contact: \(verified)")
+        }
+    }
+
+    /// P5-A4: the audience is re-read when a held label is released. Choosing Nobody while it rings drops the held name.
+    func testNobodyChosenWhileItRingsSendsNoHeldNameAfterTheReveal() throws {
+        var audience = NamesAudience.everyone
+        let (caller, callee, _) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true, labels: true,
+                                               nameBeforeAnswer: false, callerAudience: { audience })
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "")")
+        XCTAssertNil(callee.labelInbox.text(.personName), "the control arm holds the name until the reveal")
+        audience = .nobody
+        try callee.accept(as: .voice); pump(caller, callee)
+        XCTAssertEqual(caller.state?.phase, .active, "\(caller.closeReason ?? "")")
+        XCTAssertNil(callee.labelInbox.text(.personName), "Nobody was chosen while it rang")
+    }
+
+    /// P2-2: the callee's audience is re-read when the pending Accept label goes. Choosing Nobody while it rings drops it.
+    func testCalleeChoosingNobodyWhileItRingsSendsNoNameWithAccept() throws {
+        var audience = NamesAudience.everyone
+        let (caller, callee, _) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true, labels: true,
+                                               calleeAudience: .everyone, calleeAudienceNow: { audience })
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "")")
+        XCTAssertNil(caller.labelInbox.text(.personName), "nothing before Accept")
+        audience = .nobody
+        try callee.accept(as: .voice); pump(caller, callee)
+        XCTAssertEqual(caller.state?.phase, .active, "\(caller.closeReason ?? "")")
+        XCTAssertNil(caller.labelInbox.text(.personName), "Nobody was chosen while it rang")
     }
 
     /// The callee requires the caller's reveal: the caller's media before it ends the call, and without it the callee
@@ -254,6 +327,176 @@ final class Bmh3CallTests: XCTestCase {
         try callee.decline(); pump(caller, callee)
         XCTAssertEqual(caller.phase, .closed)
         XCTAssertEqual(authenticated(box.caller) + authenticated(box.callee), [])
+    }
+
+    /// Call blocking (Android): a blocked real-key caller hears an ordinary Ringing and, after the delay, an ordinary
+    /// Decline; this phone never rings, shows nothing and sends no name.
+    func testABlockedCallerIsDeclinedAfterADelayWithoutRinging() throws {
+        let callerId = SoftwareSigningIdentity()
+        let (caller, callee, box) = rotatingCall(callerId: callerId, callerPseudonyms: false, calleePseudonyms: false, labels: true)
+        callee.callGate = { c in c.fingerprint == callerId.fingerprint ? .declineBlockedPerson : .ring }
+        callee.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(caller.state?.phase, .outgoingRinging, "the caller sees an ordinary ring: \(caller.closeReason ?? "")")
+        XCTAssertEqual(callee.silentDecline, .declineBlockedPerson)
+        XCTAssertFalse(box.callee.contains { if case .incomingCall = $0 { return true }; return false }, "never rings here")
+        XCTAssertFalse(box.callee.contains(.phase(.incomingRinging)))
+        XCTAssertNil(caller.labelInbox.text(.personName), "no callee name")
+        step(caller, callee, 3.5)
+        XCTAssertEqual(caller.state?.phase, .outgoingRinging)
+        step(caller, callee, 4.5)
+        XCTAssertEqual(caller.state?.phase, .ended, "an ordinary decline after the delay")
+        XCTAssertEqual(callee.phase, .closed)
+    }
+
+    /// "Block unknown callers": a stranger (throwaway key) is declined the same way before it rings; nobody learns who
+    /// anybody is.
+    func testBlockUnknownCallersDeclinesAStrangerBeforeItRings() throws {
+        let (caller, callee, box) = rotatingCall(callerPseudonyms: true, calleePseudonyms: true, labels: true, nameBeforeAnswer: true)
+        callee.callGate = { c in CallBlockingPolicy.decide(blockUnknown: true, pseudonymous: c.pseudonymous, blocked: false, standing: .notVerified) }
+        callee.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.silentDecline, .declineUnknown)
+        XCTAssertEqual(caller.state?.phase, .outgoingRinging, "\(caller.closeReason ?? "")")
+        XCTAssertFalse(box.callee.contains(.phase(.incomingRinging)))
+        XCTAssertNil(callee.labelInbox.text(.personName), "a refused stranger's held name never arrives")
+        XCTAssertFalse(box.callee.contains { if case .peerLabels = $0 { return true }; return false }, "and no label event")
+        step(caller, callee, 4.5)
+        XCTAssertEqual(caller.state?.phase, .ended)
+        XCTAssertEqual(authenticated(box.caller) + authenticated(box.callee), [], "nobody learned a real identity")
+    }
+
+    /// A block follows the real identity: an answered stranger whose reveal shows a blocked person is never shown as them,
+    /// the callee's camera and microphone never start, a held name never goes, and the call ends after the delay.
+    func testAnAnsweredStrangerRevealedAsBlockedEndsBeforeTheCalleesMediaStarts() throws {
+        let callerId = SoftwareSigningIdentity()
+        let (caller, callee, box) = rotatingCall(callerId: callerId, callerPseudonyms: true, calleePseudonyms: true, labels: true,
+                                                 calleeAudience: .verified, calleeVerifies: { _ in true })
+        callee.personBlocked = { $0 == callerId.fingerprint }
+        callee.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "") / \(callee.closeReason ?? "")")
+        try callee.accept(as: .voice); step(caller, callee, 0.5)
+        XCTAssertTrue(callee.blockedAfterReveal)
+        XCTAssertTrue(box.callee.contains(.blockedAfterReveal))
+        XCTAssertEqual(authenticated(box.callee), [], "the blocked person is never shown by their identity")
+        XCTAssertFalse(startedLocalMedia(box.callee), "no camera or microphone")
+        XCTAssertNil(caller.labelInbox.text(.personName), "an Only-my-contacts name never goes to a blocked person")
+        step(caller, callee, 3.5)
+        XCTAssertNotEqual(caller.state?.phase, .ended)
+        step(caller, callee, 4.6)
+        XCTAssertEqual(caller.state?.phase, .ended, "an ordinary hang-up after the delay")
+        XCTAssertFalse(startedLocalMedia(box.callee))
+    }
+
+    /// A caller whose callee's reveal shows a blocked person reveals nothing of its own (no reveal, no held name, no
+    /// media) and ends the call after the delay, before the callee's own reveal deadline.
+    func testACallerNeverRevealsItselfToACalleeRevealedAsBlocked() throws {
+        let calleeId = SoftwareSigningIdentity()
+        let (caller, callee, box) = rotatingCall(calleeId: calleeId, callerPseudonyms: true, calleePseudonyms: true, labels: true)
+        caller.personBlocked = { $0 == calleeId.fingerprint }
+        caller.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "")")
+        try callee.accept(as: .voice); step(caller, callee, 0.5)
+        XCTAssertTrue(caller.blockedAfterReveal)
+        XCTAssertEqual(authenticated(box.callee), [], "the caller never revealed itself")
+        XCTAssertEqual(authenticated(box.caller), [], "the blocked callee is never shown by its identity")
+        XCTAssertNil(callee.labelInbox.text(.personName), "the held name never went")
+        XCTAssertFalse(startedLocalMedia(box.caller))
+        step(caller, callee, 4.6)
+        XCTAssertEqual(callee.phase, .closed, "\(callee.closeReason ?? "")")
+        XCTAssertNotEqual(callee.closeReason, CallerRevealGate.message, "ended by the caller's ordinary hang-up")
+    }
+
+    /// AB3 (project rule "risk on the attacker"; Windows WP6N real-key screen; stricter than Android, which only withholds
+    /// the name): a callee whose handshake showed the real key of someone this phone blocked gets no name, no media and
+    /// no presence, is never shown by that identity, and the call ends with the ordinary cancel after the human-like
+    /// delay (its phone rang as for any call). Anyone else gets the caller's name while it rings.
+    func testARealKeyCalleeOnTheBlockListGetsTheOrdinaryEndAndNothingElse() throws {
+        let calleeId = SoftwareSigningIdentity()
+        let (caller, callee, box) = rotatingCall(calleeId: calleeId, callerPseudonyms: false, calleePseudonyms: false, labels: true)
+        caller.personBlocked = { $0 == calleeId.fingerprint }
+        caller.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "") / \(callee.closeReason ?? "")")
+        XCTAssertTrue(caller.blockedAfterReveal, "the caller ends this call")
+        XCTAssertTrue(caller.blockedRealKey, "found at the handshake, not at a reveal")
+        XCTAssertTrue(box.caller.contains(.blockedAfterReveal))
+        XCTAssertEqual(authenticated(box.caller), [], "the blocked callee is never shown by its identity")
+        XCTAssertNil(callee.labelInbox.text(.personName), "a blocked real-key callee gets no name")
+        XCTAssertEqual(caller.callerNameWithheld, .blocked)
+        step(caller, callee, 3.5)
+        XCTAssertEqual(caller.state?.phase, .outgoingRinging, "not before the delay")
+        step(caller, callee, 4.5)
+        XCTAssertEqual(caller.state?.phase, .ended, "the ordinary cancel after the delay")
+        XCTAssertEqual(callee.phase, .closed, "\(callee.closeReason ?? "")")
+        XCTAssertEqual(callee.closeReason, "Caller cancelled", "the callee sees an ordinary cancel")
+        XCTAssertFalse(startedLocalMedia(box.caller), "no camera or microphone toward them")
+
+        let (caller2, callee2, _) = rotatingCall(callerPseudonyms: false, calleePseudonyms: false, labels: true)
+        caller2.personBlocked = { $0 == calleeId.fingerprint }
+        try caller2.start(now: 0); try callee2.start(now: 0); pump(caller2, callee2)
+        XCTAssertEqual(callee2.state?.phase, .incomingRinging, "\(caller2.closeReason ?? "") / \(callee2.closeReason ?? "")")
+        XCTAssertEqual(callee2.labelInbox.text(.personName), "Asha", "someone who is not blocked gets it while it rings")
+        XCTAssertNil(caller2.callerNameWithheld)
+    }
+
+    /// AB3: a blocked real-key callee that answers anyway gets no camera or microphone, its own media is dropped, and the
+    /// call ends with the ordinary hang-up after the delay.
+    func testABlockedRealKeyCalleeThatAnswersGetsNoMediaAndTheOrdinaryHangUp() throws {
+        let calleeId = SoftwareSigningIdentity()
+        let (caller, callee, box) = rotatingCall(calleeId: calleeId, callerPseudonyms: false, calleePseudonyms: false)
+        caller.personBlocked = { $0 == calleeId.fingerprint }
+        caller.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "") / \(callee.closeReason ?? "")")
+        try callee.accept(as: .voice); step(caller, callee, 1)
+        XCTAssertFalse(startedLocalMedia(box.caller), "no camera or microphone toward them")
+        XCTAssertFalse(box.caller.contains { if case .remoteHeader = $0 { return true }; return false }, "their media is dropped")
+        XCTAssertNotEqual(caller.state?.phase, .active)
+        XCTAssertEqual(caller.phase, .open, "\(caller.closeReason ?? "")")
+        step(caller, callee, 4.6)
+        XCTAssertEqual(caller.state?.phase, .ended)
+        XCTAssertEqual(callee.closeReason, "Peer ended the call", "an ordinary hang-up, not an error")
+    }
+
+    /// AB3: only the authenticated full fingerprint on the block list ends a real-key call; anyone else is shown and the
+    /// call goes on.
+    func testOnlyTheBlockedFingerprintEndsARealKeyCall() throws {
+        let calleeId = SoftwareSigningIdentity(), someoneElse = SoftwareSigningIdentity()
+        let (caller, callee, box) = rotatingCall(calleeId: calleeId, callerPseudonyms: false, calleePseudonyms: false)
+        caller.personBlocked = { $0 == someoneElse.fingerprint }
+        caller.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        try callee.accept(as: .voice); step(caller, callee, 1)
+        XCTAssertFalse(caller.blockedAfterReveal)
+        XCTAssertFalse(caller.blockedRealKey)
+        XCTAssertEqual(authenticated(box.caller), [calleeId.nodeId])
+        step(caller, callee, 4.6)
+        XCTAssertEqual(caller.state?.phase, .active, "\(caller.closeReason ?? "")")
+    }
+
+    /// Decision 2026-11-06: a stranger the caller blocks while its phone rings is checked against the newest list
+    /// at its reveal. The caller's held name never goes, the caller never reveals itself, and the call ends after the delay.
+    func testAStrangerBlockedWhileItRangNeverGetsTheCallersNameAndTheCallEnds() throws {
+        let calleeId = SoftwareSigningIdentity()
+        var blockedNow = false
+        let (caller, callee, box) = rotatingCall(calleeId: calleeId, callerPseudonyms: true, calleePseudonyms: true, labels: true)
+        caller.personBlocked = { blockedNow && $0 == calleeId.fingerprint }
+        caller.blockedEndDelay = { 4 }
+        try caller.start(now: 0); try callee.start(now: 0); pump(caller, callee)
+        XCTAssertEqual(callee.state?.phase, .incomingRinging, "\(caller.closeReason ?? "") / \(callee.closeReason ?? "")")
+        XCTAssertNil(callee.labelInbox.text(.personName), "nothing while it rings")
+        blockedNow = true
+        try callee.accept(as: .voice); step(caller, callee, 0.5)
+        XCTAssertTrue(caller.blockedAfterReveal)
+        XCTAssertNil(callee.labelInbox.text(.personName), "the held name never went")
+        XCTAssertEqual(caller.callerNameWithheld, .blocked)
+        XCTAssertEqual(authenticated(box.callee), [], "the caller never revealed itself")
+        XCTAssertFalse(startedLocalMedia(box.caller), "no camera or microphone toward them")
+        step(caller, callee, 4.6)
+        XCTAssertEqual(callee.phase, .closed, "\(callee.closeReason ?? "")")
     }
 
     func testAnImpostorsRevealDoesNotOpenTheSelectedIdAndTheCallerNeverReveals() throws {

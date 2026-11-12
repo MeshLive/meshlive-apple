@@ -1,6 +1,6 @@
 # Testing: verification and remaining checks
 
-Environment: macOS 26.6.2 (arm64), Xcode 27.0, iOS 27 SDK, deployment target iOS 16. Android vectors were generated with Android Studio's kotlinc and Temurin 21 from the meshlive-android tree of 2026-10-10.
+Environment: macOS 26.6.2 (arm64), Xcode 27.0, iOS 27 SDK, deployment target iOS 17. Android vectors were generated with Android Studio's kotlinc and Temurin 21 from the meshlive-android tree of 2026-10-10.
 
 ## Evidence (offline)
 
@@ -11,19 +11,35 @@ Environment: macOS 26.6.2 (arm64), Xcode 27.0, iOS 27 SDK, deployment target iOS
 | Compact announcement (addendum A + review) | `--filter CompactAnnouncementTests` | Pass: the 4 shared vectors and the review's extra reject/quantization cases |
 | Engines | `--filter EngineTests` | Pass. Loopback over CoC byte streams and GATT chunks covers: voice/video setup, push-to-talk mute signals, fragments, rotation, keyframe requests, camera signals, decline/cancel/ring and silence timeouts, codec mismatch, wrong prefix, transport mismatch, verified-contact mismatch, stream direct/mesh, pause/end/acks, route withdrawal and video shedding |
 | Handle (display only, naming design draft) | `--filter IdentityHandleTests` | Pass: the 4 draft vectors, read-aloud parsing |
-| Peer labels (naming phase 1) | `--filter "LabelTextTests\|SignedLabelTests\|TitlePageTests\|AndroidLabelVectorTests\|LabelEngineTests"` | Pass. Ports of Android LabelTextTest, SignedLabelTest, TitlePageTest and handle parsing; the R11 vector; Android-signed labels verify in Swift and Swift-signed labels verify with Android's classes (`java -jar labels.jar verify`); Swift equals Android LabelText on 49 strings; engines with labels on/off/mixed |
+| Peer labels (naming phase 1) | `--filter "LabelTextTests\|SignedLabelTests\|TitlePageTests\|AndroidLabelVectorTests\|LabelEngineTests\|NamingV2Tests\|Bmh3CallTests"` | Pass. Ports of Android LabelTextTest, SignedLabelTest, TitlePageTest and handle parsing; the R11 vector; Android-signed labels verify in Swift and Swift-signed labels verify with Android's classes (`java -jar labels.jar verify`); Swift equals Android LabelText on 49 strings; engines with labels on/off/mixed; Naming v2: CallLabelPolicy cases, reserved name forms, and calls by audience and role (a stranger gets the caller's name only after its verified, unblocked reveal and a blocked real-key callee never does, `CallerNameReleaseTests`; the Experimental name before answer; Only my contacts, Nobody). A call subject is never sent or shown; a received kind 3 is dropped |
+| Call blocking | `--filter "CallBlockingTests\|Bmh3CallTests"` | Android's gate policy, the block list (bounded, reports, malformed lists unreadable), Live-list hiding of the attributed direct route only (a copied token hides no other route), what the screens say about a damaged or locked list, and the engine: a blocked caller declined after a delay without ringing, Block unknown callers for a stranger, a stranger revealed as blocked ending before the callee's media on either side |
+| Audio-only live screen | `--filter AudioLiveScreenTests` | Android's reminder policy (30 minutes without a listener, 2 hours on the air, stop 5 minutes after an unanswered reminder, an answer counts again from now, the DEBUG unit) and the level meter (silence, clamped loud sound, quiet speech, broken samples) |
+| Diagnostics export | `--filter "DiagnosticsReportTests\|CallAlertTests"` | Only Android's kinds of fact; a device name or ID in the model field becomes unknown; only a short commit hash; the crash text kept and the report bounded; call rows and crash text filtered as Android's crash filter; names reach a locked screen only when allowed |
+| Video quality | `--filter VideoQualityTests` | Only Android's resolution, FPS and bitrate choices are requests; the slider never cuts a stored bitrate; heat lowers FPS and bitrate only when on and hot; a frozen picture only after the threshold and never while quiet; search shows in a crowd and matches part of a name; call info explains every lower value; critical heat blocks video only at critical and either way; a call placed or answered at critical heat goes on as voice; a cooler state restores the limit after 30 s; the call budget applies only with Manual video and never raises the request; call info blames the budget, not the other device; remote call fit fills close shapes, shows strong mismatches whole and the double-tap wins |
+| Live and viewer | `--filter "LiveViewerTests\|ViewerAdmissionTests"` | Recovery retries at once then backs off 1, 2, 4, 8 s per route, tries other routes meanwhile and never another stream; only an active stream lost without its end recovers; a relayed parent is closed after 5 s of silence or a trickle under 1/8, never before the header, after a pause or with the test off; relaying pauses below 20 % unplugged or in Low Power Mode; only decodable streams play; End live asks only with viewers; a hidden livestream stays hidden and blocks nobody; a flood of fresh keys cannot keep a real viewer out and never gets more than 4 attempts in 10 s |
+| Contact sheet | `--filter ContactSheetTests` | Android's recognition hint order; rename refuses blank, invalid, taken and unknown; the first claim needs no answer and a later one waits; a claim is kept only for a contact and only as a valid name; verifying again keeps the claim and the mutual scan; Save contact as never offers an ID; named contacts first; old records still open |
 | Discovery rows | `--filter DiscoveryTableTests` | Pass: an address change replaces the row, 8 s expiry, stable row IDs, role switch on one address |
 | Capture pipeline and Android audio | `--filter "AudioCapturePipelineTests\|AndroidAudioPathTests"` | Pass: 48/44.1/16/24 kHz microphones resample to 960-sample frames with 20 ms timestamps (1 kHz tone kept); Android's BTA1/BTA2 vector bytes play in order, also when reordered before playback |
 | Resolution ladder | `--filter CallResolutionLadderTests` | Port of Android CallResolutionLadderTest (WebRTC limits, rungs, holds, hysteresis, no oscillation) plus the iPhone portrait rungs |
 | Rotating discovery IDs | `--filter RotatingDiscovery` | The shared vectors (salts, RDIs, lease keys, the owner's own ID, compact v2, Android version 5, BDO1), opening and selection rules, pins, the epoch clock (backward, stuck, reboot, forward-pin recovery), tarpit, the Visible-by-handle window, and BDO1 over real call engines (open and ring, impostor and old callee refused, one-sided bit) |
+| Rotating stream source (AB4) | `--filter RotatingSourceTests` | Android's version 5 viewer requests decode, with and without the recovery hint (off: refused as before); the route-token window (current and two replaced tokens for 60 s, a new stream drops them, a constant token is the old rule); the role-1 offer is the protocol vector and Android's compact v2, bitrate rounded as Android, built only from a role-1 entry for an LE stream offer, no ID or route token repeats across epochs; rotation with a 1-8 s silence, role-1 pins for 60 s, a window end restarts after a silence; the source selects by token window, transport and its switch, never reads a hint as a prefix, and a rotating link replaces the older link of the same node only; over a real hop a rotating request is opened by the viewer's role-2 entry, while a copy, a replayed entry, a wrong role, a stale entry or a viewer without bit 3 fails before media, and a version 2 request keeps the prefix check; the DEBUG short epoch (gates, real days, no counter carried across lengths) |
 | Relaying (experimental) | `--filter "RelayAdmissionTests\|RelayChildHealthPolicyTests\|StreamForwardingCoreTests\|StreamForwardingLoopbackTests\|ForwarderRouteTokenTests\|CallRelayTests"` | Ports of Android RelayColdStartTest, RelayChildHealthPolicyTest, the BFG1 vector and PrivateCallRelayChainTest rules. Loopbacks: source -> iPhone relay -> child (original source authenticated, join keyframe, hop-by-hop keyframe request and end ack, withdrawal) and caller -> 1 or 2 iPhone relays -> callee (end-to-end identity, audio both ways, heartbeats replaced, hang-up, wrong child, parent wait) |
 | Video rate control | `--filter VideoRateControllerTests` | Pass: replays the measured GATT case (bounded backlog), recovers to the requested maximum |
 | Audio playout | `--filter AudioPlayoutTests` | Pass: target buffering, PLC on gaps, late packets, Android BTA2 batches with timestamp jitter, sender restart, bounded overflow |
+| Copied-ID warning | `--filter CopiedIdTrackerTests` | Two phones sending one ID at once flagged on the second occasion; a handover, a relay's mirror one hop further and a PC's twin sets are not copies; the control arms restore the old rule and the PC warning; an ID that left the air is forgotten |
+| Calls and Recent rules | `--filter CallsAndRecentRulesTests` | Every ending gets Android's outcome; older records read as Android's legacy entries; the arrow only with complete Recent; only an unsaved, unblocked person is offered as a contact; the camera pauses at the ear only when all four hold; ringback only while the other phone rings |
 | Video codecs | `--filter NearbyMediaTests` | Pass. libvpx 1.15.2 encode/decode round trip with a forced keyframe at 300 kbps; libvpx decodes an ffmpeg libvpx-vp9 clip; VideoToolbox (macOS) decodes that clip with our generated `vpcC`; the AV1 sequence header and `av1C` parse from a libaom clip. AV1 VideoToolbox decode is skipped: no AV1 hardware on this Mac |
+| Hardware codecs (AB5, core) | `--filter "VideoCodecMapTests\|AnnexBTests\|AccessUnitGateTests\|CallCodecChoiceTests\|HardwareCodecEngineTests"` | The Design HC numbers and the one codec-to-summary table (old readers, bit 3, compact without bit 56); Annex B scanning, escapes and length-prefixed conversion with Android's M31 HEVC vectors; the access-unit gate (one negative per rule, close outcomes, a rejected IDR keeps the active sets) and the sender packetiser; Android's call negotiation table on Android's and Apple's encoder sets (bits 7 and 4, prefer arms, power-aware start); calls and streams through the engines |
+| Hardware codecs on the Mac (AB5B) | `--filter HardwareCodecRoundTripTests` | VideoToolbox H.264 encode, access-unit gate and decode round trip at 240x426 with a forced IDR; HEVC is either offered with a probe setup that passes the gate (and round-trips) or not offered at all, with every setup's verdict printed (`hc_probe_attempt`); Android's HEVC sets and a Constrained Baseline H.264 SPS/PPS open a decoder; the masks follow the masters and the probe; output rate at 200/400/800 kbps within 1.5x; a rate change is applied or reported |
 | Builds | `bash Scripts/build.sh iphoneos` / `iphonesimulator` | Pass with Opus and libvpx, no compiler warnings. The experimental v1 app also builds (`project.py --v1-experiment`) |
 | Simulator | `bash Scripts/screenshots.sh` (DEBUG `-NearbyScreen`) | Home, people, watch, call, settings and verify in dark and light mode, checked by screenshot. The simulator reports no Bluetooth LE |
 | Design tokens | `python3 Scripts/tokens.py --check` | Up to date with `Design/design-tokens.json` |
 | v1 experiment | `bash Scripts/fixtures.sh`, `bash Scripts/interop.sh`, `bash Scripts/diagnose-video.sh` | Pass: unchanged fixture, 4 Swift↔Java v1 sessions, H.264 pattern check |
+| Release logging rule | `--filter ReleaseLogPolicyTests` | A Release build writes no log file, mirrors nothing and starts no watchdog; the first Release launch deletes the whole `Documents/logs` folder and a sibling folder stays untouched; DEBUG keeps the newest 20 `.log` names and deletes no other file; pruning only ever names `.log` files |
+| First-run flow | `--filter OnboardingFlowTests` | A fresh install sees Welcome, What you can do, the terms, permissions and the ready page, with the terms before any prompt; an existing user sees only the terms once; Skip never leaves onboarding or passes the terms; prompts run one at a time in order and skip decided ones; a denial moves the sequence on; the camera row is only in the control arm |
+| About and licences | `--filter StoreDistributionTests` | Only the exact `appstore` value is an App Store build (nil, empty, `$(MESHLIVE_DISTRIBUTION)` and `APPSTORE` are source builds); every linked component has bundled licence files and no test-only component is listed |
+| Store build check | `bash Scripts/release-check.sh <path-to-MeshLive.app> [--store] [--archive <xcarchive>]` | Read-only, one PASS/FAIL per check: version 1.0 and an integer build, encryption false, the three usage strings, no local-network key and iOS 17.0 on the iPhone, the three background modes, the distribution key, the privacy manifest's three categories, the seven licence files in the bundle, the DEBUG argument counts as INFO, the entitlements (no Hotspot, no get-task-allow) and the dSYM UUID. It accepts an iPhone bundle (`Info.plist` at the root) or a Mac bundle (`Contents/Info.plist`, resources in `Contents/Resources`, and the macOS 14.0 floor). Run it on the Release simulator product and the Mac Release product without `--store`; the archive command (A2) runs it with `--store --archive` |
+| Store-release UI | `UITests/StoreReleaseTests`, `MacUITests/StoreReleaseTests` (reviewer runs) | Terms before permissions, Skip landing on the terms, one permissions page, a denial reaching ready, an existing user's terms once, About's legal rows and the store update note, the relay and Experiments gates, no Wi-Fi section by default, and no "beta" on any page |
 
 None of this shows radio, microphone, speaker, camera or battery behaviour.
 
@@ -31,8 +47,17 @@ None of this shows radio, microphone, speaker, camera or battery behaviour.
 
 1. **Install:** `bash Scripts/gui-run.sh install`. This builds, signs (team and bundle in `device-gui.command`), installs and launches through the logged-in GUI session; SSH sessions cannot open the login keychain. Output goes to `.build/device-logs/<stamp>-install/`.
 2. **Before a run:** the iPhone must be unlocked with the screen on and Auto-Lock off; a locked phone refuses the launch. Microphone and camera permission must already be granted. `app_start` logs them and the Bluetooth permission, and `-NearbyRequestPermissions 1` asks once at launch.
-3. **Run:** `bash Scripts/run-scenario.sh call ABCDE-FGHIJ voice 30` (iPhone calls; video works the same), or `bash Scripts/run-scenario.sh answer voice 180` (the iPhone auto-answers). It prints the BENCHMARK summary and the pulled log path. `Scripts/pull-logs.sh` copies all logs.
+3. **Run:** `bash Scripts/run-scenario.sh call ABCDE-FGHIJ voice 30` (iPhone calls; video works the same), or `bash Scripts/run-scenario.sh answer voice 180` (the iPhone auto-answers). It prints the BENCHMARK summary and the pulled log path. `Scripts/pull-logs.sh` copies all logs. DEBUG `-NearbyAutoLive video|audio` (optional `-NearbyAutoLiveTitle <text>`) goes live without a click through the "Go live" choice, never requests a permission, and logs `BENCHMARK autolive: mode=... | result=started|refused | reason=...`; on a Mac add `-wifiAdvice NO` so the Wi-Fi advice cannot hold it.
 4. **Measured on 2026-10-10 (M31, GATT):** voice after the microphone fix: 1476/1476 and 1492/1481 packets each way. Video (before rate control): both directions decoded; iPhone -> M31 was limited to about 125-135 kbps, so the iPhone's video queued. Rerun with `VideoRateController`.
+
+### DEBUG call hooks for unattended runs
+
+`-NearbyAutoDecline plain|block|report` declines every incoming call with the ring screen's action; `-NearbyDeclineAfterS N`
+waits N seconds after it first rings (default 2). `-NearbyAutoCancelAfterS N` cancels an `-NearbyAutoCall` that has not
+become active after N seconds. `-NearbyInjectDecoderKeyFailures N` fails the next N key-frame packets of a call; three
+stop video on this phone. The logs are `call_name` (each name change, never the text) and `decoder_inject` (each injected
+key-frame failure). Release builds ignore all of them (`Automation` is nil in Release). `-NearbyReadyStatus 1` shows the
+ordinary ready status line in fixtures (and hides the Mac preview footer); the store screenshot tests pass it.
 
 ## Physical checks (when an iPhone and Android phones are available)
 
@@ -61,15 +86,15 @@ Measure on hardware before tuning:
 - Physical validation of stream and private-call relaying on an iPhone. Signed audio-only forwarding, unchanged envelopes, admission and overload behavior are covered offline; actual radio behavior is unverified.
 - AV1 hardware decode on A17 Pro/M3 devices.
 - Link reports with measured arrival rate for Android's rate control.
-- Signing and distribution.
+- Signing for distribution, archiving, store metadata and the App Store Connect submission (package A2).
 
 ## Simulator parity (2026-10-18)
 
 An audit of the iPhone UI against the Android layouts, English strings and screenshots found these
-simulator-testable gaps: consistent video/radio row icons and inset separators; outgoing call subjects; contact
+simulator-testable gaps: consistent video/radio row icons and inset separators; contact
 lookup through rotating IDs and its not-nearby dialog; first-run onboarding; the About build number; and
-accessibility at large text sizes. Existing call setup choices, received subjects, contact verification and
-privacy settings remain supported.
+accessibility at large text sizes. Existing call setup choices, contact verification and
+privacy settings remain supported. A call subject is neither offered nor shown (decision 2026-11-05).
 
 Live rows, immediate call choices, recognized contact calling, onboarding, the Settings build number, the typed
 wipe confirmation and signed audio-only forwarding are implemented and simulator-tested. Audio-only relay
@@ -106,7 +131,7 @@ current items, normal startup removes only the legacy namespace, and preview rej
 Native UI tests use preview mode, never grant or reset permissions, and keep screenshots as XCTest attachments
 exported from the result bundle (`bash Scripts/run-macos-uitest.sh`). They need an unlocked desktop and the
 macOS UI-testing (automation) permission. Coverage: launch and window, sidebar and menu navigation, close and
-reopen, close-to-quit, first-run pages, call choices, legacy incoming subjects, Contacts fallback/cancel/Open
+reopen, close-to-quit, first-run pages, call choices, Contacts fallback/cancel/Open
 Nearby, radio Leave, version/build/linked codecs, each experiment switch across relaunch, and generated
 nearby-name rows with call selection.
 
@@ -162,16 +187,44 @@ writes, each rejected-routing reason, notification errors and tracked link count
 service discovery, characteristic discovery, subscription and the setup stage at a timeout. None of these
 fields contain addresses, peer IDs or media content, and none change retry, heartbeat or timeout rules.
 
-### Experiments (all off by default)
+### Experiments and control arms
 
-**Android compatibility** (`experimentalDesktopAndroidCompatibility`): the Mac accepts version-5 and compact-v2
+**Scanner camera states and call media fixtures** (DEBUG; release builds ignore them):
+`-NearbyFixtureCameraPermission authorized|denied|restricted|notDetermined|unknown` and
+`-NearbyFixtureMicrophonePermission authorized|denied|restricted|notDetermined` force the states the scanner and
+`CallMediaAccess.decide` read and make `MediaPermissions.request` return at once without a system prompt, because the
+simulator has no camera and UI tests never reset privacy. `UITests/B1CallsTests` and `MacUITests/B1CallsTests` cover the
+blocked scanner states and a call answered with the camera or microphone off. On a device, deny the camera and
+answer or place a video call (voice, with the notice), deny the microphone (the call keeps ringing, notice and Open
+settings), then allow it in Settings and Scan again.
+
+**Decoder recovery injectors** (DEBUG, calls only): `-NearbyInjectDecoderFailures N` makes the next N decode calls of a
+call throw; `-NearbyInjectDecoderStall 1` swallows the next 30 inputs without output once. `-callVideoRecovery NO` is
+BASE's frozen picture; the default ladder rebuilds, then switches (VP9) or stops video, with the voice unaffected. It
+was checked on devices with an induced link stall.
+
+**Main-thread stall tracer** (DEBUG, no switch): `MainStall` pings the main queue every 0.25 s and logs
+`main_stall_open` while a stall is still running (`stalledMs`, `running` as `a>b`, `runningForMs`, `lastFinished`,
+`lastFinishedAgoMs`) at 0.75 s, 2 s, 5 s, 10 s and every 10 s after that, then `main_stall_end` (`totalMs`,
+`longestMarked`, `longestMarkedMs`). R1-C11 makes a 10-minute video call, locks the iPhone at 4 minutes and expects no
+`main_stall_open` above 2 s; if one appears, its `running=` names the task (the preview layer and `rebuildRecognition`
+are marked, not changed, in B1). Release builds have no tracer and write nothing.
+
+**Calls unavailable** (on; control arm `-callsUnavailableStatus NO`): DEBUG `-NearbyHostingHang YES` never adds the
+call service, as a Bluetooth stack that stops answering (Android `test_call_listen_inject=hang`). With Allow calls on
+and Bluetooth on, the status chip says "Calls unavailable" within about 7 s and the log has `calls_status:
+kind=callsUnavailable | reason=stalled`; the control arm keeps Ready. `-NearbyFixtureCallsUnavailable 1` shows the
+state without a radio (Mac UI test `testCallsUnavailableShowsInTheStatusChip`). `CallsUnavailableTests` covers the 5 s
+rule and the status order.
+
+**Android compatibility** (control arm only since 2026-11-04, DEBUG `-experimentalDesktopAndroidCompatibility YES`): the Mac accepts version-5 and compact-v2
 offers while its own Rotating IDs setting stays off. A selected rotating call uses the existing BMH3 per-attempt
 pseudonym, discovery-opening exchange and selected-offer authentication; BMH3 responder parsing is enabled, and
-Advanced privacy still controls the Mac's own identity presentation. Turning off both this and Rotating IDs hides
+Rotating discovery IDs and Hidden identities (always on; DEBUG launch arguments turn them off) still control the Mac's own identity presentation. Turning off both this and Rotating IDs hides
 cached rotating offers and refuses a previously selected rotating call. `bash Scripts/test.sh --filter
 DesktopCallCompatibilityTests` covers both announcement formats, setup against rotating real-key and pseudonymous
 responders, selected-offer impersonation rejection, audio both ways and hang-up, legacy BMH2 calls and the
-privacy settings, as engine loopbacks without Bluetooth or audio hardware.
+privacy settings, as engine loopbacks without Bluetooth or audio hardware. `testShippedMacSettingsCallADefaultAndroidPhone` covers the shipped settings.
 
 **Rotating advertising scheduler**: with the existing Rotating discovery IDs experiment on, `DesktopDiscoveryAdvertising`
 rotates idle call presence only; live, viewer-request and forwarding offers are not blanked by an old call epoch.
@@ -180,7 +233,7 @@ air with the offer, and delayed callbacks cannot restore an old offer after a me
 `DesktopDiscoveryAdvertisingTests` runs the production scheduler with an injected clock, queue and radio sink.
 Whether macOS changes its on-air Bluetooth address has not been checked.
 
-**Generated nearby names** (`experimentalDesktopGeneratedNames`, Privacy): the Mac reads Android's frozen names-v2
+**Generated nearby names** (always on; control arm `-experimentalDesktopGeneratedNames NO`): the Mac reads Android's frozen names-v2
 lists and pair blocklist (hash-checked), derives the same words from public rotating adverts and applies the same
 collision suffixes. Rows keep their own discovery identity; equal names never merge devices. An incoming caller is
 named from its throwaway ID only while the call engine reports it as pseudonymous; after a reveal the
@@ -224,8 +277,8 @@ failures leave the switch off with the reason.
 Native UI checks with DEBUG `-NearbyPreview` (preview preferences, no radio, media, Login Items or real
 calls): every reachability switch flips, persists across relaunch and is restored; the status item's menu
 offers Open MeshLive (reopens a closed window), Reachable for calls (the status title follows it) and Quit;
-the ring window is absent while MeshLive is frontmost, appears with Decline and Accept while Finder is
-frontmost, and disappears when MeshLive returns.
+the ring window is absent while MeshLive is frontmost, appears with Decline, Voice and Accept (and Decline and
+block / Report for a caller that showed its real key) while Finder is frontmost, and disappears when MeshLive returns.
 
 Not verified: a real incoming call ringing behind another app, the notification permission prompt and Time
 Sensitive delivery, Start at login across a real logout/login with the ad-hoc build (macOS may require
@@ -271,5 +324,4 @@ These are short manual checks on one Mac, not a scored test suite.
 Not tested: live streams to or from the Mac, relays, sleep and wake, other Android models, and Mac-to-iPhone
 calls. The native app is an experimental interoperability build, not a working video-call release.
 
-Current package suite on macOS: 299 tests (218 core, 11 media, 20 retained v1, 46 desktop policy, 4 native
-transport), plus the native Release build and the native UI tests.
+Current package suite on macOS: 823 tests (710 core, 20 media, 20 retained v1, 62 desktop policy, 11 native transport), plus the native Release build and the native UI tests.

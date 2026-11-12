@@ -1,5 +1,8 @@
 import SwiftUI
 import NearbyCore
+#if os(iOS)
+import AVKit
+#endif
 
 /// Call screen (same structure as Android, FaceTime-like on iOS): always dark, full-bleed video, a scrim only
 /// behind the controls, one name line and one state line. Encryption, route and verification live in the call info sheet behind the lock button; the
@@ -13,6 +16,9 @@ struct CallView: View {
     @State private var lastInteraction = Date()
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    #if os(iOS)
+    @StateObject private var route = AudioRouteWatcher()
+    #endif
 
     init(call: CallController) { self.call = call; _sink = ObservedObject(wrappedValue: call.remote.sink) }
 
@@ -22,8 +28,28 @@ struct CallView: View {
         ZStack {
             Palette.callGround.ignoresSafeArea()
             if showsVideo {
-                VideoSurfaceView(sink: sink).ignoresSafeArea()
-                    .onTapGesture { controlsVisible.toggle(); lastInteraction = Date() }
+                // Android RemoteVideoFit: fill close shapes, show a strongly different one whole; a double-tap flips it
+                // for this call. Fill screen with video off always shows the whole picture.
+                GeometryReader { geo in
+                    let fill = RemoteVideoFit.fill(enabled: AppSettings.remoteVideoFit, fillSetting: model.videoFill,
+                                                   override: call.remoteFitOverride, videoAspect: Double(sink.aspect),
+                                                   viewWidth: Double(geo.size.width), viewHeight: Double(geo.size.height))
+                    VideoSurfaceView(sink: sink, fill: fill)
+                        .onTapGesture(count: 2) {
+                            guard AppSettings.remoteVideoFit else { return }
+                            call.remoteFitOverride = !fill
+                            AppLog.event("call_remote_fit", ["fill": "\(!fill)"])
+                        }
+                        .onTapGesture { controlsVisible.toggle(); lastInteraction = Date() }
+                        .accessibilityElement()
+                        .accessibilityLabel("Their video")
+                        .accessibilityAction(named: fill ? "Show the whole picture" : "Fill the screen") {
+                            guard AppSettings.remoteVideoFit else { return }
+                            call.remoteFitOverride = !fill
+                        }
+                        .accessibilityIdentifier("callRemoteVideo")
+                }
+                .ignoresSafeArea()
             } else {
                 VStack(spacing: 20) {
                     Spacer()
@@ -76,38 +102,84 @@ struct CallView: View {
     private var stateLine: String {
         if let ended = call.ended { return ended }
         if call.onHold { return "On hold" }
-        if call.talking { return "Talking" }
+        if call.talking { return "Talking\u{2026}" }
         if call.phase == .active, let since = call.activeSince {
             return TimelineFormatter.duration(Date().timeIntervalSince(since))
         }
         return call.phaseText.isEmpty ? "Connecting…" : call.phaseText
     }
 
+    /// Android callTopBar: the name centred, the state line or timer under it, the lock (call info) at the right.
     private var topBar: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(call.label?.title ?? call.peerName).font(Typo.title).foregroundStyle(.white).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+        HStack(alignment: .top, spacing: 0) {
+            Color.clear.frame(width: 48, height: 48).accessibilityHidden(true)
+            VStack(alignment: .center, spacing: 4) {
+                Group {
+                    if let claimed = call.claimedName, call.label?.contactName == nil {
+                        Text("~").foregroundColor(Palette.dimInk) + Text(claimed)
+                    } else {
+                        Text(call.label?.title ?? call.peerName)
+                    }
+                }
+                .font(Typo.title).foregroundStyle(.white).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(call.claimedNote.map { call.imitates == nil ? "calls itself \(call.claimedName ?? ""), not verified" : "\($0), calls itself \(call.claimedName ?? "")" } ?? (call.label?.title ?? call.peerName))
+                if let note = call.claimedNote {
+                    Text(note).font(Typo.caption).foregroundStyle(Palette.dimInk).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                        .accessibilityHidden(true)
+                }
+                // Android call_incoming_claims: on a ring, a self-chosen name is shown, never as checked.
+                if call.phase == .incomingRinging, call.claimedNote != nil {
+                    Text("calls itself, not checked").font(Typo.caption).foregroundStyle(Palette.dimInk)
+                        .accessibilityHidden(true)
+                }
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                     Text(stateLine).font(Typo.timer).foregroundStyle(.white.opacity(0.75))
                 }
                 if call.phase == .incomingRinging, let notice = call.ringNotice {
-                    Text(notice).font(Typo.caption).foregroundStyle(Palette.dimInk).fixedSize(horizontal: false, vertical: true)
+                    Text(notice).font(Typo.caption).foregroundStyle(Palette.dimInk).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                }
+                // Android call_incoming_stranger_note: a stranger behind a throwaway key with no name of its own.
+                if call.phase == .incomingRinging, call.ringNotice != nil, call.claimedName == nil {
+                    Text("Not verified. A new call from the same phone shows a new name.").font(Typo.caption).foregroundStyle(Palette.dimInk)
+                        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
                 }
                 if call.remoteMuted && call.phase == .active {
                     Label("Their microphone is off", systemImage: "mic.slash.fill").font(Typo.caption).foregroundStyle(Palette.dimInk)
                 }
                 if let health = model.healthMessage, call.ended == nil {
-                    Label(health, systemImage: "thermometer.medium").font(Typo.caption).foregroundStyle(Palette.accent)
+                    Label(health, systemImage: "thermometer.medium").font(Typo.caption).foregroundStyle(Palette.accent).accessibilityIdentifier("callHealth")
                 }
-                if let subject = call.subject {
-                    Text(subject).font(Typo.secondary).foregroundStyle(.white.opacity(0.9)).lineLimit(typeSize.isAccessibilitySize ? nil : 2)
+                if model.showTemperature, call.ended == nil {
+                    Label(StatusSheet.health, systemImage: "thermometer.medium").font(Typo.caption).foregroundStyle(Palette.dimInk)
+                        .accessibilityIdentifier("deviceTemperature")
                 }
                 if let problem = call.mediaProblem, call.ended == nil {
                     Label(problem, systemImage: "exclamationmark.triangle.fill").font(Typo.caption).foregroundStyle(Palette.accent)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                }
+                if let notice = call.videoNotice, call.ended == nil {
+                    Text(notice).font(Typo.caption).foregroundStyle(Palette.dimInk)
+                        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("callVideoNotice")
+                }
+                if let notice = call.accessNotice, call.ended == nil {
+                    VStack(spacing: 8) {
+                        Text(notice).font(Typo.caption).foregroundStyle(Palette.dimInk)
+                            .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("callAccessNotice")
+                        if call.accessNoticeOpensSettings {
+                            Button { AppPlatform.openSettings() } label: {
+                                Text("Open settings").font(Typo.caption.weight(.semibold)).foregroundStyle(.black)
+                                    .padding(.horizontal, 12).padding(.vertical, 7).background(Color.white, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("callAccessSettings")
+                        }
+                    }
                 }
             }
-            Spacer()
+            .frame(maxWidth: .infinity)
             if call.fingerprint != nil {
                 Button { showInfo = true; lastInteraction = Date() } label: {
                     Image(systemName: call.verification == .verified ? "lock.shield.fill" : "lock.fill")
@@ -115,9 +187,11 @@ struct CallView: View {
                         .foregroundStyle(call.verification == .verified ? Palette.connected : Palette.ink)
                 }
                 .accessibilityLabel("Call info: encryption and verification")
+            } else {
+                Color.clear.frame(width: 48, height: 48).accessibilityHidden(true)
             }
         }
-        .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 24)
+        .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 24)
         .background(showsVideo ? AnyView(LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom).ignoresSafeArea()) : AnyView(Color.clear))
     }
 
@@ -132,17 +206,88 @@ struct CallView: View {
         .padding(.horizontal, 16)
     }
 
-    @ViewBuilder private var callControls: some View {
-        MuteControl(call: call) { lastInteraction = Date(); maybeShowHoldHint() }
-        RoundControl(icon: call.cameraOn ? "video.fill" : "video.slash.fill",
-                     label: call.cameraOn ? "Video off" : (call.callType == .voice ? "Add video" : "Video on")) { call.toggleCamera(); lastInteraction = Date() }
+    // MARK: Android activeCallControls: Mute, Camera, End, Flip, Speaker; End in the middle; a control with nothing to
+    // do keeps its slot (Flip is disabled while the camera is off), so End never moves.
+
+    private var muteSlot: some View {
+        MuteControl(call: call, size: 64) { lastInteraction = Date(); maybeShowHoldHint() }
+    }
+
+    private var cameraSlot: some View {
+        // White while the video is off in a video call (Android "checked"); a voice call's Add video is never white.
+        let off = !call.cameraOn && call.callType == .video
+        // Android critical heat: video cannot start (turning it off always works).
+        let tooHot = model.videoBlockedByHeat && !call.cameraOn
+        return RoundControl(icon: call.cameraOn ? "video.fill" : "video.slash.fill",
+                            label: call.cameraOn ? "Video off" : (call.callType == .voice ? "Add video" : "Video on"),
+                            fill: off ? .white : Palette.callControl, foreground: off ? .black : .white, size: 64) {
+            call.toggleCamera(); lastInteraction = Date()
+        }
+        .disabled(tooHot)
+        .opacity(tooHot ? 0.5 : 1)
+        .accessibilityHint(tooHot ? AppModel.tooHotText : (call.cameraOn ? "Turn your video off" : (call.callType == .voice ? "Turn on your video. The other person chooses whether to turn on theirs." : "Turn your video on")))
+        .accessibilityIdentifier("callCamera")
+    }
+
+    private var endSlot: some View {
+        RoundControl(icon: "phone.down.fill", label: "End", fill: Palette.callEnd, size: 72) { call.end() }
+            .accessibilityHint("Ends the call")
+            .accessibilityIdentifier("callEnd")
+    }
+
+    /// iPhone: the other lens, whenever the camera is on. Mac: the next camera, with two or more.
+    private var flipAvailable: Bool {
         #if os(macOS)
-        if call.cameraOn { DesktopCameraPicker().frame(maxWidth: 220) }
+        return call.cameraOn && DesktopCameraDevices.available.count > 1
         #else
-        if call.cameraOn { RoundControl(icon: "camera.rotate.fill", label: "Flip") { call.flipCamera(); lastInteraction = Date() } }
+        return call.cameraOn
         #endif
-        RoundControl(icon: "speaker.wave.2.fill", label: AppPlatform.isMac ? "Sound" : "Speaker", fill: call.speaker ? .white : Palette.callControl,
-                     foreground: call.speaker ? .black : .white) { call.toggleSpeaker(); lastInteraction = Date() }
+    }
+
+    private var flipSlot: some View {
+        RoundControl(icon: "camera.rotate.fill", label: "Flip", size: 64) { call.flipCamera(); lastInteraction = Date() }
+            .disabled(!flipAvailable)
+            .opacity(flipAvailable ? 1 : 0.5)
+            .accessibilityHint(AppPlatform.isMac ? "Switch to the next camera" : "Switch between front and back camera")
+            .accessibilityIdentifier("callFlip")
+    }
+
+    @ViewBuilder private var speakerSlot: some View {
+        #if os(iOS)
+        if route.external {
+            // Android CallOutputSheet: with a headset or Bluetooth audio present, the system's audio output picker.
+            AudioOutputControl(label: route.label).accessibilityIdentifier("callSpeaker")
+        } else {
+            RoundControl(icon: call.speaker ? "speaker.wave.2.fill" : "speaker.wave.1.fill", label: call.speaker ? "Speaker" : "Earpiece",
+                         fill: call.speaker ? .white : Palette.callControl, foreground: call.speaker ? .black : .white, size: 64) {
+                call.toggleSpeaker(); lastInteraction = Date()
+            }
+            .accessibilityHint(call.speaker ? "Sound plays from the speaker. Tap to use the earpiece." : "Sound plays from the earpiece. Tap to use the speaker.")
+            .accessibilityIdentifier("callSpeaker")
+        }
+        #else
+        RoundControl(icon: "speaker.wave.2.fill", label: "Sound", fill: call.speaker ? .white : Palette.callControl,
+                     foreground: call.speaker ? .black : .white, size: 64) { call.toggleSpeaker(); lastInteraction = Date() }
+            .accessibilityIdentifier("callSpeaker")
+        #endif
+    }
+
+    /// One row of five equal columns; at accessibility text sizes three lines with End alone in the middle line.
+    private var activeRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 0) {
+                muteSlot.frame(maxWidth: .infinity)
+                cameraSlot.frame(maxWidth: .infinity)
+                endSlot.frame(maxWidth: .infinity)
+                flipSlot.frame(maxWidth: .infinity)
+                speakerSlot.frame(maxWidth: .infinity)
+            }
+            VStack(spacing: 16) {
+                HStack(alignment: .top, spacing: 28) { muteSlot; cameraSlot }
+                endSlot
+                HStack(alignment: .top, spacing: 28) { flipSlot; speakerSlot }
+            }
+        }
     }
 
     @ViewBuilder private var bottomControls: some View {
@@ -155,32 +300,47 @@ struct CallView: View {
                 if let line = model.ownNearbyLine { OwnNearbyNameLine(text: line) }
                 let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 20)) : AnyLayout(HStackLayout(spacing: 56))
                 layout {
-                    RoundControl(icon: "phone.down.fill", label: "Decline", fill: Palette.callEnd, foreground: .white, size: 76) { call.decline() }
+                    RoundControl(icon: "phone.down.fill", label: "Decline", fill: Palette.callEnd, foreground: .white, size: 72) { model.declineFromScreen(call) }
+                    // Apple only (product decision): answer a video call with voice.
                     if call.offeredType == .video {
-                        RoundControl(icon: "phone.fill", label: "Voice", size: 76) { call.accept(as: .voice) }
+                        RoundControl(icon: "phone.fill", label: "Voice", size: 72) { call.accept(as: .voice) }
                     }
-                    RoundControl(icon: call.offeredType == .video ? "video.fill" : "phone.fill", label: "Accept", fill: Palette.callAccept, foreground: .black, size: 76) {
+                    RoundControl(icon: call.offeredType == .video ? "video.fill" : "phone.fill", label: "Accept", fill: Palette.callAccept, foreground: .black, size: 72) {
                         call.accept(as: call.offeredType)
                     }
                 }
-            } else {
-                if call.phase == .active || call.phase == .negotiatingMedia {
-                    if showHoldHint {
-                        Text("Hold Mute to talk").font(Typo.secondary).foregroundStyle(.white)
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(Palette.callControl, in: Capsule())
-                            .transition(.opacity)
+                // Android: only for a caller that showed its real key (a one-time ID cannot be blocked one by one).
+                if call.fingerprint != nil {
+                    HStack(spacing: 32) {
+                        // Android TextButton: a 48 dp touch target around the text, same look.
+                        Button("Decline and block") { model.declineAndBlock(call) }
+                            .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                            .accessibilityIdentifier("declineAndBlock")
+                        Button("Report") { model.declineAndReport(call) }
+                            .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                            .accessibilityIdentifier("declineAndReport")
                     }
-                    // One row; at large Dynamic Type sizes the controls wrap into a grid instead of being clipped.
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 18) { callControls }
-                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) { callControls }
-                    }
+                    .font(Typo.secondary.weight(.semibold)).foregroundStyle(.white).buttonStyle(.plain)
                 }
-                RoundControl(icon: "phone.down.fill", label: call.phase == .active ? "End" : "Cancel", fill: Palette.callEnd, size: 68) { call.end() }
+            } else if call.phase == .active || call.phase == .negotiatingMedia {
+                if showHoldHint {
+                    Text("Tip: hold Mute to talk").font(Typo.secondary).foregroundStyle(.white)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Palette.callControl, in: Capsule())
+                        .transition(.opacity)
+                }
+                activeRow
+                #if os(macOS)
+                // The Mac's camera picker stays (gap audit); Flip also moves to the next camera.
+                if call.cameraOn { DesktopCameraPicker().frame(maxWidth: 220) }
+                #endif
+            } else {
+                // Calling or ringing (Android cancelCallButton): Cancel alone, in the middle.
+                RoundControl(icon: "phone.down.fill", label: "Cancel", fill: Palette.callEnd, size: 72) { call.end() }
+                    .accessibilityIdentifier("callEnd")
             }
         }
-        .padding(.horizontal, 20).padding(.top, 28).padding(.bottom, 24)
+        .padding(.horizontal, 12).padding(.top, 28).padding(.bottom, 24)
         .frame(maxWidth: .infinity)
         .background(showsVideo ? AnyView(LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .top, endPoint: .bottom).ignoresSafeArea()) : AnyView(Color.clear))
     }
@@ -199,10 +359,16 @@ struct CallInfoSheet: View {
     @ObservedObject var call: CallController
     @Environment(\.dismiss) private var dismiss
     @State private var message: String?
+    private var securityTitle: String {
+        if let count = call.relayCount, count > 0 {
+            return count == 1 ? "Encrypted, through 1 other phone" : "Encrypted, through \(count) other phones"
+        }
+        return call.relayed ? "Encrypted, through other phones" : "Encrypted, direct"
+    }
     var body: some View {
         List {
             Section {
-                InfoLine(icon: AppIcon.lock, tint: Palette.connected, title: "Encrypted end to end",
+                InfoLine(icon: AppIcon.lock, tint: Palette.connected, title: securityTitle,
                          detail: call.relayed ? "Your call passes through other phones near you. They cannot hear or see it." : "Directly between your two phones.")
                 switch call.verification {
                 case .verified:
@@ -219,21 +385,55 @@ struct CallInfoSheet: View {
                     Text("Read this code aloud. Their screen must show exactly the same numbers.").font(Typo.secondary)
                     Text(formatCode(code)).font(.system(.title3, design: .monospaced)).textSelection(.enabled)
                     if call.verification != .verified {
-                        Button("The codes match") {
+                        Button("Codes match: mark as verified") {
                             guard let fp = call.fingerprint else { return }
-                            do { try model.markVerified(sessionPeer: fp, name: call.label?.title ?? call.peerName); call.verification = .verified; message = "Saved as verified." }
+                            let claim = call.claimedName.flatMap { c in model.contacts.contains { NameReading.same(c, $0.displayName) } ? nil : c }
+                            do { try model.markVerified(sessionPeer: fp, name: call.label?.contactName ?? claim ?? call.label?.handle ?? call.peerName); call.verification = .verified; message = "Saved as verified." }
                             catch { message = "Could not save: \(error)" }
                         }
                         .tint(Palette.accent)
                     }
                     if let message { Text(message).font(Typo.caption).foregroundStyle(Palette.dimInk) }
-                } header: { Text("Safety code") }
+                } header: { Text("Safety code with \(call.label?.title ?? call.peerName)") }
             }
+            // Android Link health, for every call: the connection; for a video call what was asked for, what the link allows
+            // now and why it is lower (Settings › Manual video: never changed silently); the sound bitrate once active.
+            Section {
+                Text("Connection: Bluetooth \(call.transport.label)").accessibilityIdentifier("callConnection")
+                if call.callType == .video {
+                    Text("Your video: \(call.requestedVideo.width)\u{00D7}\(call.requestedVideo.height), \(call.requestedVideo.fps) fps, \(call.requestedVideo.kbps) kbps requested")
+                        .accessibilityIdentifier("callVideoRequested")
+                    if let allows = call.videoAllowsKbps {
+                        Text("Link currently allows about \(allows) kbps").accessibilityIdentifier("callVideoSending")
+                    }
+                    ForEach(call.videoNotes, id: \.self) { note in
+                        Text(note).font(Typo.caption).foregroundStyle(Palette.dimInk)
+                    }
+                }
+                if call.phase == .active {
+                    Text("Sound: \(CallController.audioBitrate / 1_000) kbps").accessibilityIdentifier("callSound")
+                }
+            } header: { Text("Link health") }
             Section {
                 if let label = call.label { LabeledContent("ID", value: label.handle).font(.body.monospaced()) }
                 Text(call.stats).font(Typo.caption).foregroundStyle(Palette.dimInk)
+                // Android Link health "Copy diagnostics": the export plus this call's encryption, route, verification
+                // state and link counters. Never the ID, the name or the safety code.
+                Button("Copy diagnostics") {
+                    let verification: String
+                    switch call.verification {
+                    case .verified: verification = "Verified"
+                    case .mismatch: verification = "ID changed"
+                    case .unverified: verification = "Not verified yet"
+                    }
+                    let rows = ["Encrypted end to end", call.relayed ? "Through other phones" : "Direct", verification, call.stats]
+                    DiagnosticsSheet.copy(DiagnosticsReport.withCall(DiagnosticsExport.text(), rows: rows))
+                    message = "Copied"
+                }
+                .accessibilityIdentifier("copyCallDiagnostics")
+                if let message, call.safetyCode == nil { Text(message).font(Typo.caption).foregroundStyle(Palette.dimInk) }
             } header: { Text("Link details") } footer: {
-                FooterText("Scanning their code needs the camera, which your call is using. Compare the safety code now, or scan from Your identity after the call.")
+                FooterText("The camera is in use by your call. Compare the safety code above instead, or scan their code from Contacts \u{203A} Add contact right after the call.")
             }
         }
         .monoList()
@@ -251,6 +451,8 @@ func formatCode(_ code: String) -> String {
 /// Mute: a tap toggles; while muted, press and hold to talk (release = muted again).
 struct MuteControl: View {
     @ObservedObject var call: CallController
+    /// Android RoundControl: 64 in the call row.
+    var size: CGFloat = 64
     var interacted: () -> Void
     @State private var pressStart: Date?
     @State private var holdWork: DispatchWorkItem?
@@ -258,7 +460,7 @@ struct MuteControl: View {
 
     var body: some View {
         let active = call.muted && !call.talking
-        let side = 60 * min(scale, 1.4)
+        let side = size * min(scale, 1.4)
         VStack(spacing: 6) {
             Image(systemName: call.talking ? "mic.fill" : (call.muted ? "mic.slash.fill" : "mic.fill"))
                 .font(.system(size: side * 0.36, weight: .semibold))
@@ -266,7 +468,7 @@ struct MuteControl: View {
                 .background(call.talking ? Palette.connected : (active ? .white : Palette.callControl), in: Circle())
                 .foregroundStyle(call.talking ? .white : (active ? .black : .white))
                 .scaleEffect(call.talking ? 1.08 : 1)
-            Text(call.talking ? "Talking" : (call.muted ? "Unmute" : "Mute")).font(Typo.caption).foregroundStyle(.white)
+            Text(call.talking ? "Talking\u{2026}" : (call.muted ? "Unmute" : "Mute")).font(Typo.caption).foregroundStyle(.white)
                 .lineLimit(1).fixedSize()
         }
         .contentShape(Rectangle())
@@ -287,8 +489,82 @@ struct MuteControl: View {
             })
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(call.muted ? "Unmute" : "Mute")
-        .accessibilityHint(call.muted ? "Double-tap to unmute. Touch and hold to talk while muted." : "Double-tap to mute.")
+        .accessibilityHint(call.muted ? "Unmute your microphone. Touch and hold to talk while you hold." : "Double-tap to mute.")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { call.toggleMute(); interacted() }
     }
 }
+
+#if os(iOS)
+/// The current audio output (Android PrivateCallAudioSession labels: Speaker, Earpiece, Headset, Bluetooth) and whether a
+/// headset or Bluetooth output is present, in the route or among the available inputs.
+final class AudioRouteWatcher: ObservableObject {
+    @Published private(set) var external = false
+    @Published private(set) var label = "Speaker"
+    private let queue = DispatchQueue(label: "io.github.meshlive.app.audio.route", qos: .utility)
+    private var observer: NSObjectProtocol?
+
+    init() {
+        observer = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.refresh()
+        }
+        refresh()
+    }
+
+    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+
+    /// The session is read on a utility queue; only `external` and `label` are published, on the main queue. The
+    /// notification arrives on whatever thread posts it, so only the main-side publish is marked for the stall tracer.
+    private func refresh() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let session = AVAudioSession.sharedInstance()
+            let outputs = session.currentRoute.outputs.map(\.portType)
+            let headset: [AVAudioSession.Port] = [.headphones, .usbAudio]
+            let bluetooth: [AVAudioSession.Port] = [.bluetoothA2DP, .bluetoothHFP, .bluetoothLE]
+            let inputs = (session.availableInputs ?? []).map(\.portType)
+            let external = outputs.contains { headset.contains($0) || bluetooth.contains($0) }
+                || inputs.contains { $0 == .headsetMic || $0 == .bluetoothHFP || $0 == .usbAudio }
+            let label = outputs.contains { bluetooth.contains($0) } ? "Bluetooth"
+                : outputs.contains { headset.contains($0) } ? "Headset"
+                : outputs.contains(.builtInReceiver) ? "Earpiece" : "Speaker"
+            DispatchQueue.main.async {
+                MainStall.run("AudioRouteWatcher.publish") {
+                    if self.external != external { self.external = external }
+                    if self.label != label { self.label = label }
+                }
+            }
+        }
+    }
+}
+
+/// The Speaker slot with a headset or Bluetooth present: Apple's audio output picker in the round control's disc,
+/// labelled with the current output (Android CallOutputSheet: Phone speaker, Earpiece, the device by name).
+struct AudioOutputControl: View {
+    let label: String
+    @ScaledMetric(relativeTo: .caption) private var scale: CGFloat = 1
+    var body: some View {
+        let side = 64 * min(scale, 1.4)
+        VStack(spacing: 6) {
+            RoutePicker()
+                .frame(width: side * 0.6, height: side * 0.6)
+                .frame(width: side, height: side)
+                .background(Palette.callControl, in: Circle())
+                .accessibilityLabel("Audio output: \(label)")
+                .accessibilityHint("Tap to choose the audio output.")
+            Text(label).font(Typo.caption).foregroundStyle(.white).lineLimit(1).fixedSize().accessibilityHidden(true)
+        }
+    }
+}
+
+private struct RoutePicker: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let view = AVRoutePickerView()
+        view.tintColor = .white
+        view.activeTintColor = .white
+        view.prioritizesVideoDevices = false
+        return view
+    }
+    func updateUIView(_ view: AVRoutePickerView, context: Context) {}
+}
+#endif

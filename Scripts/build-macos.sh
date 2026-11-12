@@ -9,7 +9,7 @@ config="${1:-Debug}"
 source Scripts/macos-signing.sh
 derived="${DERIVED:-.build/dd-mac}"
 xcodebuild -project MeshLive.xcodeproj -scheme MeshLive -configuration "$config" -destination "platform=macOS" \
-    -derivedDataPath "$derived" ${MAC_SIGNING[@]+"${MAC_SIGNING[@]}"} build
+    -derivedDataPath "$derived" ${MAC_SIGNING[@]+"${MAC_SIGNING[@]}"} MESHLIVE_SOURCE_COMMIT="$(git rev-parse --short=7 HEAD 2>/dev/null || true)" build
 app="$derived/Build/Products/$config/MeshLive.app"
 codesign --verify --strict "$app"
 echo "Built $app"
