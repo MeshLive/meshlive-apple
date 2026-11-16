@@ -162,14 +162,3 @@ privately: see [SECURITY.md](SECURITY.md). MeshLive has not had an independent s
 GPL-3.0-or-later, copyright (C) 2026 The MeshLive Authors ([AUTHORS](AUTHORS)). See [LICENSE](LICENSE) and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The build scripts download the pinned libopus and libvpx sources;
 no third-party binaries are included.
-
-## Star history
-
-<div align="center">
-<a href="https://star-history.com/#MeshLive/meshlive-apple&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=MeshLive/meshlive-apple&type=Date&theme=dark" />
-    <img alt="Star history" src="https://api.star-history.com/svg?repos=MeshLive/meshlive-apple&type=Date" />
-  </picture>
-</a>
-</div>
