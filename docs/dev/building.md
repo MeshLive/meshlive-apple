@@ -80,8 +80,8 @@ which runs it in that session and passes these variables along.
 
 ## Archive for the App Store
 
-`Scripts/archive.sh` archives and exports the app locally. It never uploads anything; uploading is a separate manual
-step in Xcode or App Store Connect by the owner.
+`Scripts/archive.sh` archives and exports the app locally. It uploads no build; the export can contact App Store
+Connect for signing. Uploading is a separate manual step in Xcode or App Store Connect by the owner.
 
 ```sh
 MESHLIVE_TEAM=<team ID> bash Scripts/archive.sh ios 12

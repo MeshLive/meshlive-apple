@@ -1,5 +1,5 @@
 #!/bin/bash
-# Archive and export MeshLive for the App Store. It never uploads.
+# Archive and export MeshLive for the App Store. It uploads no build; the export can contact App Store Connect for signing.
 #
 #   Scripts/archive.sh ios|mac [BUILD] [--out DIR] [--dry-run]
 #
