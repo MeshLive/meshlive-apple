@@ -3,11 +3,10 @@
 Which iPhones and Macs MeshLive has been tried on, and how it went. The iPhone app needs iOS 17 or newer; the native
 Mac app needs an Apple Silicon Mac with macOS 14 or newer.
 
-**There is no pass yet.** Apple-device testing so far is a few manual and scripted runs by the maintainers: short
-calls of 20 to 45 seconds over Bluetooth LE GATT, without quality gates. Interoperability is mainly checked offline,
-with byte-level test vectors produced by the Android app's own classes ([testing](dev/testing.md)). The screens added
-in November 2026 after the verification codes (contacts, video settings, and the Calls and Live changes) have not been
-installed on an iPhone yet.
+**There is no formal pass yet.** Apple-device testing is manual and scripted runs by the maintainers over Bluetooth
+LE GATT, without quality gates. Interoperability is also checked offline, with byte-level test vectors produced by
+the Android app's own classes ([testing](dev/testing.md)). Before version 1.0 went on the App Store, its test builds
+were tested on an iPhone 12 with Android phones and a Mac in November 2026 (the last row).
 
 ## Results so far
 
@@ -18,11 +17,11 @@ installed on an iPhone yet.
 | Apple Silicon Mac, macOS 26 (native app) | current, 2026-10-24 to 10-26 | several Android phones, mostly a Samsung Galaxy S24 (MeshLive 0.3.1-beta, Android 16) | discovery, voice and video calls over LE GATT | partial: voice calls worked both ways; video calls decode both ways but always dropped after 17 s to about 5.5 min ([details](dev/testing.md#hardware-results-release-app-mac-with-android-phones-over-gatt)). Advertises with the Mac's fixed Bluetooth address (macOS limitation); see [privacy](privacy.md#on-a-mac) |
 | iPhone 12, iOS 26.5 | build of 2026-11-05 (verification codes) | Apple Silicon Mac, macOS 27 (native app, same build) | discovery, voice and video calls both ways over LE GATT, adding each other by code (a test helper read the code instead of the camera), the iPhone app in the background and closed mid-call | partial: every test passed in 20-45 s calls; turning Bluetooth off and locking the iPhone mid-call were not tried |
 | iPhone 12 and the Mac (native app) | build of 2026-11-05 (verification codes) | Samsung Galaxy M31 (Android 12, MeshLive for Android with default settings) | voice and video calls both ways between each Apple device and the phone, over LE GATT | partial: every direction connected and carried audio and video for 20-26 s; the iPhone and the Mac listed the Android phone only while it showed its code or once it was a contact |
+| iPhone 12, iOS 26.5 | test builds of 1.0 (the App Store version), 2026-11-12 to 11-13 | Samsung Galaxy M31 (Android 12) and OPPO A15s with MeshLive for Android; an Apple Silicon Mac | short voice and video calls both ways (the iPhone sends hardware HEVC video), watching video and audio-only streams (audio also with the screen locked), adding contacts by scanning codes with the camera, Decline and block, locking and leaving the app during a call, an incoming phone call, Airplane mode on and off, a fresh install with the camera or microphone refused, a Release-build call | partial: all of these worked, several after fixes made during the tests; turning Bluetooth off mid-call was fixed but not re-tested; one 9.4 s freeze when locking during a call ended that call and was not seen in two retests; AirPods, wired headsets, long calls and sleep were not tried |
 
-**Not tested yet:** the Experimental in-call link renewal (off by default; on an armed iPhone it needs the app in the
-foreground), LE L2CAP CoC, relaying, audio-only live, live streams on the current build, scanning a code with
-the camera, the emergency wipe on a device, other iPhone and Mac models, and the screens added after the
-verification codes.
+**Not tested yet:** the Experimental in-call link renewal outside scripted runs (off by default; on an armed iPhone
+it needs the app in the foreground), LE L2CAP CoC, relaying, the emergency wipe on a device, AirPods and wired
+headsets, long calls, and other iPhone and Mac models.
 
 ## Add your device
 

@@ -77,10 +77,12 @@ If you are unsure whether something is in scope, report it privately anyway.
   AES-256-GCM), but the protocol has been reviewed only by the project and its reviewers.
 - **Bluetooth metadata is visible.** Anyone in radio range can see advertisements, connection timing, and the size
   and timing of encrypted records. Encryption protects content, not the fact that you are communicating.
-- **A stable discovery prefix is broadcast while the app advertises.** A passive scanner could recognise the same
-  phone over time. Rotating discovery IDs exist behind an **Experimental** switch and are not yet validated on
-  phones. See [Privacy](docs/privacy.md#what-nearby-phones-can-see).
-- **The app has had very little hardware testing.** Treat its behaviour on a real iPhone or Mac as unproven.
+- **Some broadcasts carry a stable ID.** While ready for calls the app advertises a rotating ID that changes every
+  15 minutes, but live streams it offers or joins can still carry a stable ID prefix, and a Mac always uses its
+  fixed Bluetooth address. See [Privacy](docs/privacy.md#what-nearby-phones-can-see).
+- **Hardware testing is limited.** Before version 1.0 went on the App Store, the iPhone app was tested mainly on an
+  iPhone 12 and the native Mac app on an Apple Silicon Mac, both with Android phones; other models, long calls and
+  crowded places have had little testing. See [Devices](docs/devices.md).
 - **Experimental features are experimental.** Anything in the [switch register](docs/dev/switches.md) marked experimental is off by default and has
   had less review.
 - **Emergency wipe has limits** (see "Emergency wipe" in the [Android protocol reference](https://github.com/MeshLive/meshlive-android/blob/main/docs/dev/protocol/identity.md#emergency-wipe)): it cannot reach copies outside the app and

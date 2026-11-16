@@ -86,7 +86,6 @@ Measure on hardware before tuning:
 - Physical validation of stream and private-call relaying on an iPhone. Signed audio-only forwarding, unchanged envelopes, admission and overload behavior are covered offline; actual radio behavior is unverified.
 - AV1 hardware decode on A17 Pro/M3 devices.
 - Link reports with measured arrival rate for Android's rate control.
-- Signing for distribution, archiving, store metadata and the App Store Connect submission (package A2).
 
 ## Simulator parity (2026-10-18)
 

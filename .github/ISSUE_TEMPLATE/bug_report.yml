@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        MeshLive for iPhone and Mac is early and has had very little hardware testing, so reports are valuable.
+        MeshLive for iPhone and Mac is early and has been tested on only a few iPhones and Macs, so reports are valuable.
 
         Do not attach photos, videos, recordings or screenshots of other people, and do not paste Bluetooth
         addresses, identity keys or full node IDs. Describe the phones by model instead.
@@ -30,8 +30,8 @@ body:
     id: app
     attributes:
       label: App version and commit
-      description: The git commit you built from (git rev-parse --short HEAD), and whether you used a simulator, a real iPhone or the Mac app.
-      placeholder: "0.3.0 (3), commit abc1234, real iPhone"
+      description: The version and commit in Settings > About this app (App Store or your own build), and whether you used a simulator, a real iPhone or the Mac app.
+      placeholder: "1.0 (build 3, release), App Store, real iPhone"
     validations:
       required: true
   - type: dropdown

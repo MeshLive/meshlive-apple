@@ -6,8 +6,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you. There is **no pass yet** in the device table (docs/devices.md) because the apps have had almost
-        no hardware testing; your report is how we fill it.
+        Thank you. There is **no formal pass yet** in the device table (docs/devices.md): the apps have been tested on
+        only a few iPhones and Macs, and your report is how we fill it.
 
         Please answer for **your own iPhone or Mac** (the Mac app is experimental), tested with at least one Android
         phone running MeshLive. For each
@@ -45,8 +45,8 @@ body:
     id: app
     attributes:
       label: App version and commit
-      description: The git commit you built from (git rev-parse --short HEAD) and the Xcode version you built with.
-      placeholder: "0.3.0 (3), commit abc1234, Xcode 26.1"
+      description: The version in Settings > About this app and whether it came from the App Store; for your own build, also the git commit (git rev-parse --short HEAD) and the Xcode version.
+      placeholder: "1.0 (build 3, release), App Store"
     validations:
       required: true
   - type: input

@@ -1,7 +1,8 @@
 # Building from source
 
-There is no App Store, TestFlight or other binary release of MeshLive for iPhone or Mac. To run it you build it
-yourself. This page is the developer view; the [user guide](../user-guide.md#install) has the short version.
+The iPhone app is on the [App Store](https://apps.apple.com/app/id6834136798). The Mac app (coming soon to the Mac
+App Store) and development builds of either app are built from source as described here. This page is the developer view; the
+[user guide](../user-guide.md#install) has the short version.
 
 ## Requirements
 

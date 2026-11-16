@@ -1,9 +1,9 @@
 # Contributing to MeshLive for iPhone and Mac
 
 Thank you for wanting to help. MeshLive sends live video and voice calls between nearby phones over Bluetooth with
-no internet. This repository is the iPhone app and the experimental native Mac app. Both are early and have had very little
-hardware testing, so the most valuable contribution is usually a **test report from a real iPhone or Mac** paired
-with an Android phone. You do not need
+no internet. This repository is the iPhone app (on the App Store) and the experimental native Mac app. Both are
+early and have been tested on only a few iPhones and Macs ([devices](docs/devices.md)), so the most valuable
+contribution is usually a **test report from another iPhone or Mac** paired with an Android phone. You do not need
 to write code to help.
 
 By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md). If you found a security problem, do

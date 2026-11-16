@@ -18,11 +18,11 @@ No internet, no SIM, no account.
   <a href="https://github.com/MeshLive/meshlive-apple/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/MeshLive/meshlive-apple/ci.yml?branch=main&style=flat&label=CI&color=181717&labelColor=000000&logo=githubactions&logoColor=white" /></a>
 </p>
 
-<a href="docs/dev/building.md#iphone-app-and-package-tests"><img alt="Build for iPhone" src="https://img.shields.io/badge/Build%20for-iPhone-181717?style=for-the-badge&logo=apple&logoColor=white" height="40" /></a>
-&nbsp;
+<a href="https://apps.apple.com/app/id6834136798"><img alt="Download on the App Store" src="https://toolbox.marketingtools.apple.com/api/v2/badges/download-on-the-app-store/black/en-us" height="56"></a>
+
 <a href="docs/dev/building.md#native-macos-app-experimental"><img alt="Build for Mac" src="https://img.shields.io/badge/Build%20for-Mac-181717?style=for-the-badge&logo=apple&logoColor=white" height="40" /></a>
 
-<sub>Free · open source · no App Store build yet · <a href="docs/user-guide.md#install">How to install</a></sub>
+<sub>Free · open source · iPhone app on the App Store · Mac app coming soon to the Mac App Store · <a href="https://meshlive.github.io">meshlive.github.io</a> · <a href="docs/user-guide.md#install">How to install</a></sub>
 
 <br/>
 <br/>
@@ -92,17 +92,19 @@ livestream or call hops from device to device, so the more people around you use
 
 | Platform | Status |
 | --- | --- |
-| iPhone (iOS 17+) | Build it yourself (no App Store or TestFlight build yet). Voice and video calls with Android phones and with a Mac, watching livestreams and adding contacts were tested on an iPhone 12 in November 2026. |
-| Mac (Apple Silicon, macOS 14+) | Build it yourself. Experimental native app: voice and video calls with an iPhone and with Android phones work in both directions. |
+| iPhone (iOS 17+) | Available: [App Store](https://apps.apple.com/app/id6834136798) ("MeshLive: Live Video & Calls", version 1.0). Tested on an iPhone 12 with Android phones and a Mac. You can also build it yourself. |
+| Mac (Apple Silicon, macOS 14+) | Coming soon to the Mac App Store; build it yourself meanwhile. Experimental native app: voice and video calls with an iPhone and with Android phones work in both directions. |
 | Android 10+ | Available: [meshlive-android](https://github.com/MeshLive/meshlive-android) |
 | Windows | Beta: [meshlive-windows](https://github.com/MeshLive/meshlive-windows/releases/latest) |
+
+Downloads for every platform and demo videos are on [meshlive.github.io](https://meshlive.github.io).
 
 Android phones list iPhones and Macs by default (Settings > Advanced > Connection > Find iPhones); see
 [Talking to Android phones](docs/user-guide.md#talking-to-android-phones).
 
 ### Build it yourself
 
-You need a Mac with Xcode 26 or later and Python 3:
+For the Mac app, or to run your own build on an iPhone, you need a Mac with Xcode 26 or later and Python 3:
 
 ```sh
 git clone https://github.com/MeshLive/meshlive-apple.git && cd meshlive-apple
@@ -127,7 +129,7 @@ Mac always uses its fixed Bluetooth address. What nearby devices can and can't s
 
 | Document | What it covers |
 | --- | --- |
-| [User guide](docs/user-guide.md) | Install (build it yourself), use the app, talk to Android phones, common questions |
+| [User guide](docs/user-guide.md) | Install (App Store or build it yourself), use the app, talk to Android phones, common questions |
 | [Privacy](docs/privacy.md) | What nearby devices can see, what is hidden, and the known limits |
 | [Supported devices](docs/devices.md) | Which iPhones and Macs have been tried and how it went; report yours |
 
